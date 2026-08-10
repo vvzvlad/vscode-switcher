@@ -80,9 +80,20 @@
 
 ### 2.4 Транскрипт сессии
 
-Путь: `~/.claude/projects/<slug>/<sessionId>.jsonl`, где `slug` — это `cwd` с заменой всех
-`/` на `-` (например `/Users/vvzvlad/Data/Projects/home-network` →
-`-Users-vvzvlad-Data-Projects-home-network`).
+Путь: `~/.claude/projects/<slug>/<sessionId>.jsonl`.
+
+**Правило формирования `slug` — проверено эмпирически, здесь легко ошибиться.** Заменяется
+не только `/`: на `-` заменяется **любой символ, кроме `[A-Za-z0-9-]`**, в том числе `_` и `.`.
+
+| `cwd` | `slug` |
+|---|---|
+| `/Users/vvzvlad/Data/Projects/home-network` | `-Users-vvzvlad-Data-Projects-home-network` |
+| `/Users/vvzvlad/Data/Projects/ukuetis_panel_fw` | `-Users-vvzvlad-Data-Projects-ukuetis-panel-fw` |
+| `/Users/vvzvlad/Data/Projects/glazy_solver` | `-Users-vvzvlad-Data-Projects-glazy-solver` |
+| `/Users/vvzvlad/Data/Projects/wirenboard/wb-mge` | `-Users-vvzvlad-Data-Projects-wirenboard-wb-mge` |
+
+Наивная замена только `/` теряет все проекты с подчёркиваниями в имени — а это треть
+проектов пользователя. Обязательно покрыть это тестом.
 
 **Файлы достигают 24 МБ.** Читать только хвост (последние ~256–512 КБ) через
 `FileHandle.seek(toOffset:)`, отбрасывая первую (возможно обрезанную) строку.
