@@ -59,7 +59,9 @@ if [ -f "$SETTINGS" ]; then
 		echo "$SETTINGS is not valid JSON, refusing to touch it" >&2
 		exit 1
 	fi
-	BACKUP="$SETTINGS.bak.$(date +%Y%m%d-%H%M%S)"
+	# The pid keeps two runs within the same second from overwriting each
+	# other's backup, which would destroy the pristine copy.
+	BACKUP="$SETTINGS.bak.$(date +%Y%m%d-%H%M%S).$$"
 	cp -p "$SETTINGS" "$BACKUP"
 	echo "backup: $BACKUP"
 else
