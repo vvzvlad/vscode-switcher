@@ -66,7 +66,7 @@ for (position, row) in snapshot.openWindows.enumerated() {
     if !row.subagentDescriptions.isEmpty {
         print("      running:   \(row.subagentDescriptions.map { shorten($0, 50) }.joined(separator: "; "))")
     }
-    if row.sessions.count > 1 || !row.sessions.isEmpty {
+    if !row.sessions.isEmpty {
         print("      sessions:  \(row.sessions.count)")
         for session in row.sessions {
             let context = session.contextUsedTokens.map { "\($0 / 1000)k" } ?? "-"

@@ -78,9 +78,10 @@ final class DataSource {
                                            lastActivity: project.mtime))
         }
 
-        // Sessions whose cwd is outside every scan root would otherwise vanish;
-        // they are surfaced as rows of their own so nothing is silently lost.
-        for session in orphanSessions where !windows.contains(where: { sessionsByWindow[$0.id]?.contains(where: { $0.sessionId == session.sessionId }) == true }) {
+        // Sessions whose cwd is outside every scan root belong to no project and
+        // therefore to no window; they get rows of their own so a running agent
+        // is never silently dropped from the list.
+        for session in orphanSessions {
             let name = (session.cwd as NSString).lastPathComponent
             projectRows.append(SwitcherRow(id: "session:\(session.sessionId)",
                                            kind: .project,

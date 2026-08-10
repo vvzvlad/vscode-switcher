@@ -171,6 +171,44 @@
 хук должен уметь дампить сырой stdin в `~/.claude/window-status/_debug.jsonl` при
 `VSCODE_SWITCHER_DEBUG=1`, и логика разбора должна быть устойчива к отсутствию полей.
 
+### 2.6.1 Проверенные схемы payload'ов (этап 1)
+
+Общая часть всех hook-событий: `session_id`, `transcript_path`, `cwd`, `permission_mode`,
+`agent_type`, `hook_event_name`. Дополнительно: `UserPromptSubmit` — `prompt`;
+`Stop` — `stop_hook_active`, `last_assistant_message`, `background_tasks`, `session_crons`;
+`SessionEnd` — `reason`.
+
+`Notification` (в живых сессиях поймать не удалось, схема снята из бинарника CLI 2.1.183):
+поля `message`, `title`, `notification_type`. Реальные значения `notification_type`:
+
+| Значение | Смысл | Наше состояние |
+|---|---|---|
+| `permission_prompt` | диалог разрешения инструмента | `permission` |
+| `worker_permission_prompt` | разрешение для воркера/сабагента | `permission` |
+| `elicitation_dialog`, `elicitation_url_dialog` | «Claude Code needs your input» | `permission` |
+| `idle_prompt` | «Claude is waiting for your input», порог 60 с | `waiting` |
+| `auth_success`, `computer_use_enter`, `computer_use_exit`, `elicitation_complete`, `elicitation_response`, `push_notification` | к состоянию агента отношения не имеют | не трогаем файл |
+
+`statusLine` (проверено на живой сессии) отдаёт `model.{id,display_name}`,
+`workspace`, `output_style`, `version`, `rate_limits`, `exceeds_200k_tokens`,
+`cost.{total_cost_usd,total_duration_ms,total_api_duration_ms,total_lines_added,total_lines_removed}`
+и `context_window`:
+
+```json
+"context_window": {
+  "total_input_tokens": 32679, "total_output_tokens": 40,
+  "context_window_size": 200000,
+  "current_usage": {"input_tokens": 10, "output_tokens": 40,
+                    "cache_creation_input_tokens": 32669, "cache_read_input_tokens": 0},
+  "used_percentage": 16, "remaining_percentage": 84
+}
+```
+
+Поля `used_tokens` там нет: занятый контекст — это `total_input_tokens` (он уже равен
+`input + cache_creation + cache_read`), а `context_window_size` даёт точный лимит окна,
+так что при наличии данных от `statusLine` эвристику «больше 200k → значит 1M» применять
+не нужно.
+
 ## 3. Состояния агента и их отображение
 
 | Состояние | Когда | Индикатор |

@@ -89,9 +89,8 @@ final class WorkspaceIndex {
             let full = directory.appendingPathComponent(entry)
             if entry.hasSuffix(".code-workspace") {
                 // Deterministic pick when a directory holds several workspaces.
-                if workspaceFile == nil || entry < (workspaceFile! as NSString).lastPathComponent {
-                    workspaceFile = full.path
-                }
+                let current = workspaceFile.map { ($0 as NSString).lastPathComponent }
+                if current == nil || entry < current! { workspaceFile = full.path }
                 continue
             }
             if Self.skippedDirectories.contains(entry) { continue }
