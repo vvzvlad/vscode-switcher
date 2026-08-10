@@ -66,22 +66,34 @@ if [ "$event" = "SessionEnd" ]; then
 fi
 
 # Notification is the only event whose meaning depends on the payload body.
-# The observed payload carries a free-form `message` and no discriminator
-# field, so classification is driven by the text with the structured fields
-# kept as a cheap first check.
+# Claude sends `message`, `title` and `notification_type`; the types observed
+# in the CLI are permission_prompt, worker_permission_prompt,
+# elicitation_dialog, elicitation_url_dialog, idle_prompt, auth_success,
+# computer_use_enter/exit, elicitation_complete and elicitation_response.
+# Only the first group means "the agent is blocked on the user", so unrelated
+# types must leave the state alone instead of downgrading it. Unknown types
+# fall back to a heuristic over the message text.
+# Prints "permission", "waiting", or nothing when the event is irrelevant.
 classify_notification() {
 	case "$notif_type" in
-	*permission* | *tool_use* | *approval*)
+	*permission* | elicitation_dialog | elicitation_url_dialog)
 		printf 'permission'
+		return
+		;;
+	idle_prompt)
+		printf 'waiting'
+		return
+		;;
+	auth_success | computer_use_* | elicitation_complete | elicitation_response | push_notification)
 		return
 		;;
 	esac
 	lower=$(printf '%s' "$message" | tr '[:upper:]' '[:lower:]')
 	case "$lower" in
-	*permission* | *approve* | *approval* | *"needs your"* | *"wants to"* | *разреш*)
+	*permission* | *approve* | *approval* | *"needs your"* | *"wants to"*)
 		printf 'permission'
 		;;
-	*)
+	*"waiting for"* | *"needs your input"*)
 		printf 'waiting'
 		;;
 	esac
@@ -96,6 +108,7 @@ Stop)
 	;;
 Notification)
 	state=$(classify_notification)
+	[ -z "$state" ] && exit 0
 	;;
 *)
 	exit 0
