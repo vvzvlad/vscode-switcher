@@ -2,7 +2,11 @@
 # Claude Code statusLine command for VSCode Switcher.
 #
 # Claude invokes it on every conversation update and passes a JSON payload on
-# stdin (model, context window, cost). Two things happen here:
+# stdin: model {id, display_name}, cost {total_cost_usd, ...} and
+# context_window {total_input_tokens, context_window_size, used_percentage,
+# remaining_percentage}. Note that the token count is total_input_tokens, not
+# used_tokens, and that context_window_size states the real limit, so the
+# 200k/1M window does not have to be guessed. Two things happen here:
 #   1. a short status string is printed to stdout, which Claude renders below
 #      the prompt;
 #   2. the same numbers are cached in $STATUS_DIR/<session_id>.metrics.json so
@@ -45,15 +49,16 @@ fields=$(printf '%s' "$payload" | "$JQ" -r '
 		((.model.display_name // .model.id // "") | s),
 		((.model.id // "") | s),
 		((.context_window.used_percentage // "") | s),
-		((.context_window.used_tokens // "") | s),
-		((.cost.total_cost_usd // "") | s)
+		((.context_window.total_input_tokens // .context_window.used_tokens // "") | s),
+		((.cost.total_cost_usd // "") | s),
+		((.context_window.context_window_size // "") | s)
 	] | @tsv
 ' 2>/dev/null | tr '\t' '\037')
 [ -z "$fields" ] && exit 0
 
 # US (0x1f) rather than tab: tab is IFS whitespace, so `read` would collapse
 # runs of empty fields and shift every value after the first missing one.
-IFS=$'\037' read -r session_id cwd model_name model_id used_pct used_tokens cost <<EOF
+IFS=$'\037' read -r session_id cwd model_name model_id used_pct used_tokens cost window_size <<EOF
 $fields
 EOF
 
@@ -82,12 +87,14 @@ tmp="$STATUS_DIR/.tmp.metrics.$session_id.$$"
 	--arg usedPercentage "$used_pct" \
 	--arg usedTokens "$used_tokens" \
 	--arg cost "$cost" \
+	--arg windowSize "$window_size" \
 	--argjson ts "$(date +%s)" \
 	'{sessionId: $sessionId, cwd: $cwd, ts: $ts}
 	 + (if $modelName == "" then {} else {modelName: $modelName} end)
 	 + (if $modelId == "" then {} else {modelId: $modelId} end)
 	 + (if $usedPercentage == "" then {} else {usedPercentage: ($usedPercentage | tonumber? // null)} end)
 	 + (if $usedTokens == "" then {} else {usedTokens: ($usedTokens | tonumber? // null)} end)
+	 + (if $windowSize == "" then {} else {contextWindowSize: ($windowSize | tonumber? // null)} end)
 	 + (if $cost == "" then {} else {costUsd: ($cost | tonumber? // null)} end)' \
 	>"$tmp" 2>/dev/null
 
