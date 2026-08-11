@@ -35,6 +35,11 @@ final class PanelController {
     /// Reported after every show/hide so the edge trigger knows the panel's
     /// frame and can apply the auto-hide rule.
     var onVisibilityChanged: ((Bool, NSRect) -> Void)?
+    /// The panel stayed up and only changed shape — a display was plugged in,
+    /// the resolution changed, the Dock moved. Kept apart from
+    /// `onVisibilityChanged` because everything an appearance resets — the
+    /// auto-hide countdown above all — must survive a mere reframe.
+    var onPanelMoved: ((NSRect) -> Void)?
     /// The user asked for the Accessibility permission from the panel.
     var onGrantAccessibility: (() -> Void)?
 
@@ -127,7 +132,7 @@ final class PanelController {
         if isVisible {
             panel.setFrame(target, display: true)
             panel.orderFrontRegardless()
-            onVisibilityChanged?(true, target)
+            onPanelMoved?(target)
             return
         }
         isVisible = true

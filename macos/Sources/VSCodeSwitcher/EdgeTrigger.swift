@@ -84,6 +84,21 @@ final class EdgeTrigger {
         pointerWasInside = false
     }
 
+    /// The panel is still up and only moved or resized — a display was plugged
+    /// in, the resolution or the Dock changed.
+    ///
+    /// Deliberately not `panelDidShow`: that one disarms the auto-hide by
+    /// clearing `pointerWasInside`, and a screen notification landing while the
+    /// pointer is already outside — the 400 ms are ticking — would zero a
+    /// countdown that then never starts again, because the pointer never
+    /// re-enters. The panel stayed on screen until a click landed elsewhere.
+    /// `didChangeScreenParameters` arrives for a plugged-in display and a Dock
+    /// setting too, not only for a resolution change.
+    func panelDidMove(frame: NSRect) {
+        guard panelFrame != nil else { return }
+        panelFrame = frame
+    }
+
     /// The panel closed. The trigger stays disarmed until the pointer moves
     /// clear of the edge.
     func panelDidHide() {

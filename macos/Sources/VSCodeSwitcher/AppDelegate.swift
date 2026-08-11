@@ -51,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.trigger.panelDidHide()
             }
         }
+        panel.onPanelMoved = { [weak self] frame in self?.trigger.panelDidMove(frame: frame) }
         panel.onGrantAccessibility = { [weak self] in self?.requestAccessibility() }
         observeScreenParameters()
         observeAccessibilityGrant()
@@ -77,7 +78,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// A resolution change, a display being plugged in or the Dock moving all
     /// invalidate the panel's frame — and the edge trigger's copy of it, which
     /// is what decides when the panel auto-hides. Re-showing on the screen under
-    /// the pointer recomputes both.
+    /// the pointer recomputes both; the trigger learns about it through
+    /// `panelDidMove`, which refreshes the frame without disarming an auto-hide
+    /// that may already be counting down.
     private func observeScreenParameters() {
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
