@@ -357,6 +357,22 @@ final class WindowOrderTests: XCTestCase {
         model.update(snapshot: snapshot(["c", "a", "b"], generatedAt: Date()))
         XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
     }
+
+    /// The same first appearance, but the click comes before the re-freeze. It
+    /// has to write the order down, not merely cancel the wait: cancelling alone
+    /// left `windowOrder` empty, `ordered` fell through to the raw z-order, and
+    /// the list jumped after every click for the rest of that appearance —
+    /// exactly the defect the freeze exists for.
+    func testAClickBeforeTheFirstFreshSnapshotFixesTheOrder() {
+        let model = SwitcherViewModel()
+        model.panelDidShow()
+        // Read before the show, so it is not the one to freeze on.
+        model.update(snapshot: snapshot(["a", "b", "c"], generatedAt: .distantPast))
+
+        model.rowActivated(rows(["b"])[0])
+        model.update(snapshot: snapshot(["b", "a", "c"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
+    }
 }
 
 /// Clicking an orphan row. It has neither a window nor an indexed project, and

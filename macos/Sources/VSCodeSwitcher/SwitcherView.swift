@@ -89,11 +89,17 @@ final class SwitcherViewModel: ObservableObject {
     ///
     /// The click is about to raise a window or open a new one, and both change
     /// the z-order the next snapshot reports. Whatever the list looked like when
-    /// the user aimed at it is what it has to keep looking like, so the pending
-    /// re-freeze is dropped here rather than allowed to fold the click's own
-    /// effect into the order.
+    /// the user aimed at it is what it has to keep looking like, so the order in
+    /// force at this instant is written down and the pending re-freeze dropped.
+    /// Clearing the pending flag alone was not enough: when the order was still
+    /// empty — the panel's first appearance after launch, before any snapshot —
+    /// `ordered` fell through to the raw z-order and the list jumped after every
+    /// click, which is the defect the freeze was built for.
     func rowActivated(_ row: SwitcherRow) {
-        orderPendingSince = nil
+        if orderPendingSince != nil {
+            windowOrder = Self.ordered(snapshot.openWindows, by: windowOrder).map(\.id)
+            orderPendingSince = nil
+        }
         guard row.kind == .window else { return }
         frontmostRowID = row.id
     }
