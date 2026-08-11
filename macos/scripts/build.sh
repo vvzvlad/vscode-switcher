@@ -44,6 +44,17 @@ if [[ ! -f "$BINARY" ]]; then
 fi
 
 echo "==> Assembling $APP_NAME.app..."
+# Replacing the bundle under a running copy leaves that process alive with a
+# deleted executable: the menu bar icon stays, the Accessibility entry no longer
+# matches anything, and the failures that follow look like app bugs. Only the
+# instance launched from *this* bundle is stopped — a copy in /Applications is
+# somebody else's business.
+if pgrep -f "^$APP_BUNDLE/Contents/MacOS/$APP_NAME$" >/dev/null 2>&1; then
+    echo "    stopping the running instance of this bundle"
+    pkill -f "^$APP_BUNDLE/Contents/MacOS/$APP_NAME$" || true
+    sleep 0.5
+fi
+
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
@@ -79,8 +90,23 @@ chmod +x "$APP_BUNDLE/Contents/Resources/hooks/"*.sh "$APP_BUNDLE/Contents/Resou
 # with "resource fork, Finder information, or similar detritus not allowed".
 xattr -cr "$APP_BUNDLE"
 
-echo "==> Codesigning (ad-hoc)..."
-codesign --force --sign - "$APP_BUNDLE"
+# An ad-hoc signature carries no certificate, so TCC has nothing stable to key
+# the Accessibility grant on and falls back to the code directory hash — which
+# changes with every single rebuild. That, and nothing else, is why the
+# permission has to be re-granted after each `make app`. A self-signed
+# certificate gives the bundle a designated requirement that survives rebuilds,
+# and the grant survives with it. Creating the certificate is an interactive
+# Keychain Access operation and is left to the user (see README); this picks it
+# up automatically once it exists.
+SIGN_IDENTITY="${SIGN_IDENTITY:-VSCodeSwitcher Dev}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$SIGN_IDENTITY\""; then
+    echo "==> Codesigning with '$SIGN_IDENTITY'..."
+    codesign --force --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+else
+    echo "==> Codesigning (ad-hoc — the Accessibility grant will not survive rebuilds;"
+    echo "    create a '$SIGN_IDENTITY' code signing certificate to fix that, see README)"
+    codesign --force --sign - "$APP_BUNDLE"
+fi
 codesign -v "$APP_BUNDLE"
 
 echo "==> Built $APP_BUNDLE"

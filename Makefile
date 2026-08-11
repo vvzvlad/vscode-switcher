@@ -15,7 +15,9 @@ app:
 install: app
 	pkill -x VSCodeSwitcher || true
 	rm -rf /Applications/VSCodeSwitcher.app
-	cp -R macos/VSCodeSwitcher.app /Applications/
+	# ditto, not cp -R: it preserves the extended attributes and the signature
+	# layout of the bundle, which cp is free to mangle.
+	ditto macos/VSCodeSwitcher.app /Applications/VSCodeSwitcher.app
 	open /Applications/VSCodeSwitcher.app
 
 run: app
@@ -35,3 +37,6 @@ uninstall:
 clean:
 	cd macos && swift package clean
 	rm -rf macos/VSCodeSwitcher.app
+	# swift package clean only knows about its own build products; the iconset
+	# intermediates from make-icons.sh live in the same directory.
+	rm -rf macos/.build/icons
