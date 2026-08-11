@@ -46,7 +46,14 @@ final class DataSource: @unchecked Sendable {
     /// change reached the panel only on the next timer tick, which made the
     /// file system watcher pointless.
     func snapshot() -> SwitcherSnapshot {
-        let requestedAt = Date()
+        snapshot(requestedAt: Date())
+    }
+
+    /// The rule itself, with the caller's arrival time passed in. Test seam:
+    /// pinning that instant is what makes "queued up behind a build" and
+    /// "arrived after it" two exact cases instead of two races against the
+    /// scheduler and the clock.
+    func snapshot(requestedAt: Date) -> SwitcherSnapshot {
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
 

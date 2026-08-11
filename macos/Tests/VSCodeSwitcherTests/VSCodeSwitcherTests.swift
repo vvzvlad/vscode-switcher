@@ -1301,25 +1301,39 @@ final class SnapshotCoalescingTests: XCTestCase {
         var value: Int { lock.lock(); defer { lock.unlock() }; return count }
     }
 
-    private func makeSource(counter: BuildCounter, duration: TimeInterval) -> DataSource {
+    /// Builds are numbered, and the number is the snapshot's timestamp, so
+    /// "which build produced this" is an equality check rather than a race with
+    /// the clock: two snapshots built a microsecond apart used to be told apart
+    /// by their wall-clock stamps alone.
+    private func makeSource(counter: BuildCounter, duration: TimeInterval = 0) -> DataSource {
         DataSource(config: .default) {
             counter.increment()
-            Thread.sleep(forTimeInterval: duration)
+            if duration > 0 { Thread.sleep(forTimeInterval: duration) }
             return SwitcherSnapshot(openWindows: [],
                                     projects: [],
                                     accessibilityTrusted: false,
-                                    generatedAt: Date())
+                                    generatedAt: Date(timeIntervalSince1970: Double(counter.value)))
         }
     }
 
     /// The point of the coalescing: whoever queued up behind a build in flight
     /// gets its result instead of rescanning the same disk.
+    ///
+    /// Every caller arrives at the same pinned instant, from before the build
+    /// started, so the assertion holds however the four threads are scheduled —
+    /// including the loaded machine where `concurrentPerform` runs them one
+    /// after another and the later arrivals really did arrive after the build.
     func testCallersThatWaitedShareOneBuild() {
         let counter = BuildCounter()
-        let source = makeSource(counter: counter, duration: 0.25)
+        let source = makeSource(counter: counter, duration: 0.05)
+        let arrivedAt = Date()
 
-        DispatchQueue.concurrentPerform(iterations: 4) { _ in _ = source.snapshot() }
+        let results = ResultBox()
+        DispatchQueue.concurrentPerform(iterations: 4) { _ in
+            results.add(source.snapshot(requestedAt: arrivedAt))
+        }
         XCTAssertEqual(counter.value, 1)
+        XCTAssertEqual(Set(results.values.map(\.generatedAt)).count, 1)
     }
 
     /// And the defect: a fixed window after a build finished also served the
@@ -1329,12 +1343,34 @@ final class SnapshotCoalescingTests: XCTestCase {
     /// hook state change waited for the next timer tick.
     func testACallerArrivingAfterTheBuildGetsAFreshOne() {
         let counter = BuildCounter()
-        let source = makeSource(counter: counter, duration: 0.01)
+        let source = makeSource(counter: counter)
+        let arrivedAt = Date()
 
-        let first = source.snapshot()
-        let second = source.snapshot()
+        let first = source.snapshot(requestedAt: arrivedAt)
+        // Unambiguously later than the moment the first build finished.
+        let second = source.snapshot(requestedAt: arrivedAt.addingTimeInterval(60))
         XCTAssertEqual(counter.value, 2)
         XCTAssertNotEqual(first.generatedAt, second.generatedAt)
+    }
+
+    /// The cache is served to an earlier arrival however long ago the build ran,
+    /// so a caller that never gets scheduled cannot force a second pass.
+    func testAnEarlierArrivalIsStillServedTheCache() {
+        let counter = BuildCounter()
+        let source = makeSource(counter: counter)
+        let arrivedAt = Date()
+
+        _ = source.snapshot(requestedAt: arrivedAt)
+        let late = source.snapshot(requestedAt: arrivedAt.addingTimeInterval(-60))
+        XCTAssertEqual(counter.value, 1)
+        XCTAssertEqual(late.generatedAt, Date(timeIntervalSince1970: 1))
+    }
+
+    private final class ResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [SwitcherSnapshot] = []
+        func add(_ value: SwitcherSnapshot) { lock.lock(); storage.append(value); lock.unlock() }
+        var values: [SwitcherSnapshot] { lock.lock(); defer { lock.unlock() }; return storage }
     }
 }
 
