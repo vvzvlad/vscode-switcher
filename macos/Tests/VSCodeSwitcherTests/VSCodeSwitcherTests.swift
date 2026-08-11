@@ -1357,7 +1357,6 @@ final class SnapshotCoalescingTests: XCTestCase {
     /// other test here goes through the `requestedAt` seam instead — a mistake
     /// in that single line, a pinned or stale `Date`, would have served the very
     /// first build to every caller forever with nothing to catch it.
-    ///
     func testTwoSequentialSnapshotsAreTwoBuilds() {
         let counter = BuildCounter()
         let source = makeSource(counter: counter)
@@ -1371,6 +1370,45 @@ final class SnapshotCoalescingTests: XCTestCase {
         let second = source.snapshot()
         XCTAssertEqual(counter.value, 2)
         XCTAssertNotEqual(first.generatedAt, second.generatedAt)
+    }
+
+    /// The mirror of that defect, through the same plain entry point: an arrival
+    /// stamp from the *future* — a `Date()` read after the build rather than
+    /// before the call, an interval added to it, a clock nudged forward — is
+    /// never reached by `lastSnapshotFinishedAt`, so the coalescing stops
+    /// happening at all and everyone who queued behind a build in flight goes
+    /// off and rescans the same disk the moment they are let through. It is
+    /// silent: every answer stays correct and only the I/O multiplies, which is
+    /// the one thing the coalescing exists to prevent.
+    ///
+    /// The build signals that it has started and then holds the lock for 0.3 s,
+    /// so the second call is made — and its arrival stamped — well before the
+    /// build finishes, with no race to lose.
+    func testACallerArrivingDuringABuildSharesItThroughThePlainEntryPoint() {
+        let counter = BuildCounter()
+        let started = DispatchSemaphore(value: 0)
+        let source = DataSource(config: .default) {
+            counter.increment()
+            started.signal()
+            Thread.sleep(forTimeInterval: 0.3)
+            return SwitcherSnapshot(openWindows: [],
+                                    projects: [],
+                                    accessibilityTrusted: false,
+                                    generatedAt: Date(timeIntervalSince1970: Double(counter.value)))
+        }
+
+        let building = ResultBox()
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            building.add(source.snapshot())
+            finished.signal()
+        }
+        started.wait()
+        let queued = source.snapshot()
+        finished.wait()
+
+        XCTAssertEqual(counter.value, 1)
+        XCTAssertEqual(queued.generatedAt, building.values.first?.generatedAt)
     }
 
     /// The cache is served to an earlier arrival however long ago the build ran,
