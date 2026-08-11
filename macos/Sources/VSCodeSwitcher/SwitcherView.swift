@@ -82,6 +82,21 @@ final class SwitcherViewModel: ObservableObject {
             windowOrder = Self.merged(windowOrder, with: snapshot.openWindows.map(\.id))
             orderPendingSince = nil
         }
+        // A window opened while the panel is up joins the frozen order the first
+        // time it is seen, instead of being left out of it for `ordered` to
+        // append on every pass. Left out, its place was decided by live z-order:
+        // clicking two projects in a row put the two new rows at the bottom, and
+        // clicking either of them swapped them under the pointer — the list
+        // moving from a click, which is what the freeze exists to stop. Not
+        // while the re-freeze is still pending: the order is provisional until
+        // then, and a newcomer belongs in the z-order slot `merged` gives it.
+        if orderPendingSince == nil, !windowOrder.isEmpty {
+            var known = Set(windowOrder)
+            for row in snapshot.openWindows where !known.contains(row.id) {
+                known.insert(row.id)
+                windowOrder.append(row.id)
+            }
+        }
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         if let id = Self.frontmostWindowID(in: snapshot, frontmostPID: pid) { frontmostRowID = id }
     }

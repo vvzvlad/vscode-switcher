@@ -380,6 +380,27 @@ final class WindowOrderTests: XCTestCase {
         XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
     }
 
+    /// Windows opened from a panel that stays up are frozen too, once they show
+    /// up in a snapshot. Until they were, their place among themselves came from
+    /// live z-order: two projects clicked in a row put two new rows at the
+    /// bottom, and clicking the lower one raised it, so the very next snapshot
+    /// swapped the pair under the pointer.
+    func testAWindowOpenedWhileThePanelIsUpIsFrozenOnceItAppears() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["a"], generatedAt: Date()))
+        model.panelDidShow()
+        model.update(snapshot: snapshot(["a"], generatedAt: Date()))
+
+        // Two projects clicked: the newest window is in front of the other.
+        model.update(snapshot: snapshot(["w2", "w1", "a"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["a", "w2", "w1"])
+
+        // Clicking the bottom row raises it, and the rows must stay put.
+        model.rowActivated(rows(["w1"])[0])
+        model.update(snapshot: snapshot(["w1", "w2", "a"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["a", "w2", "w1"])
+    }
+
     /// The very first use of the app: no editor window exists — it is closed, or
     /// the Accessibility grant has only just been given — so the panel shows the
     /// "Проекты" section alone and the first click is a project. There was no
