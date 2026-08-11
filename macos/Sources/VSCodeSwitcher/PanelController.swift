@@ -44,6 +44,14 @@ final class PanelController {
     private let panel: SwitcherPanel
     private let visualEffect = NSVisualEffectView()
 
+    /// Where the panel is going, as opposed to where it is drawn right now.
+    ///
+    /// The slide-in takes 0.14 s, during which `panel.frame` is still somewhere
+    /// off screen while the panel is already visible under the pointer. Deciding
+    /// "the click landed outside" from the animating frame therefore dismissed
+    /// the panel on a click that visibly hit it.
+    private var targetFrame: NSRect = .zero
+
     private var clickMonitor: Any?
     private var cancellables = Set<AnyCancellable>()
 
@@ -96,8 +104,12 @@ final class PanelController {
         model.onActivate = { [weak self] row in self?.activate(row) }
         model.onSearchFieldTap = { [weak self] in self?.takeKeyboardFocus() }
         model.onGrantAccessibility = { [weak self] in self?.onGrantAccessibility?() }
+        // `DispatchQueue.main`, not `RunLoop.main`: the latter only delivers in
+        // the default run loop mode, while every timer here runs in `.common`.
+        // Dragging the scroller put the run loop into the tracking mode, and the
+        // updates piled up until the drag ended and then arrived in one batch.
         store.$snapshot
-            .receive(on: RunLoop.main)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] snapshot in self?.model.update(snapshot: snapshot) }
             .store(in: &cancellables)
     }
@@ -106,6 +118,7 @@ final class PanelController {
 
     func show(on screen: NSScreen) {
         let target = Self.frame(on: screen, config: config)
+        targetFrame = target
 
         if isVisible {
             panel.setFrame(target, display: true)
@@ -114,12 +127,18 @@ final class PanelController {
             return
         }
         isVisible = true
-        model.resetQuery()
+        model.panelDidShow()
 
         var start = target
         start.origin.x = target.minX - target.width
         panel.setFrame(start, display: false)
         panel.alphaValue = 0
+        // Lay the list out at its final size before a single frame is on screen.
+        // Without this the first layout pass happened while the window was
+        // already sliding, the scroll view learned its content height in
+        // instalments and flashed its indicator at every step — the scrollbar
+        // that danced in and out on every open.
+        visualEffect.layoutSubtreeIfNeeded()
         // Not `makeKeyAndOrderFront`: showing the panel must never pull the
         // keyboard away from whatever the user was working in.
         panel.orderFrontRegardless()
@@ -127,7 +146,10 @@ final class PanelController {
         NSAnimationContext.runAnimationGroup { context in
             context.duration = Self.showDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            panel.animator().setFrame(target, display: true)
+            // `display: false`: the slide only changes the origin, so there is
+            // nothing to redraw, and asking for a display forced a full layout
+            // pass of the SwiftUI content on every animation step.
+            panel.animator().setFrame(target, display: false)
             panel.animator().alphaValue = 1
         }
 
@@ -147,7 +169,7 @@ final class PanelController {
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = Self.hideDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-            panel.animator().setFrame(target, display: true)
+            panel.animator().setFrame(target, display: false)
             panel.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {
@@ -167,7 +189,11 @@ final class PanelController {
     /// its trigger strip from the very same rect, so the strip cannot drift away
     /// from the panel it opens.
     static func frame(on screen: NSScreen, config: Config) -> NSRect {
-        let usable = screen.visibleFrame
+        frame(in: screen.visibleFrame, config: config)
+    }
+
+    /// The geometry itself, free of `NSScreen` so it can be checked directly.
+    static func frame(in usable: NSRect, config: Config) -> NSRect {
         let height = (usable.height * CGFloat(config.panelHeightFraction)).rounded()
         let y = (usable.midY - height / 2).rounded()
         return NSRect(x: usable.minX.rounded(), y: y,
@@ -176,10 +202,26 @@ final class PanelController {
 
     // MARK: - Keyboard focus
 
-    /// Claims key status for as long as the search field is in use. Called from
-    /// the field's own click handler, never on show.
+    /// Claims the keyboard for as long as the search field is in use. Called
+    /// from the field's own click handler, never on show.
+    ///
+    /// `makeKey()` alone is not enough, and that is not a subtlety: key status
+    /// only decides which window of the *active* application receives the
+    /// keystrokes. This app is an `LSUIElement` that never activates, and the
+    /// panel is a `.nonactivatingPanel`, so clicking the field drew a caret in
+    /// it while the system keyboard focus stayed in the editor — everything the
+    /// user typed went into their source file and the field stayed empty, with
+    /// no way back because the click catcher over the field was already gone.
+    /// So the app is activated here and only here: the show path still must not
+    /// touch activation.
+    ///
+    /// `hidesOnDeactivate` is false, so the panel survives the deactivation that
+    /// follows. The one visible side effect is that `frontmostApplication` stops
+    /// being the editor, and `update(snapshot:)` only assigns the highlight when
+    /// it can name a frontmost window — so the highlight stays where it was.
     private func takeKeyboardFocus() {
         guard isVisible else { return }
+        NSApp.activate(ignoringOtherApps: true)
         panel.makeKey()
         model.searchFieldFocused = true
     }
@@ -212,7 +254,7 @@ final class PanelController {
             DispatchQueue.global(qos: .userInitiated).async {
                 VSCodeWindows.raise(window)
             }
-        } else if let project = row.project {
+        } else if let project = row.project ?? Self.syntheticProject(for: row) {
             DispatchQueue.global(qos: .userInitiated).async {
                 VSCodeWindows.openProject(project, config: config)
             }
@@ -220,6 +262,25 @@ final class PanelController {
         // The z-order has just changed; pull a fresh snapshot rather than wait
         // out the poll interval.
         store.refresh()
+    }
+
+    /// A project stand-in for an orphan `cwd:` row — a live session running
+    /// outside every scan root, so the index knows nothing about it.
+    ///
+    /// The row looks exactly as clickable as any other and used to do nothing at
+    /// all. It still names a real directory, and `openProject` already has the
+    /// "open the folder when there is no workspace file" branch, so the row can
+    /// open like every other project.
+    static func syntheticProject(for row: SwitcherRow) -> ProjectInfo? {
+        guard row.window == nil, row.project == nil else { return nil }
+        guard let cwd = row.sessions.first?.cwd, !cwd.isEmpty else { return nil }
+        let name = (cwd as NSString).lastPathComponent
+        return ProjectInfo(path: cwd,
+                           displayName: name,
+                           rootName: name,
+                           colorHex: row.colorHex,
+                           workspaceFile: nil,
+                           mtime: .distantPast)
     }
 
     // MARK: - Event monitors
@@ -234,7 +295,7 @@ final class PanelController {
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.isVisible else { return }
-                guard !NSPointInRect(NSEvent.mouseLocation, self.panel.frame) else { return }
+                guard !NSPointInRect(NSEvent.mouseLocation, self.targetFrame) else { return }
                 self.hide()
             }
         }

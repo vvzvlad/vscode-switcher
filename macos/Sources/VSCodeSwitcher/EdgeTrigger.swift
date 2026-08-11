@@ -38,8 +38,15 @@ final class EdgeTrigger {
     /// Frame of the panel while it is on screen, `nil` when it is hidden.
     private var panelFrame: NSRect?
     private var edgeEnteredAt: TimeInterval?
+    /// Which screen's edge `edgeEnteredAt` was measured against. Without it a
+    /// dwell begun on one display counted towards the dwell on another: 100 ms
+    /// at the edge of A, then a jump to B, and B opened after 50 ms.
+    private var edgeScreenFrame: NSRect?
     private var leftAt: TimeInterval?
     private var needsRearm = false
+    /// The pointer has been inside the open panel's keep-open zone at least
+    /// once. Until then the auto-hide countdown does not start.
+    private var pointerWasInside = false
 
     init(config: Config) {
         self.config = config
@@ -67,36 +74,53 @@ final class EdgeTrigger {
     /// The panel opened at `frame`; from now on only the auto-hide rule applies.
     func panelDidShow(frame: NSRect) {
         panelFrame = frame
-        edgeEnteredAt = nil
+        resetDwell()
         leftAt = nil
+        // The panel can also be opened from the status item menu, and the
+        // pointer is then in the opposite corner of the screen — outside the
+        // keep-open zone from the very first tick, so the panel used to slide
+        // back out 400 ms later. The countdown is armed only once the pointer
+        // has actually been inside.
+        pointerWasInside = false
     }
 
     /// The panel closed. The trigger stays disarmed until the pointer moves
     /// clear of the edge.
     func panelDidHide() {
         panelFrame = nil
-        edgeEnteredAt = nil
+        resetDwell()
         leftAt = nil
+        pointerWasInside = false
         needsRearm = true
+    }
+
+    private func resetDwell() {
+        edgeEnteredAt = nil
+        edgeScreenFrame = nil
     }
 
     // MARK: - Polling
 
     private func tick() {
         let point = NSEvent.mouseLocation
-        guard let screen = Self.screen(containing: point) else { return }
         let now = ProcessInfo.processInfo.systemUptime
 
+        // Checked before the screen is resolved: the auto-hide rule needs only
+        // the panel's own frame, and an empty `NSScreen.screens` — which happens
+        // while displays are being reconfigured — must not leave the panel stuck
+        // on screen.
         if let panelFrame {
-            edgeEnteredAt = nil
+            resetDwell()
             // The panel covers only part of the screen height, so leaving it
             // upwards or downwards is just as ordinary as leaving it to the
             // right; testing a single axis would keep it open forever.
             let keepOpen = panelFrame.insetBy(dx: -Self.leaveMargin, dy: -Self.leaveMargin)
             guard !NSPointInRect(point, keepOpen) else {
+                pointerWasInside = true
                 leftAt = nil
                 return
             }
+            guard pointerWasInside else { return }
             if let leftAt {
                 if now - leftAt >= Self.leaveDelay { onPointerLeft?() }
             } else {
@@ -106,43 +130,49 @@ final class EdgeTrigger {
         }
 
         leftAt = nil
-
-        if needsRearm {
-            edgeEnteredAt = nil
-            if point.x > screen.frame.minX + Self.rearmDistance { needsRearm = false }
-            return
-        }
-
-        guard point.x <= screen.frame.minX + Self.edgeTolerance else {
-            edgeEnteredAt = nil
-            return
-        }
+        guard let screen = Self.screen(containing: point) else { return }
 
         // Only the stretch of the edge the panel itself will cover arms the
         // trigger, so the panel always appears right where the pointer already
         // is; the free strips above and below let the pointer run along the edge
         // without summoning it. The rect comes from the panel's own geometry —
         // and from the current screen's `visibleFrame`, not the main screen's —
-        // so the strip cannot drift away from what it opens. Only `edgeEnteredAt`
-        // is reset here: the auto-hide timer lives in the branch above and never
-        // reaches this code.
+        // so the strip cannot drift away from what it opens. That includes the
+        // horizontal edge: the panel is placed against `visibleFrame.minX`, so
+        // measuring the edge from `frame.minX` would bury the trigger strip
+        // under a left-hand Dock while the panel came out to the right of it.
         let strip = PanelController.frame(on: screen, config: config)
-        guard point.y >= strip.minY, point.y <= strip.maxY else {
-            edgeEnteredAt = nil
+
+        if needsRearm {
+            resetDwell()
+            if point.x > strip.minX + Self.rearmDistance { needsRearm = false }
             return
         }
 
-        guard let enteredAt = edgeEnteredAt else {
+        guard point.x <= strip.minX + Self.edgeTolerance else {
+            resetDwell()
+            return
+        }
+
+        // Only the dwell is reset on a vertical miss: the auto-hide timer lives
+        // in the branch above and never reaches this code.
+        guard point.y >= strip.minY, point.y <= strip.maxY else {
+            resetDwell()
+            return
+        }
+
+        guard let enteredAt = edgeEnteredAt, edgeScreenFrame == screen.frame else {
             edgeEnteredAt = now
+            edgeScreenFrame = screen.frame
             // A zero dwell has to fire on the very first sample, not on the next.
             if dwell <= 0 {
-                edgeEnteredAt = nil
+                resetDwell()
                 onEdgeDwell?(screen)
             }
             return
         }
         if now - enteredAt >= dwell {
-            edgeEnteredAt = nil
+            resetDwell()
             onEdgeDwell?(screen)
         }
     }
