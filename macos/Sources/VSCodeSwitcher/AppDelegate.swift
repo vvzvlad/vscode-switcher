@@ -218,22 +218,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The user asked for the permission — the banner in the panel or the menu
-    /// item. The system prompt is always attempted, and the settings pane opens
-    /// on top of it once the prompt is known to have been used up.
+    /// item. Both the system prompt and the settings pane, every time.
     ///
     /// The prompt is asked for unconditionally on purpose. It is a no-op while a
     /// TCC entry exists, and the remembered flag is not a reliable statement
     /// about whether one does: `tccutil reset` — the way to clear the dead entry
     /// an ad-hoc signature leaves behind after a rebuild — removes the entry
-    /// without telling the app, and a flag left over from months ago would then
-    /// send the user to a settings pane that no longer lists the app at all.
+    /// without telling the app.
+    ///
+    /// So is the settings pane, and that is the difference from the launch path.
+    /// Opening it only once the prompt was known to be used up left the click
+    /// doing nothing at all in the one case that matters: the permission
+    /// switched off while the app was running. The TCC entry survives that with
+    /// `allowed = 0`, so the prompt stays silent, while the flag had been
+    /// cleared the last time access was seen — the orange banner swallowed the
+    /// first click and only reacted to the second. A click on it is the explicit
+    /// action this branch was kept for.
     private func requestAccessibility() {
-        let defaults = UserDefaults.standard
-        let promptUsed = defaults.bool(forKey: Self.promptShownKey)
-        defaults.set(true, forKey: Self.promptShownKey)
+        UserDefaults.standard.set(true, forKey: Self.promptShownKey)
         VSCodeWindows.requestAccessibilityPermission()
-        if promptUsed,
-           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
             NSWorkspace.shared.open(url)
         }
         // `accessibilityTrusted` is recomputed inside every snapshot, so one
