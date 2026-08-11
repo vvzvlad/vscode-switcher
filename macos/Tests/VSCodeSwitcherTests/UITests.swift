@@ -283,6 +283,12 @@ final class WindowOrderTests: XCTestCase {
                          generatedAt: generatedAt)
     }
 
+    private func projectRow(_ id: String) -> SwitcherRow {
+        var row = rows([id])[0]
+        row.kind = .project
+        return row
+    }
+
     private func windowIDs(_ model: SwitcherViewModel) -> [String] {
         model.sections.first { $0.title == "Открытые окна" }?.rows.map(\.id) ?? []
     }
@@ -371,6 +377,23 @@ final class WindowOrderTests: XCTestCase {
 
         model.rowActivated(rows(["b"])[0])
         model.update(snapshot: snapshot(["b", "a", "c"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
+    }
+
+    /// The very first use of the app: no editor window exists — it is closed, or
+    /// the Accessibility grant has only just been given — so the panel shows the
+    /// "Проекты" section alone and the first click is a project. There was no
+    /// order to settle then, but the click cancelled the pending re-freeze all
+    /// the same, and it never came: the windows opened from the panel were laid
+    /// out by live z-order for the rest of that appearance, reshuffling under the
+    /// pointer at every click.
+    func testAClickWithNoWindowsToSettleKeepsTheReFreezePending() {
+        let model = SwitcherViewModel()
+        model.panelDidShow()
+        model.rowActivated(projectRow("project:/tmp/foo"))
+
+        model.update(snapshot: snapshot(["a", "b", "c"], generatedAt: Date()))
+        model.update(snapshot: snapshot(["c", "a", "b"], generatedAt: Date()))
         XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
     }
 }

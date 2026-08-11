@@ -112,10 +112,20 @@ final class SwitcherViewModel: ObservableObject {
     /// empty — the panel's first appearance after launch, before any snapshot —
     /// `ordered` fell through to the raw z-order and the list jumped after every
     /// click, which is the defect the freeze was built for.
+    ///
+    /// And when there is nothing to write down, the wait stays on. The panel can
+    /// be summoned with no editor window at all — the editor is closed, or the
+    /// grant has only just been given — and then the only thing to click is a
+    /// project. Settling an empty order there cancelled the re-freeze that was
+    /// the one thing left to fix it, and every window opened from the panel
+    /// afterwards was ordered by live z-order again.
     func rowActivated(_ row: SwitcherRow) {
         if orderPendingSince != nil {
-            windowOrder = Self.ordered(snapshot.openWindows, by: windowOrder).map(\.id)
-            orderPendingSince = nil
+            let settled = Self.ordered(snapshot.openWindows, by: windowOrder).map(\.id)
+            if !settled.isEmpty {
+                windowOrder = settled
+                orderPendingSince = nil
+            }
         }
         guard row.kind == .window else { return }
         frontmostRowID = row.id
