@@ -1,96 +1,139 @@
+import AppKit
 import Foundation
 
-// Stage 1 builds the data layer only. The entry point is a console tool that
-// dumps the assembled model so the sources can be verified without any UI; the
-// panel is added on top of `DataSource` in the next stage.
+// Entry point. Without arguments the process becomes the menu bar agent; with
+// `--dump` it stays a console tool that prints the assembled model, which is how
+// the data layer is verified without any UI in the way.
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 
-guard arguments.contains("--dump") else {
+if arguments.contains("--help") || arguments.contains("-h") {
     print("""
-    VSCodeSwitcher — data layer (stage 1).
+    VSCodeSwitcher — панель переключения окон VSCode.
 
-      --dump          print the assembled switcher model
-      --dump --json   the same as JSON
-
-    The menu bar agent and the sliding panel are added in the next stage.
+      (без аргументов)  запустить агент в строке меню
+      --no-windows      запустить без окон редактора: список собирается только из
+                        проектов и живых сессий, как без доступа к Accessibility
+      --dump            напечатать собранную модель и выйти
+      --dump --json     то же самое в JSON
     """)
     exit(0)
 }
 
-let config = Config.load()
-let snapshot = DataSource(config: config).snapshot()
+var startupConfig = Config.load()
+if arguments.contains("--no-windows") {
+    // Debug aid: an identifier no application answers to, which is how the
+    // panel looks when the Accessibility permission is missing.
+    startupConfig.editorBundleID = "xyz.vvzvlad.vscode-switcher.no-such-editor"
+}
 
-if arguments.contains("--json") {
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    encoder.dateEncodingStrategy = .iso8601
-    if let data = try? encoder.encode(snapshot) {
-        FileHandle.standardOutput.write(data)
-        FileHandle.standardOutput.write(Data("\n".utf8))
-    } else {
-        FileHandle.standardError.write(Data("failed to encode snapshot\n".utf8))
-        exit(1)
-    }
+if arguments.contains("--dump") {
+    ConsoleDump.run(config: startupConfig, json: arguments.contains("--json"))
     exit(0)
 }
 
-func formatContext(_ row: SwitcherRow) -> String {
-    guard let used = row.contextUsedTokens else { return "-" }
-    let thousands = Double(used) / 1000
-    guard let fraction = row.contextFraction else { return String(format: "%.0fk", thousands) }
-    return String(format: "%.0fk (%.0f%%)", thousands, fraction * 100)
-}
+// Top-level code is not main-actor isolated, but everything AppKit touches has
+// to be; the hop is explicit and immediate because this *is* the main thread.
+MainActor.assumeIsolated { AgentEntryPoint.run(config: startupConfig) }
 
-func shorten(_ text: String?, _ limit: Int) -> String {
-    guard let text, !text.isEmpty else { return "-" }
-    let single = text.replacingOccurrences(of: "\n", with: " ")
-    return single.count <= limit ? single : String(single.prefix(limit - 1)) + "\u{2026}"
-}
+/// Starts the menu bar agent and keeps the delegate alive: `NSApplication`
+/// holds its delegate weakly.
+enum AgentEntryPoint {
+    @MainActor private static var delegate: AppDelegate?
 
-print("Config")
-print("  roots:            \(config.resolvedProjectRoots.map(\.path).joined(separator: ", "))")
-print("  depth:            \(config.scanDepth)")
-print("  transcript tail:  \(config.transcriptTailBytes / 1024) KiB")
-print("  editor:           \(config.editorBundleID)")
-print("  accessibility:    \(snapshot.accessibilityTrusted ? "granted" : "NOT GRANTED — window list will be empty")")
-print("")
-
-print("Open windows (z-order, front first): \(snapshot.openWindows.count)")
-for (position, row) in snapshot.openWindows.enumerated() {
-    let state = row.state.map { "\($0.rawValue)\(row.stateCount > 1 ? " x\(row.stateCount)" : "")" } ?? "-"
-    print("  \(position + 1). \(row.displayName)  \(row.colorHex)  [\(state)]")
-    print("      title:     \(shorten(row.window?.title, 90))")
-    print("      topic:     \(shorten(row.chatTopic, 90))")
-    print("      model:     \(row.model ?? "-")   context: \(formatContext(row))   subagents: \(row.activeSubagents)")
-    if !row.subagentDescriptions.isEmpty {
-        print("      running:   \(row.subagentDescriptions.map { shorten($0, 50) }.joined(separator: "; "))")
+    @MainActor static func run(config: Config) {
+        let application = NSApplication.shared
+        let delegate = AppDelegate(config: config)
+        Self.delegate = delegate
+        application.delegate = delegate
+        application.setActivationPolicy(.accessory)
+        application.run()
     }
-    if !row.sessions.isEmpty {
-        print("      sessions:  \(row.sessions.count)")
-        for session in row.sessions {
-            let context = session.contextUsedTokens.map { "\($0 / 1000)k" } ?? "-"
-            print("        - \(session.state.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))"
-                + " src=\(session.stateSource.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))"
-                + " pid=\(session.pid) ctx=\(context) sub=\(session.activeSubagents)"
-                + " \(shorten(session.topic, 46))")
+}
+
+/// The former stage 1 entry point, kept as a diagnostic mode.
+enum ConsoleDump {
+
+    static func run(config: Config, json: Bool) {
+        let snapshot = DataSource(config: config).snapshot()
+        if json {
+            printJSON(snapshot)
+        } else {
+            printText(config: config, snapshot: snapshot)
         }
     }
-}
-print("")
 
-let unopened = snapshot.projects.filter { $0.sessions.isEmpty }
-let strayed = snapshot.projects.filter { !$0.sessions.isEmpty }
-if !strayed.isEmpty {
-    print("Live sessions without a window: \(strayed.count)")
-    for row in strayed {
-        print("  - \(row.displayName)  [\(row.state?.rawValue ?? "-")]  \(shorten(row.chatTopic, 60))")
+    private static func printJSON(_ snapshot: SwitcherSnapshot) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(snapshot) else {
+            FileHandle.standardError.write(Data("failed to encode snapshot\n".utf8))
+            exit(1)
+        }
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
     }
-    print("")
-}
 
-print("Projects without an open window: \(unopened.count) (showing 15 most recent)")
-for row in unopened.prefix(15) {
-    let workspace = row.project?.workspaceFile == nil ? "git" : "workspace"
-    print("  - \(row.displayName.padding(toLength: 34, withPad: " ", startingAt: 0)) \(row.colorHex)  \(workspace)")
+    private static func printText(config: Config, snapshot: SwitcherSnapshot) {
+        print("Config")
+        print("  roots:            \(config.resolvedProjectRoots.map(\.path).joined(separator: ", "))")
+        print("  depth:            \(config.scanDepth)")
+        print("  transcript tail:  \(config.transcriptTailBytes / 1024) KiB")
+        print("  editor:           \(config.editorBundleID)")
+        print("  accessibility:    \(snapshot.accessibilityTrusted ? "granted" : "NOT GRANTED — window list will be empty")")
+        print("")
+
+        print("Open windows (z-order, front first): \(snapshot.openWindows.count)")
+        for (position, row) in snapshot.openWindows.enumerated() {
+            let state = row.state.map { "\($0.rawValue)\(row.stateCount > 1 ? " x\(row.stateCount)" : "")" } ?? "-"
+            print("  \(position + 1). \(row.displayName)  \(row.colorHex)  [\(state)]")
+            print("      title:     \(shorten(row.window?.title, 90))")
+            print("      topic:     \(shorten(row.chatTopic, 90))")
+            print("      model:     \(row.model ?? "-")   context: \(formatContext(row))   subagents: \(row.activeSubagents)")
+            if !row.subagentDescriptions.isEmpty {
+                print("      running:   \(row.subagentDescriptions.map { shorten($0, 50) }.joined(separator: "; "))")
+            }
+            if !row.sessions.isEmpty {
+                print("      sessions:  \(row.sessions.count)")
+                for session in row.sessions {
+                    let context = session.contextUsedTokens.map { "\($0 / 1000)k" } ?? "-"
+                    print("        - \(session.state.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))"
+                        + " src=\(session.stateSource.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))"
+                        + " pid=\(session.pid) ctx=\(context) sub=\(session.activeSubagents)"
+                        + " \(shorten(session.topic, 46))")
+                }
+            }
+        }
+        print("")
+
+        let unopened = snapshot.projects.filter { $0.sessions.isEmpty }
+        let strayed = snapshot.projects.filter { !$0.sessions.isEmpty }
+        if !strayed.isEmpty {
+            print("Live sessions without a window: \(strayed.count)")
+            for row in strayed {
+                print("  - \(row.displayName)  [\(row.state?.rawValue ?? "-")]  \(shorten(row.chatTopic, 60))")
+            }
+            print("")
+        }
+
+        print("Projects without an open window: \(unopened.count) (showing 15 most recent)")
+        for row in unopened.prefix(15) {
+            let workspace = row.project?.workspaceFile == nil ? "git" : "workspace"
+            print("  - \(row.displayName.padding(toLength: 34, withPad: " ", startingAt: 0)) \(row.colorHex)  \(workspace)")
+        }
+    }
+
+    private static func formatContext(_ row: SwitcherRow) -> String {
+        guard let used = row.contextUsedTokens else { return "-" }
+        let thousands = Double(used) / 1000
+        guard let fraction = row.contextFraction else { return String(format: "%.0fk", thousands) }
+        return String(format: "%.0fk (%.0f%%)", thousands, fraction * 100)
+    }
+
+    private static func shorten(_ text: String?, _ limit: Int) -> String {
+        guard let text, !text.isEmpty else { return "-" }
+        let single = text.replacingOccurrences(of: "\n", with: " ")
+        return single.count <= limit ? single : String(single.prefix(limit - 1)) + "\u{2026}"
+    }
 }
