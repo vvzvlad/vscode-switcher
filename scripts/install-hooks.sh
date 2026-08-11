@@ -54,6 +54,17 @@ fi
 
 mkdir -p "$(dirname "$SETTINGS")" "$HOME/.claude/window-status"
 
+# settings.json is very often a symlink into a dotfiles repository. The write
+# below is `mv`, which would replace the link with a regular file and quietly
+# detach the settings from that repository, so the link is followed first.
+if [ -L "$SETTINGS" ]; then
+	RESOLVED=$(readlink -f "$SETTINGS" 2>/dev/null)
+	if [ -n "$RESOLVED" ]; then
+		echo "note: $SETTINGS is a symlink, writing through it to $RESOLVED"
+		SETTINGS="$RESOLVED"
+	fi
+fi
+
 if [ -f "$SETTINGS" ]; then
 	if ! jq -e . "$SETTINGS" >/dev/null 2>&1; then
 		echo "$SETTINGS is not valid JSON, refusing to touch it" >&2
@@ -64,6 +75,18 @@ if [ -f "$SETTINGS" ]; then
 	BACKUP="$SETTINGS.bak.$(date +%Y%m%d-%H%M%S).$$"
 	cp -p "$SETTINGS" "$BACKUP"
 	echo "backup: $BACKUP"
+	# Claude allows exactly one statusLine, so installing ours destroys anyone
+	# else's. That is recoverable from the backup, but only if it is said out
+	# loud.
+	EXISTING_STATUSLINE=$(jq -r '.statusLine.command // ""' "$SETTINGS")
+	case "$MODE:$EXISTING_STATUSLINE" in
+	install:"" | install:*"$MARKER"*) ;;
+	install:*)
+		echo "warning: replacing an existing statusLine that is not ours:" >&2
+		echo "  $EXISTING_STATUSLINE" >&2
+		echo "  restore it from the backup above if you still need it" >&2
+		;;
+	esac
 else
 	echo '{}' >"$SETTINGS"
 	echo "created: $SETTINGS"
@@ -95,13 +118,22 @@ jq \
 	# Drop every hook entry whose command points at our hooks directory, then
 	# drop groups and event keys that became empty. Foreign entries (such as
 	# the two existing SessionStart blocks) are left untouched.
+	#
+	#
+	# A group whose "hooks" is missing or is not an array is foreign data we do
+	# not understand: it is passed through untouched and never dropped.
+	# Iterating that null used to abort the whole run with a jq message that
+	# pointed nowhere near the real problem.
+	def clean_group:
+		if (.hooks | type) == "array"
+		then .hooks |= map(select(((.command // "") | contains($marker)) | not))
+		else .
+		end;
+	def is_left_empty:
+		(.hooks | type) == "array" and (.hooks | length) == 0;
+
 	def strip_ours:
-		with_entries(
-			.value |= (
-				map(.hooks |= (map(select(((.command // "") | contains($marker)) | not))))
-				| map(select(((.hooks // []) | length) > 0))
-			)
-		)
+		with_entries(.value |= (map(clean_group) | map(select(is_left_empty | not))))
 		| with_entries(select(((.value // []) | length) > 0));
 
 	(.hooks // {} | strip_ours) as $clean

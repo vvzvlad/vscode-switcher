@@ -18,9 +18,18 @@ enum VSCodeWindows {
     /// right after the prompt appears.
     @discardableResult
     static func requestAccessibilityPermission() -> Bool {
-        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-        return AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+        // The literal rather than `kAXTrustedCheckOptionPrompt`: that symbol is
+        // an `Unmanaged<CFString>` global, which is not `Sendable` and warns
+        // under strict concurrency. Its value is this string.
+        return AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
     }
+
+    /// How long a single Accessibility request may take before it gives up.
+    ///
+    /// The system default is around six seconds. Every window costs three
+    /// synchronous attribute reads, so one VSCode instance with a wedged
+    /// extension host would otherwise stall a whole snapshot for a minute.
+    private static let messagingTimeout: Float = 1.0
 
     // MARK: - Enumeration
 
@@ -34,6 +43,7 @@ enum VSCodeWindows {
             let pid = app.processIdentifier
             guard pid > 0 else { continue }
             let element = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(element, messagingTimeout)
             guard let windows = copyAttribute(element, kAXWindowsAttribute) as? [AXUIElement] else { continue }
             for (index, window) in windows.enumerated() {
                 // Dialogs and sheets are AXDialog / AXSystemDialog; only real
@@ -100,6 +110,7 @@ enum VSCodeWindows {
         app.activate()
 
         let element = AXUIElementCreateApplication(window.pid)
+        AXUIElementSetMessagingTimeout(element, messagingTimeout)
         guard let windows = copyAttribute(element, kAXWindowsAttribute) as? [AXUIElement] else { return false }
 
         // Activating the app can already have reshuffled the z-order, so the

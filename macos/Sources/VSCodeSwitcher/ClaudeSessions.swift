@@ -47,7 +47,10 @@ enum ClaudeSessions {
         guard let names = try? fileManager.contentsOfDirectory(atPath: sessionsDirectory.path) else { return [] }
 
         var sessions: [ClaudeSessionInfo] = []
-        for name in names where name.hasSuffix(".json") {
+        var seenSessionIDs = Set<String>()
+        // Directory order is unspecified; sorting makes the winner of a
+        // duplicate session id the same on every run.
+        for name in names.sorted() where name.hasSuffix(".json") {
             let path = sessionsDirectory.appendingPathComponent(name).path
             guard let dict = JSONC.object(atPath: path),
                   let sessionId = dict["sessionId"] as? String,
@@ -58,7 +61,13 @@ enum ClaudeSessions {
             guard entrypoint.hasPrefix("claude-vscode") else { continue }
 
             let pid = (dict["pid"] as? NSNumber)?.int32Value ?? 0
-            guard isProcessAlive(pid) else { continue }
+            let startedAt = (dict["startedAt"] as? NSNumber)
+                .map { Date(timeIntervalSince1970: $0.doubleValue / 1000) }
+            guard isSessionProcessAlive(pid: pid, startedAt: startedAt) else { continue }
+
+            // The same session can be described by more than one file (a stale
+            // `<pid>.json` left by a crash, a pid that came back). One row.
+            guard seenSessionIDs.insert(sessionId).inserted else { continue }
 
             sessions.append(makeSession(sessionId: sessionId,
                                         pid: pid,
@@ -79,6 +88,36 @@ enum ClaudeSessions {
         return errno == EPERM
     }
 
+    /// Whether the pid recorded in a session file still belongs to *that*
+    /// session.
+    ///
+    /// Session files stay on disk after the process dies and pids are reused, so
+    /// "alive" alone resurrects long-dead sessions under a stranger's process.
+    /// A recycled pid necessarily started after the session did, which is enough
+    /// to tell the two apart. Files without `startedAt` keep the old behaviour.
+    static func isSessionProcessAlive(pid: Int32, startedAt: Date?) -> Bool {
+        guard isProcessAlive(pid) else { return false }
+        guard let startedAt, let processStart = processStartTime(pid) else { return true }
+        // The session file is written a few seconds after `execve`, so the
+        // process start is expected to be slightly *earlier* than `startedAt`.
+        return processStart.timeIntervalSince(startedAt) <= processStartSlackSeconds
+    }
+
+    /// Clock slack between `kinfo_proc.p_starttime` and the `startedAt` the CLI
+    /// records for itself.
+    private static let processStartSlackSeconds: TimeInterval = 60
+
+    /// Wall-clock start time of a process, from `sysctl(KERN_PROC_PID)`.
+    static func processStartTime(_ pid: Int32) -> Date? {
+        guard pid > 0 else { return nil }
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let start = info.kp_proc.p_starttime
+        return Date(timeIntervalSince1970: Double(start.tv_sec) + Double(start.tv_usec) / 1_000_000)
+    }
+
     private static func makeSession(sessionId: String,
                                     pid: Int32,
                                     cwd: String,
@@ -93,24 +132,9 @@ enum ClaudeSessions {
         let metrics = metricsStatus(sessionId: sessionId)
         let transcript = transcriptSummary(atPath: transcriptPath, tailBytes: config.transcriptTailBytes)
 
-        let state: AgentState
-        let source: AgentStateSource
-        if let hookState = hook?.state {
-            state = hookState
-            source = .hook
-        } else if let fallback = transcript.fallbackState {
-            state = fallback
-            source = .transcript
-        } else {
-            state = .idle
-            source = .unknown
-        }
-
+        let resolved = resolveState(hook: hook, transcript: transcript)
         let model = transcript.model ?? metrics?.modelId ?? metrics?.modelName
-        let usedTokens = transcript.contextUsedTokens ?? metrics?.usedTokens
-        // statusLine reports the real window size; everything else has to infer it.
-        let limit = metrics?.contextWindowSize
-            ?? usedTokens.map { contextLimitTokens(model: model, usedTokens: $0) }
+        let context = contextUsage(transcript: transcript, metrics: metrics)
 
         let subagents = subagents(slug: slug, sessionId: sessionId, config: config)
 
@@ -124,23 +148,108 @@ enum ClaudeSessions {
                                  name: name,
                                  aiTitle: transcript.aiTitle,
                                  lastPrompt: transcript.lastPrompt,
-                                 state: state,
-                                 stateSource: source,
+                                 state: resolved.state,
+                                 stateSource: resolved.source,
                                  model: model,
-                                 contextUsedTokens: usedTokens,
-                                 contextLimitTokens: limit,
+                                 contextUsedTokens: context.used,
+                                 contextLimitTokens: context.limit,
                                  activeSubagents: subagents.filter(\.isActive).count,
                                  subagents: subagents,
                                  lastActivity: lastActivity)
     }
 
-    /// The window is 200k by default and 1M for the extended-context variants.
-    /// The model id alone is not enough — the same id serves both — so a count
-    /// that already exceeds 200k proves the session runs on the large window.
-    static func contextLimitTokens(model: String?, usedTokens: Int) -> Int {
+    // MARK: - State
+
+    /// A transcript newer than the hook state by more than this proves the hook
+    /// missed an event: the session kept writing after the last state we were
+    /// told about.
+    static let hookLagToleranceSeconds: TimeInterval = 90
+
+    /// How long a `working` hook state stays believable without any newer
+    /// evidence. `Stop` hooks do get lost, and a permanently spinning indicator
+    /// discredits the whole list.
+    static let hookWorkingMaxAgeSeconds: TimeInterval = 300
+
+    /// The state of a session, reconciling the hook signal with the transcript.
+    ///
+    /// The hook file is the freshest source but it is a level, not an event
+    /// stream: whatever the last delivered hook wrote stays on disk forever. Two
+    /// guards keep a stuck value out of the UI, and both use numbers that are
+    /// computed anyway — the hook timestamp and the transcript mtime.
+    static func resolveState(hook: HookStatus?,
+                             transcript: TranscriptSummary,
+                             now: Date = Date()) -> (state: AgentState, source: AgentStateSource) {
+        let fromTranscript: (AgentState, AgentStateSource)? = transcript.fallbackState.map { ($0, .transcript) }
+
+        guard let hookState = hook?.state else { return fromTranscript ?? (.idle, .unknown) }
+        guard let hookTime = hook?.timestamp else { return (hookState, .hook) }
+
+        // The session went on working long after the hook state was written, so
+        // the hook is provably behind and the transcript is the better guess.
+        if let activity = transcript.lastActivity,
+           activity.timeIntervalSince(hookTime) > hookLagToleranceSeconds,
+           let fromTranscript {
+            return fromTranscript
+        }
+        // Only `working` asserts activity happening right now; `waiting` and
+        // `permission` describe a condition that legitimately lasts for hours
+        // until the user acts, so they are never aged out.
+        if hookState == .working, now.timeIntervalSince(hookTime) > hookWorkingMaxAgeSeconds {
+            return (.idle, .unknown)
+        }
+        return (hookState, .hook)
+    }
+
+    // MARK: - Context window
+
+    /// Used tokens and the window they are measured against.
+    ///
+    /// The two numbers must come from one source: statusLine and the transcript
+    /// are sampled at different moments, and a numerator from one with a
+    /// denominator from the other produced percentages such as `194k (97%)` for
+    /// a session using 19% of a 1M window.
+    static func contextUsage(transcript: TranscriptSummary,
+                             metrics: MetricsStatus?) -> (used: Int?, limit: Int?) {
+        // `message.model` in a transcript is always the plain id
+        // (`claude-opus-5`); only `model.id` from statusLine carries the `[1m]`
+        // suffix, so both have to be inspected.
+        let isExtended = isExtendedContextModel([metrics?.modelId, transcript.model])
+
+        if let metrics, let used = metrics.usedTokens {
+            let limit = metrics.contextWindowSize
+                ?? limitFromPercentage(usedTokens: used, percentage: metrics.usedPercentage)
+                ?? contextLimitTokens(isExtendedContext: isExtended, usedTokens: used)
+            return (used, limit)
+        }
+        guard let used = transcript.contextUsedTokens else { return (nil, nil) }
+        return (used, contextLimitTokens(isExtendedContext: isExtended, usedTokens: used))
+    }
+
+    /// Whether any known identifier of the session's model names the extended
+    /// 1M-token variant.
+    static func isExtendedContextModel(_ identifiers: [String?]) -> Bool {
+        identifiers.contains { $0?.contains("[1m]") == true }
+    }
+
+    /// Window size implied by statusLine's own percentage, used only when the
+    /// same payload did not state the size outright. Both numbers describe the
+    /// same moment, so this is a reading, not a guess.
+    static func limitFromPercentage(usedTokens: Int, percentage: Double?) -> Int? {
+        guard let percentage, percentage >= 1, usedTokens > 0 else { return nil }
+        return Int((Double(usedTokens) * 100 / percentage).rounded())
+    }
+
+    /// Window size when statusLine did not report one.
+    ///
+    /// Returns `nil` unless something actually proves the window is the large
+    /// one: the default is 200k, but assuming it turns every 1M session into a
+    /// near-full bar. A confidently wrong percentage is worse than none, so the
+    /// UI is left to show the raw token count instead.
+    static func contextLimitTokens(isExtendedContext: Bool, usedTokens: Int) -> Int? {
+        if isExtendedContext { return 1_000_000 }
+        // Evidence rather than a heuristic: a 200k window cannot hold this much.
         if usedTokens > 200_000 { return 1_000_000 }
-        if let model, model.contains("[1m]") { return 1_000_000 }
-        return 200_000
+        return nil
     }
 
     // MARK: - Hook state
@@ -194,13 +303,25 @@ enum ClaudeSessions {
         var lastActivity: Date?
     }
 
+    private static let transcriptCache = FileDerivedCache<TranscriptSummary>()
+
     /// Summarises a session transcript from its tail.
     ///
     /// Transcripts reach tens of megabytes, so only the last `tailBytes` are
     /// read and the first (almost certainly truncated) line is dropped. Lines
     /// are inspected from the end and the scan stops as soon as every field is
     /// filled, which normally costs a few dozen JSON parses.
+    ///
+    /// The result is cached until the file changes: a snapshot runs about once a
+    /// second and would otherwise re-read several megabytes of unchanged tails
+    /// every time, which is what the menu bar agent's power draw comes down to.
     static func transcriptSummary(atPath path: String, tailBytes: Int) -> TranscriptSummary {
+        transcriptCache.value(atPath: path, variant: "\(tailBytes)") {
+            uncachedTranscriptSummary(atPath: path, tailBytes: tailBytes)
+        }
+    }
+
+    private static func uncachedTranscriptSummary(atPath path: String, tailBytes: Int) -> TranscriptSummary {
         var summary = TranscriptSummary()
         summary.lastActivity = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
 
@@ -269,9 +390,15 @@ enum ClaudeSessions {
               let data = try? handle.readToEnd(), !data.isEmpty
         else { return [] }
 
+        // Split on the 0x0A byte, not on Characters: `String.split(separator:)`
+        // compares graphemes, and CRLF is a single grapheme that never equals
+        // "\n", so a CRLF transcript would come back as one giant "line" and the
+        // whole session summary would silently disappear. Splitting bytes also
+        // avoids materialising the tail as one big String.
+        //
         // A cut in the middle of a UTF-8 sequence only damages the first line,
         // which is dropped anyway when the file was longer than the window.
-        var lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
+        var lines = data.split(separator: 0x0A).map { String(decoding: $0, as: UTF8.self) }
         if offset > 0, !lines.isEmpty { lines.removeFirst() }
         return lines
     }
@@ -315,9 +442,18 @@ enum ClaudeSessions {
         return result
     }
 
+    private static let subagentFinishedCache = FileDerivedCache<Bool>()
+
     /// A subagent transcript ends with an assistant message that stopped on its
-    /// own once the agent has delivered its answer.
+    /// own once the agent has delivered its answer. Cached like the session
+    /// transcripts: an unchanged file cannot have finished since last time.
     private static func isFinished(transcriptPath: String) -> Bool {
+        subagentFinishedCache.value(atPath: transcriptPath) {
+            uncachedIsFinished(transcriptPath: transcriptPath)
+        }
+    }
+
+    private static func uncachedIsFinished(transcriptPath: String) -> Bool {
         let lines = tailLines(atPath: transcriptPath, maxBytes: 64 * 1024)
         guard let last = lines.last,
               let object = try? JSONC.parse(last),
@@ -327,5 +463,58 @@ enum ClaudeSessions {
               let stopReason = message["stop_reason"] as? String
         else { return false }
         return stopReason == "end_turn" || stopReason == "stop_sequence"
+    }
+}
+
+/// Values derived from a file, kept for as long as the file itself does not
+/// change.
+///
+/// `(size, mtime)` is a complete key here: the derived values are pure functions
+/// of the file's bytes, and a transcript is only ever appended to. Without this
+/// every snapshot re-read and re-parsed several megabytes of tails that could
+/// not possibly have changed.
+///
+/// `@unchecked Sendable`: the only mutable state is `entries`, and it is never
+/// touched outside `lock`.
+final class FileDerivedCache<Value: Sendable>: @unchecked Sendable {
+    private struct Entry {
+        var size: UInt64
+        var modificationDate: Date
+        var value: Value
+    }
+
+    /// The live working set is one entry per live session, so this is only ever
+    /// reached by a process that has watched sessions come and go for days.
+    private static var capacity: Int { 256 }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+
+    /// The cached value for `path`, computing it when the file moved. `variant`
+    /// separates values derived from the same file under different parameters.
+    func value(atPath path: String, variant: String = "", compute: () -> Value) -> Value {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let modificationDate = attributes[.modificationDate] as? Date
+        else { return compute() }
+        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        let key = variant.isEmpty ? path : "\(variant)|\(path)"
+
+        lock.lock()
+        if let entry = entries[key], entry.size == size, entry.modificationDate == modificationDate {
+            defer { lock.unlock() }
+            return entry.value
+        }
+        lock.unlock()
+
+        let value = compute()
+
+        lock.lock()
+        // Dropping everything is fine: the next snapshot refills exactly the
+        // entries that are still in use, and nothing here is expensive to redo
+        // once.
+        if entries.count >= Self.capacity { entries.removeAll(keepingCapacity: true) }
+        entries[key] = Entry(size: size, modificationDate: modificationDate, value: value)
+        lock.unlock()
+        return value
     }
 }

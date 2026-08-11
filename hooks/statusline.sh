@@ -41,8 +41,12 @@ if [ -z "$JQ" ]; then
 fi
 [ -z "$JQ" ] && exit 0
 
+# Not @tsv: it escapes backslashes too and nothing unescapes them again, so a
+# cwd of `/a\b` would come back as `/a\\b`. Control characters are flattened
+# instead, which is all the single-line record actually needs.
 fields=$(printf '%s' "$payload" | "$JQ" -r '
-	def s: if . == null then "" elif type == "string" then . else tostring end;
+	def s: (if . == null then "" elif type == "string" then . else tostring end)
+		| gsub("[[:cntrl:]]"; " ");
 	[
 		((.session_id // .sessionId // "") | s),
 		((.cwd // .workspace.current_dir // "") | s),
@@ -52,8 +56,8 @@ fields=$(printf '%s' "$payload" | "$JQ" -r '
 		((.context_window.total_input_tokens // .context_window.used_tokens // "") | s),
 		((.cost.total_cost_usd // "") | s),
 		((.context_window.context_window_size // "") | s)
-	] | @tsv
-' 2>/dev/null | tr '\t' '\037')
+	] | join([31] | implode)
+' 2>/dev/null)
 [ -z "$fields" ] && exit 0
 
 # US (0x1f) rather than tab: tab is IFS whitespace, so `read` would collapse

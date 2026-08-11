@@ -3,15 +3,19 @@ import Foundation
 /// Scans the configured roots for project directories and resolves their colors.
 ///
 /// A directory counts as a project when it holds a `*.code-workspace` file or a
-/// `.git` entry. Scanning continues below a project up to the configured depth,
-/// because the user keeps grouping directories (`wirenboard/`) whose children
-/// are the real projects.
+/// `.git` entry, and a project is a leaf: the scan descends only through
+/// directories that are not projects themselves. That is what the depth is for —
+/// the grouping directories the user keeps (`wirenboard/`) hold no workspace and
+/// no `.git`, so their children are still reached.
 ///
 /// Results are cached and reused until the fingerprint of the tree changes: the
 /// modification time of every directory that was listed, plus of every color
 /// source file that was read (a directory mtime does not move when a file inside
 /// it is edited in place).
-final class WorkspaceIndex {
+///
+/// `@unchecked Sendable`: `projects(config:)` is the only entry point and every
+/// access to the cached state happens under `lock`.
+final class WorkspaceIndex: @unchecked Sendable {
     private let lock = NSLock()
     private var cachedProjects: [ProjectInfo] = []
     private var cachedFingerprint: [String: Date] = [:]
@@ -100,7 +104,10 @@ final class WorkspaceIndex {
             }
         }
 
-        if (workspaceFile != nil || hasGit), directory != root, seenPaths.insert(directory.path).inserted {
+        // A scan root is never a project itself, however it looks: it has to be
+        // descended into or nothing would be found at all.
+        let isProject = (workspaceFile != nil || hasGit) && directory != root
+        if isProject, seenPaths.insert(directory.path).inserted {
             projects.append(makeProject(directory: directory,
                                         root: root,
                                         workspaceFile: workspaceFile,
@@ -108,7 +115,13 @@ final class WorkspaceIndex {
                                         fingerprint: &fingerprint))
         }
 
-        guard depth < maxDepth else { return }
+        // Stop at a project. Descending into one turns its vendored and nested
+        // repositories into rows of their own, and a nested `mqtt2influx` then
+        // collides on `rootName` with the real top-level `mqtt2influx`: whichever
+        // has the newer mtime wins the window match, so the other one's window
+        // gets a stranger's color and path and its sessions land under a key
+        // nobody reads.
+        guard !isProject, depth < maxDepth else { return }
         for subdirectory in subdirectories {
             scan(directory: subdirectory,
                  root: root,
@@ -128,8 +141,9 @@ final class WorkspaceIndex {
         let directoryName = directory.lastPathComponent
         let rootName: String
         if let workspaceFile {
-            rootName = (workspaceFile as NSString).lastPathComponent
-                .replacingOccurrences(of: ".code-workspace", with: "")
+            // `deletingPathExtension`, not a substring replacement: the latter
+            // also cuts the pattern out of the middle of a name.
+            rootName = URL(fileURLWithPath: workspaceFile).deletingPathExtension().lastPathComponent
         } else {
             rootName = directoryName
         }

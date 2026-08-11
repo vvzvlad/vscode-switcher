@@ -34,12 +34,16 @@ if [ -z "$JQ" ]; then
 fi
 [ -z "$JQ" ] && exit 0
 
-# Pull every field we might need in one pass. @tsv escapes embedded tabs and
-# newlines, so the record stays on a single line whatever the payload contains.
-# The tabs are then swapped for US (0x1f): tab counts as IFS whitespace, which
+# Pull every field we might need in one pass. Control characters are flattened
+# to spaces so the record stays on a single line whatever the payload contains,
+# and the fields are joined with US (0x1f): tab counts as IFS whitespace, which
 # would make `read` collapse runs of empty fields and shift the values.
+#
+# Not @tsv: that escapes backslashes as well, and nothing ever unescapes them,
+# so a cwd of `/a\b` reached the switcher as `/a\\b` and matched no project.
 fields=$(printf '%s' "$payload" | "$JQ" -r '
-	def s: if . == null then "" elif type == "string" then . else tostring end;
+	def s: (if . == null then "" elif type == "string" then . else tostring end)
+		| gsub("[[:cntrl:]]"; " ");
 	[
 		((.session_id // .sessionId // "") | s),
 		((.cwd // .workspace.current_dir // .workspace.project_dir // "") | s),
@@ -48,8 +52,8 @@ fields=$(printf '%s' "$payload" | "$JQ" -r '
 		((.message // .notification // .title // "") | s),
 		((.reason // .stop_reason // "") | s),
 		((.transcript_path // .transcriptPath // "") | s)
-	] | @tsv
-' 2>/dev/null | tr '\t' '\037')
+	] | join([31] | implode)
+' 2>/dev/null)
 [ -z "$fields" ] && exit 0
 
 IFS=$'\037' read -r session_id cwd event notif_type message reason transcript <<EOF
@@ -115,8 +119,26 @@ Notification)
 	;;
 esac
 
+# Whatever is on disk already. Every hook runs with "async": true, so events do
+# arrive out of order and a new record is merged onto the old one rather than
+# replacing it wholesale.
+prev="null"
+if [ -s "$target" ]; then
+	prev=$("$JQ" -c '.' "$target" 2>/dev/null)
+	[ -z "$prev" ] && prev="null"
+fi
+prev_state=$(printf '%s' "$prev" | "$JQ" -r '.state // ""' 2>/dev/null)
+
+# `idle_prompt` only says the user has not typed for a while — which is exactly
+# what happens while a permission dialog sits on screen. Letting it write
+# `waiting` would turn the orange indicator green with the dialog still open.
+if [ "$state" = "waiting" ] && [ "$notif_type" = "idle_prompt" ] && [ "$prev_state" = "permission" ]; then
+	exit 0
+fi
+
 tmp="$STATUS_DIR/.tmp.$session_id.$$"
 "$JQ" -n \
+	--argjson prev "$prev" \
 	--arg sessionId "$session_id" \
 	--arg cwd "$cwd" \
 	--arg state "$state" \
@@ -126,11 +148,24 @@ tmp="$STATUS_DIR/.tmp.$session_id.$$"
 	--arg reason "$reason" \
 	--arg transcript "$transcript" \
 	--argjson ts "$(date +%s)" \
-	'{sessionId: $sessionId, cwd: $cwd, state: $state, event: $event, ts: $ts}
-	 + (if $message == "" then {} else {message: $message} end)
-	 + (if $notificationType == "" then {} else {notificationType: $notificationType} end)
-	 + (if $reason == "" then {} else {reason: $reason} end)
-	 + (if $transcript == "" then {} else {transcriptPath: $transcript} end)' \
+	'
+	# A record older than the one already on disk is dropped: a delayed
+	# UserPromptSubmit must not bury the Stop that overtook it. Emitting
+	# nothing leaves the temporary file empty, and the caller keeps the
+	# existing state.
+	if ($prev.ts // 0) > $ts then empty else
+	  # Notification payloads carry no cwd for some types; taking the empty
+	  # string would blank out the path a previous event recorded.
+	  {sessionId: $sessionId,
+	   cwd: (if $cwd == "" then ($prev.cwd // "") else $cwd end),
+	   state: $state,
+	   event: $event,
+	   ts: $ts}
+	  + (if $message == "" then {} else {message: $message} end)
+	  + (if $notificationType == "" then {} else {notificationType: $notificationType} end)
+	  + (if $reason == "" then {} else {reason: $reason} end)
+	  + (if $transcript == "" then {} else {transcriptPath: $transcript} end)
+	end' \
 	>"$tmp" 2>/dev/null
 
 if [ -s "$tmp" ]; then
