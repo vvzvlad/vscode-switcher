@@ -117,6 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "scanDepth": config.scanDepth,
                 "dwellMilliseconds": config.dwellMilliseconds,
                 "panelWidth": config.panelWidth,
+                "panelHeightFraction": config.panelHeightFraction,
                 "subagentActiveSeconds": config.subagentActiveSeconds,
                 "transcriptTailBytes": config.transcriptTailBytes,
                 "editorBundleID": config.editorBundleID

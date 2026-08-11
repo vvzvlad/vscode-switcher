@@ -26,8 +26,6 @@ final class SwitcherPanel: NSPanel {
 @MainActor
 final class PanelController {
 
-    /// Fraction of the screen's usable height the panel occupies.
-    private static let heightFraction: CGFloat = 0.7
     private static let cornerRadius: CGFloat = 12
     private static let showDuration: TimeInterval = 0.14
     private static let hideDuration: TimeInterval = 0.10
@@ -107,7 +105,7 @@ final class PanelController {
     // MARK: - Show / hide
 
     func show(on screen: NSScreen) {
-        let target = Self.frame(on: screen, width: config.panelWidth)
+        let target = Self.frame(on: screen, config: config)
 
         if isVisible {
             panel.setFrame(target, display: true)
@@ -163,12 +161,17 @@ final class PanelController {
     }
 
     /// Panel geometry: flush with the left edge of the screen's usable area,
-    /// vertically centred, `heightFraction` of that area tall.
-    static func frame(on screen: NSScreen, width: CGFloat) -> NSRect {
+    /// vertically centred, `config.panelHeightFraction` of that area tall.
+    ///
+    /// The single source of truth for where the panel lands: `EdgeTrigger` sizes
+    /// its trigger strip from the very same rect, so the strip cannot drift away
+    /// from the panel it opens.
+    static func frame(on screen: NSScreen, config: Config) -> NSRect {
         let usable = screen.visibleFrame
-        let height = (usable.height * heightFraction).rounded()
+        let height = (usable.height * CGFloat(config.panelHeightFraction)).rounded()
         let y = (usable.midY - height / 2).rounded()
-        return NSRect(x: usable.minX.rounded(), y: y, width: width.rounded(), height: height)
+        return NSRect(x: usable.minX.rounded(), y: y,
+                      width: CGFloat(config.panelWidth).rounded(), height: height)
     }
 
     // MARK: - Keyboard focus

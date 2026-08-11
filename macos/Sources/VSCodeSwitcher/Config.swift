@@ -15,6 +15,10 @@ struct Config: Sendable, Equatable {
     var dwellMilliseconds: Int
     /// Panel width in points.
     var panelWidth: Double
+    /// Fraction of the screen's usable height the panel occupies. The same
+    /// fraction defines the edge strip that opens it, so the trigger zone always
+    /// lines up with where the panel will appear.
+    var panelHeightFraction: Double
     /// A background subagent counts as active while its transcript was touched
     /// within this many seconds.
     var subagentActiveSeconds: Double
@@ -29,6 +33,7 @@ struct Config: Sendable, Equatable {
         scanDepth: 2,
         dwellMilliseconds: 150,
         panelWidth: 380,
+        panelHeightFraction: 0.7,
         subagentActiveSeconds: 90,
         transcriptTailBytes: 512 * 1024,
         editorBundleID: "com.microsoft.VSCode"
@@ -75,6 +80,9 @@ struct Config: Sendable, Equatable {
         }
         if let value = dict["panelWidth"] as? Double, value > 0 {
             config.panelWidth = value
+        }
+        if let value = dict["panelHeightFraction"] as? Double, value > 0, value <= 1 {
+            config.panelHeightFraction = value
         }
         if let value = dict["subagentActiveSeconds"] as? Double, value > 0 {
             config.subagentActiveSeconds = value

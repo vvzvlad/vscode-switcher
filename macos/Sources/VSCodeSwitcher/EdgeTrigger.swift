@@ -2,7 +2,8 @@ import AppKit
 import Foundation
 
 /// Watches the pointer for the two gestures that drive the panel: resting
-/// against the left screen edge, and walking away from an open panel.
+/// against the left screen edge next to where the panel will appear, and
+/// walking away from an open panel.
 ///
 /// The pointer is polled at 60 Hz through `NSEvent.mouseLocation`. A global
 /// event tap would be the obvious alternative but needs the Accessibility (and
@@ -29,6 +30,9 @@ final class EdgeTrigger {
     private static let leaveDelay: TimeInterval = 0.4
 
     private let dwell: TimeInterval
+    /// Kept whole because the trigger strip is derived from the panel geometry,
+    /// which needs more than one field of it.
+    private let config: Config
 
     private var timer: Timer?
     /// Frame of the panel while it is on screen, `nil` when it is hidden.
@@ -38,6 +42,7 @@ final class EdgeTrigger {
     private var needsRearm = false
 
     init(config: Config) {
+        self.config = config
         dwell = Double(config.dwellMilliseconds) / 1000.0
     }
 
@@ -84,9 +89,9 @@ final class EdgeTrigger {
 
         if let panelFrame {
             edgeEnteredAt = nil
-            // The panel covers 70% of the screen height, so leaving it upwards
-            // or downwards is just as ordinary as leaving it to the right;
-            // testing a single axis would keep it open forever.
+            // The panel covers only part of the screen height, so leaving it
+            // upwards or downwards is just as ordinary as leaving it to the
+            // right; testing a single axis would keep it open forever.
             let keepOpen = panelFrame.insetBy(dx: -Self.leaveMargin, dy: -Self.leaveMargin)
             guard !NSPointInRect(point, keepOpen) else {
                 leftAt = nil
@@ -109,6 +114,20 @@ final class EdgeTrigger {
         }
 
         guard point.x <= screen.frame.minX + Self.edgeTolerance else {
+            edgeEnteredAt = nil
+            return
+        }
+
+        // Only the stretch of the edge the panel itself will cover arms the
+        // trigger, so the panel always appears right where the pointer already
+        // is; the free strips above and below let the pointer run along the edge
+        // without summoning it. The rect comes from the panel's own geometry —
+        // and from the current screen's `visibleFrame`, not the main screen's —
+        // so the strip cannot drift away from what it opens. Only `edgeEnteredAt`
+        // is reset here: the auto-hide timer lives in the branch above and never
+        // reaches this code.
+        let strip = PanelController.frame(on: screen, config: config)
+        guard point.y >= strip.minY, point.y <= strip.maxY else {
             edgeEnteredAt = nil
             return
         }
