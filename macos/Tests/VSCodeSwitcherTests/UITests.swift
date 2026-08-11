@@ -232,8 +232,10 @@ final class WindowOrderTests: XCTestCase {
                        ["a", "x", "y"])
     }
 
+    /// No freeze at all — `nil`, not an empty list, which means an order frozen
+    /// while no window was open and is a freeze like any other.
     func testWithoutAFrozenOrderTheZOrderIsUsedAsIs() {
-        XCTAssertEqual(SwitcherViewModel.ordered(rows(["c", "b", "a"]), by: []).map(\.id),
+        XCTAssertEqual(SwitcherViewModel.ordered(rows(["c", "b", "a"]), by: nil).map(\.id),
                        ["c", "b", "a"])
     }
 
@@ -433,6 +435,32 @@ final class WindowOrderTests: XCTestCase {
         model.update(snapshot: snapshot(["a", "b", "c"], generatedAt: Date()))
         model.update(snapshot: snapshot(["c", "a", "b"], generatedAt: Date()))
         XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
+    }
+
+    /// The same first appearance, but the fresh snapshot arrives before the
+    /// click — the usual case, since it lands while the panel is still sliding
+    /// in. It freezes an *empty* order, and that has to count as frozen: told
+    /// apart from "nothing frozen yet" by emptiness alone, it switched the rule
+    /// that records newcomers off for the rest of the appearance, so every
+    /// window opened from the panel was laid out by live z-order and clicking
+    /// one of them swapped the rows under the pointer.
+    func testAnOrderFrozenWithNoWindowsStillTakesInTheNewOnes() {
+        let model = SwitcherViewModel()
+        model.panelDidShow()
+        model.update(snapshot: snapshot([], generatedAt: Date()))
+
+        // Two projects clicked in a row, each opening a window in front of the
+        // other; both rows appear at the end of the frozen order, in that order.
+        model.rowActivated(projectRow("project:/tmp/one"))
+        model.update(snapshot: snapshot(["w1"], generatedAt: Date()))
+        model.rowActivated(projectRow("project:/tmp/two"))
+        model.update(snapshot: snapshot(["w2", "w1"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["w1", "w2"])
+
+        // Clicking the upper row raises it, and the rows must stay put.
+        model.rowActivated(rows(["w1"])[0])
+        model.update(snapshot: snapshot(["w1", "w2"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["w1", "w2"])
     }
 }
 

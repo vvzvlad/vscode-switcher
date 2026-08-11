@@ -40,8 +40,17 @@ final class SwitcherViewModel: ObservableObject {
     @Published private(set) var panelVisible = false
     @Published private(set) var snapshot: SwitcherSnapshot = .empty
     /// Row identifiers of the "open windows" section, in the order they were in
-    /// when the panel appeared. Empty before the first show.
-    @Published private var windowOrder: [String] = []
+    /// when the panel appeared. `nil` until the first show.
+    ///
+    /// `nil` and `[]` are different states on purpose: "no order has been frozen"
+    /// against "an order was frozen while no window was open". The panel is
+    /// routinely summoned with the editor closed, and an empty list is then a
+    /// perfectly good frozen order — the windows opened from the panel after
+    /// that have to be appended to it. Told apart by emptiness alone, that case
+    /// read as "no freeze": the rule that records newcomers switched itself off
+    /// for the rest of the appearance and the list went back to live z-order,
+    /// reshuffling under the pointer at every click.
+    @Published private var windowOrder: [String]?
     /// Set when the panel appears: the order above came from the cache and is
     /// provisional until a snapshot whose sources were read after this instant
     /// arrives. Cleared by that snapshot, and by the first click.
@@ -79,7 +88,7 @@ final class SwitcherViewModel: ObservableObject {
         // arrived and become worth aiming at. Replacing the whole order there
         // reshuffled the list under a pointer already on its way to a row.
         if let pendingSince = orderPendingSince, snapshot.generatedAt >= pendingSince {
-            windowOrder = Self.merged(windowOrder, with: snapshot.openWindows.map(\.id))
+            windowOrder = Self.merged(windowOrder ?? [], with: snapshot.openWindows.map(\.id))
             orderPendingSince = nil
         }
         // A window opened while the panel is up joins the frozen order the first
@@ -90,12 +99,17 @@ final class SwitcherViewModel: ObservableObject {
         // moving from a click, which is what the freeze exists to stop. Not
         // while the re-freeze is still pending: the order is provisional until
         // then, and a newcomer belongs in the z-order slot `merged` gives it.
-        if orderPendingSince == nil, !windowOrder.isEmpty {
-            var known = Set(windowOrder)
+        // An order frozen empty counts as frozen — that is the panel summoned
+        // with no editor window at all, where every row that ever appears is a
+        // newcomer and this rule is the only thing holding the list still.
+        if orderPendingSince == nil, let frozen = windowOrder {
+            var order = frozen
+            var known = Set(frozen)
             for row in snapshot.openWindows where !known.contains(row.id) {
                 known.insert(row.id)
-                windowOrder.append(row.id)
+                order.append(row.id)
             }
+            if order.count != frozen.count { windowOrder = order }
         }
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         if let id = Self.frontmostWindowID(in: snapshot, frontmostPID: pid) { frontmostRowID = id }
@@ -125,8 +139,9 @@ final class SwitcherViewModel: ObservableObject {
     /// force at this instant is written down and the pending re-freeze dropped.
     /// Clearing the pending flag alone was not enough: when the order was still
     /// empty — the panel's first appearance after launch, before any snapshot —
-    /// `ordered` fell through to the raw z-order and the list jumped after every
-    /// click, which is the defect the freeze was built for.
+    /// the windows on screen appeared in it nowhere, so the list was laid out by
+    /// raw z-order and jumped after every click, which is the defect the freeze
+    /// was built for.
     ///
     /// And when there is nothing to write down, the wait stays on. The panel can
     /// be summoned with no editor window at all — the editor is closed, or the
@@ -205,8 +220,13 @@ final class SwitcherViewModel: ObservableObject {
     /// taken afresh at every show — from the first snapshot read after that show
     /// (see `update(snapshot:)`) — so the list is back in z-order, most recently
     /// used first, as soon as the panel is reopened.
-    static func ordered(_ rows: [SwitcherRow], by order: [String]) -> [SwitcherRow] {
-        guard !order.isEmpty else { return rows }
+    ///
+    /// `nil` means no order has been frozen yet, and only then is the raw z-order
+    /// handed back untouched. An order frozen while no window was open is `[]`,
+    /// which is a frozen order like any other: its rows are all newcomers and
+    /// keep the sequence `update(snapshot:)` recorded them in.
+    static func ordered(_ rows: [SwitcherRow], by order: [String]?) -> [SwitcherRow] {
+        guard let order else { return rows }
         var position: [String: Int] = [:]
         for (index, id) in order.enumerated() where position[id] == nil { position[id] = index }
 
