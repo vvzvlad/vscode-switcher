@@ -158,7 +158,17 @@ final class PanelController {
         targetFrame = target
 
         if isVisible {
-            panel.setFrame(target, display: true)
+            // A plain `setFrame` does not stop an animation that is still
+            // running. A screen change landing inside the 0.14 s slide-in below
+            // therefore let the animator finish on the *old* target while
+            // `targetFrame` and the edge trigger already held the new one: the
+            // panel drawn in one place, the "click landed outside" test and the
+            // keep-open zone in another. A zero-duration group replaces the
+            // running animation for the same key instead of racing it.
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                panel.animator().setFrame(target, display: true)
+            }
             panel.orderFrontRegardless()
             onPanelMoved?(target)
             return
