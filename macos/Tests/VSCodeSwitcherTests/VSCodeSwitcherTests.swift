@@ -1353,6 +1353,26 @@ final class SnapshotCoalescingTests: XCTestCase {
         XCTAssertNotEqual(first.generatedAt, second.generatedAt)
     }
 
+    /// The no-argument `snapshot()` is the one the app actually calls, and every
+    /// other test here goes through the `requestedAt` seam instead — a mistake
+    /// in that single line, a pinned or stale `Date`, would have served the very
+    /// first build to every caller forever with nothing to catch it.
+    ///
+    func testTwoSequentialSnapshotsAreTwoBuilds() {
+        let counter = BuildCounter()
+        let source = makeSource(counter: counter)
+
+        let first = source.snapshot()
+        // `Date` is a `Double` of seconds since 2001, so around now it resolves
+        // to a quarter of a microsecond — coarser than the gap between two calls
+        // made back to back, which the `>=` would then read as "arrived before
+        // the build finished". The app's own calls are a second apart.
+        Thread.sleep(forTimeInterval: 0.001)
+        let second = source.snapshot()
+        XCTAssertEqual(counter.value, 2)
+        XCTAssertNotEqual(first.generatedAt, second.generatedAt)
+    }
+
     /// The cache is served to an earlier arrival however long ago the build ran,
     /// so a caller that never gets scheduled cannot force a second pass.
     func testAnEarlierArrivalIsStillServedTheCache() {
