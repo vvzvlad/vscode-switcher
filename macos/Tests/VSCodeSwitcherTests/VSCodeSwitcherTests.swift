@@ -210,6 +210,26 @@ final class ContextWindowTests: XCTestCase {
         XCTAssertFalse(ClaudeSessions.isExtendedContextModel([nil, nil]))
     }
 
+    /// The setting is an alias, not an id, and the CLI accepts the marker on
+    /// every one of them. Matching known strings instead of the marker would
+    /// have recognised `claude-opus-5[1m]` and missed the `opus[1m]` the user
+    /// actually has in their settings.
+    func testEveryAcceptedFormOfTheMarkerIsRecognised() {
+        let extended = ["opus[1m]", "sonnet[1m]", "opusplan[1m]", "fable[1m]",
+                        "claude-opus-5[1m]", "claude-opus-4-5[1m]",
+                        "claude-sonnet-4-5-20250929[1m]", "sonnet-4-6[1m]"]
+        for identifier in extended {
+            XCTAssertTrue(ClaudeSessions.isExtendedContextModel([identifier]), identifier)
+        }
+        // Aliases without a suffix are the common case and must not be read as
+        // extended, and neither must a bare id that merely mentions a `1`.
+        let plain = ["opus", "sonnet", "haiku", "default", "claude-opus-5",
+                     "claude-haiku-4-5-20251001", "claude-sonnet-4-1", ""]
+        for identifier in plain {
+            XCTAssertFalse(ClaudeSessions.isExtendedContextModel([identifier]), identifier)
+        }
+    }
+
     func testExtendedModelGivesOneMillionWellBelowTwoHundredK() {
         XCTAssertEqual(ClaudeSessions.contextLimitTokens(isExtendedContext: true, usedTokens: 194_000),
                        1_000_000)
@@ -348,6 +368,293 @@ final class ContextWindowTests: XCTestCase {
         metrics.timestamp = now
 
         XCTAssertNil(ClaudeSessions.contextUsage(transcript: transcript, metrics: metrics).limit)
+    }
+
+    /// The case the whole configuration source exists for: `.metrics.json`
+    /// covers one session in six, so almost every session used to show a bare
+    /// token count. The user's `~/.claude/settings.json` says `opus[1m]`, which
+    /// is Claude Code's own way of asking for the large window.
+    func testConfiguredModelSuppliesTheLimitWhenNothingElseCan() {
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.model = "claude-opus-5"
+        transcript.contextUsedTokens = 186_000
+
+        XCTAssertNil(ClaudeSessions.contextUsage(transcript: transcript, metrics: nil).limit)
+
+        let usage = ClaudeSessions.contextUsage(transcript: transcript,
+                                                metrics: nil,
+                                                configuredModel: "opus[1m]")
+        XCTAssertEqual(usage.used, 186_000)
+        XCTAssertEqual(usage.limit, 1_000_000)
+    }
+
+    /// A configured model without the marker adds nothing: the default window is
+    /// 200k, but substituting it is the guess that produced `194k (97%)`.
+    func testConfiguredModelWithoutTheMarkerLeavesTheLimitUnknown() {
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.contextUsedTokens = 186_000
+
+        XCTAssertNil(ClaudeSessions.contextUsage(transcript: transcript,
+                                                 metrics: nil,
+                                                 configuredModel: "opus").limit)
+        XCTAssertNil(ClaudeSessions.contextUsage(transcript: transcript,
+                                                 metrics: nil,
+                                                 configuredModel: nil).limit)
+    }
+
+    /// `contextWindowSize` is the only source that measured the session itself.
+    /// The setting decides what a *new* session starts on, so a session moved to
+    /// another model with `/model` would be misreported if it could override.
+    func testFreshMetricsOutrankTheConfiguredModel() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.contextUsedTokens = 100_000
+        transcript.lastActivity = now
+
+        var metrics = ClaudeSessions.MetricsStatus()
+        metrics.modelId = "claude-haiku-4-5-20251001"
+        metrics.usedTokens = 32_679
+        metrics.contextWindowSize = 200_000
+        metrics.timestamp = now
+
+        let usage = ClaudeSessions.contextUsage(transcript: transcript,
+                                                metrics: metrics,
+                                                configuredModel: "opus[1m]")
+        XCTAssertEqual(usage.used, 32_679)
+        XCTAssertEqual(usage.limit, 200_000)
+    }
+
+    /// The same, one rung down: a payload without `contextWindowSize` still
+    /// measured its own window through `usedPercentage`.
+    func testPercentageDerivedLimitOutranksTheConfiguredModel() {
+        let now = Date()
+        var metrics = ClaudeSessions.MetricsStatus()
+        metrics.usedTokens = 93_953
+        metrics.usedPercentage = 46
+        metrics.timestamp = now
+
+        let usage = ClaudeSessions.contextUsage(transcript: ClaudeSessions.TranscriptSummary(),
+                                                metrics: metrics,
+                                                configuredModel: "opus[1m]")
+        XCTAssertEqual(usage.limit, 200_000)
+    }
+
+    /// Metrics that say nothing about the window are not a reason to say nothing
+    /// either: the configured model is still the last rung above `nil`.
+    func testConfiguredModelStillAppliesWhenMetricsCarryNoWindow() {
+        let now = Date()
+        var metrics = ClaudeSessions.MetricsStatus()
+        metrics.modelId = "claude-opus-5"
+        metrics.usedTokens = 74_000
+        metrics.timestamp = now
+
+        let transcript = ClaudeSessions.TranscriptSummary()
+        XCTAssertNil(ClaudeSessions.contextUsage(transcript: transcript, metrics: metrics).limit)
+        XCTAssertEqual(ClaudeSessions.contextUsage(transcript: transcript,
+                                                   metrics: metrics,
+                                                   configuredModel: "opus[1m]").limit,
+                       1_000_000)
+    }
+
+    /// Stale metrics still lose to a transcript that kept moving, and the
+    /// configured model must not smuggle their window back in.
+    func testStaleMetricsStillLoseWithAConfiguredModelPresent() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.contextUsedTokens = 186_000
+        transcript.lastActivity = now
+
+        var metrics = ClaudeSessions.MetricsStatus()
+        metrics.usedTokens = 5_000
+        metrics.contextWindowSize = 200_000
+        metrics.timestamp = now.addingTimeInterval(-3 * 3600)
+
+        let usage = ClaudeSessions.contextUsage(transcript: transcript,
+                                                metrics: metrics,
+                                                configuredModel: "opus[1m]")
+        XCTAssertEqual(usage.used, 186_000)
+        XCTAssertEqual(usage.limit, 1_000_000)
+    }
+
+    /// A session with no numbers at all stays without numbers; a configured
+    /// model is a denominator, not a numerator.
+    func testConfiguredModelDoesNotInventAUsedCount() {
+        let usage = ClaudeSessions.contextUsage(transcript: ClaudeSessions.TranscriptSummary(),
+                                                metrics: nil,
+                                                configuredModel: "opus[1m]")
+        XCTAssertNil(usage.used)
+        XCTAssertNil(usage.limit)
+    }
+}
+
+/// Claude Code's own settings say which model a session in a given directory
+/// starts on, and `[1m]` in that alias is a request for the 1M window. This is
+/// the only source that covers the sessions `.metrics.json` never reaches — one
+/// in six of them has that file.
+final class ConfiguredModelTests: XCTestCase {
+
+    func testUserSettingsApplyWhenTheProjectSaysNothing() throws {
+        let home = try makeTemporaryDirectory()
+        let project = try makeTemporaryDirectory()
+        try write(##"{"model": "opus[1m]", "permissions": {"allow": []}}"##,
+                  to: home.appendingPathComponent("settings.json"))
+
+        XCTAssertEqual(ClaudeSessions.configuredModelIdentifier(cwd: project.path,
+                                                                claudeHome: home,
+                                                                environmentModel: nil),
+                       "opus[1m]")
+    }
+
+    /// Sessions live in different directories and a project may pin its own
+    /// model, so the answer has to be per-`cwd`: a project on plain `sonnet`
+    /// must not inherit the user's 1M default.
+    func testProjectSettingsOverrideTheUserDefault() throws {
+        let home = try makeTemporaryDirectory()
+        let project = try makeTemporaryDirectory()
+        try write(##"{"model": "opus[1m]"}"##, to: home.appendingPathComponent("settings.json"))
+        try write(##"{"model": "sonnet"}"##, to: try claudeDirectory(in: project)
+            .appendingPathComponent("settings.json"))
+
+        XCTAssertEqual(ClaudeSessions.configuredModelIdentifier(cwd: project.path,
+                                                                claudeHome: home,
+                                                                environmentModel: nil),
+                       "sonnet")
+        XCTAssertFalse(ClaudeSessions.isExtendedContextModel([
+            ClaudeSessions.configuredModelIdentifier(cwd: project.path,
+                                                     claudeHome: home,
+                                                     environmentModel: nil)
+        ]))
+    }
+
+    func testLocalProjectSettingsOverrideTheSharedProjectFile() throws {
+        let home = try makeTemporaryDirectory()
+        let project = try makeTemporaryDirectory()
+        let claude = try claudeDirectory(in: project)
+        try write(##"{"model": "haiku"}"##, to: home.appendingPathComponent("settings.json"))
+        try write(##"{"model": "sonnet"}"##, to: claude.appendingPathComponent("settings.json"))
+        try write(##"{"model": "opus[1m]"}"##, to: claude.appendingPathComponent("settings.local.json"))
+
+        XCTAssertEqual(ClaudeSessions.configuredModelIdentifier(cwd: project.path,
+                                                                claudeHome: home,
+                                                                environmentModel: nil),
+                       "opus[1m]")
+    }
+
+    /// The inherited environment is the most global signal of the four, and a
+    /// menu bar agent started by launchd may not have it at all, so it only
+    /// answers when no file did.
+    func testEnvironmentIsTheLastResort() throws {
+        let home = try makeTemporaryDirectory()
+        let project = try makeTemporaryDirectory()
+
+        XCTAssertEqual(ClaudeSessions.configuredModelIdentifier(cwd: project.path,
+                                                                claudeHome: home,
+                                                                environmentModel: "sonnet[1m]"),
+                       "sonnet[1m]")
+
+        try write(##"{"model": "haiku"}"##, to: home.appendingPathComponent("settings.json"))
+        XCTAssertEqual(ClaudeSessions.configuredModelIdentifier(cwd: project.path,
+                                                                claudeHome: home,
+                                                                environmentModel: "sonnet[1m]"),
+                       "haiku")
+    }
+
+    func testNothingConfiguredAnywhereIsNil() throws {
+        let home = try makeTemporaryDirectory()
+        let project = try makeTemporaryDirectory()
+        XCTAssertNil(ClaudeSessions.configuredModelIdentifier(cwd: project.path,
+                                                              claudeHome: home,
+                                                              environmentModel: nil))
+    }
+
+    /// A settings file that pins nothing must not stop the chain: the user
+    /// default still applies to a project that only lists permissions, which is
+    /// what every `.claude/settings.local.json` on the machine actually holds.
+    func testASettingsFileWithoutAModelDoesNotShadowTheUserDefault() throws {
+        let home = try makeTemporaryDirectory()
+        let project = try makeTemporaryDirectory()
+        try write(##"{"model": "opus[1m]"}"##, to: home.appendingPathComponent("settings.json"))
+        try write(##"{"permissions": {"allow": ["Bash(ls:*)"]}}"##,
+                  to: try claudeDirectory(in: project).appendingPathComponent("settings.local.json"))
+
+        XCTAssertEqual(ClaudeSessions.configuredModelIdentifier(cwd: project.path,
+                                                                claudeHome: home,
+                                                                environmentModel: nil),
+                       "opus[1m]")
+    }
+
+    /// Settings files are hand-edited, so half of them are mid-write or broken
+    /// at any moment. A refresh must not care.
+    func testUnreadableSettingsAreIgnoredRatherThanFatal() throws {
+        let home = try makeTemporaryDirectory()
+        let project = try makeTemporaryDirectory()
+        try write("{ not json at all", to: try claudeDirectory(in: project)
+            .appendingPathComponent("settings.json"))
+        try write(##"{"model": "opus[1m]"}"##, to: home.appendingPathComponent("settings.json"))
+
+        XCTAssertEqual(ClaudeSessions.configuredModelIdentifier(cwd: project.path,
+                                                                claudeHome: home,
+                                                                environmentModel: nil),
+                       "opus[1m]")
+    }
+
+    /// `.claude/settings.json` is written by hand and by tooling, so it carries
+    /// comments and trailing commas as often as the VSCode files do.
+    func testSettingsAreReadAsJSONC() {
+        let dict = try? JSONC.parse(##"""
+        {
+          // pinned globally
+          "model": "opus[1m]",
+        }
+        """##) as? [String: Any]
+        XCTAssertEqual(ClaudeSessions.modelSetting(in: dict ?? [:]), "opus[1m]")
+    }
+
+    func testEnvBlockPinsTheModelAndLosesToAnExplicitOne() {
+        XCTAssertEqual(ClaudeSessions.modelSetting(in: ["env": ["ANTHROPIC_MODEL": "sonnet[1m]"]]),
+                       "sonnet[1m]")
+        XCTAssertEqual(ClaudeSessions.modelSetting(in: ["model": "haiku",
+                                                        "env": ["ANTHROPIC_MODEL": "sonnet[1m]"]]),
+                       "haiku")
+        // The user's own file has an empty `env` and a `model`; an empty string
+        // is not a pin either.
+        XCTAssertNil(ClaudeSessions.modelSetting(in: ["env": [:]]))
+        XCTAssertNil(ClaudeSessions.modelSetting(in: ["model": "   "]))
+        XCTAssertNil(ClaudeSessions.modelSetting(in: [:]))
+    }
+
+    /// Settings are re-read for every session on every snapshot — once a second
+    /// while the panel is open — so the value has to survive as long as the file
+    /// does and follow it when it changes.
+    func testTheParsedSettingIsCachedUntilTheFileChanges() throws {
+        let home = try makeTemporaryDirectory()
+        let file = home.appendingPathComponent("settings.json")
+        try write(##"{"model": "opus[1m]"}"##, to: file)
+        XCTAssertEqual(ClaudeSessions.modelSetting(atPath: file.path), "opus[1m]")
+
+        try write(##"{"model": "sonnet"}"##, to: file)
+        // Same path, different bytes and mtime: the cache key covers both.
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(5)],
+                                              ofItemAtPath: file.path)
+        XCTAssertEqual(ClaudeSessions.modelSetting(atPath: file.path), "sonnet")
+    }
+
+    private func write(_ contents: String, to url: URL) throws {
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func claudeDirectory(in project: URL) throws -> URL {
+        let url = project.appendingPathComponent(".claude")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vscode-switcher-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
     }
 }
 

@@ -134,7 +134,9 @@ enum ClaudeSessions {
 
         let resolved = resolveState(hook: hook, transcript: transcript)
         let model = transcript.model ?? metrics?.modelId ?? metrics?.modelName
-        let context = contextUsage(transcript: transcript, metrics: metrics)
+        let context = contextUsage(transcript: transcript,
+                                   metrics: metrics,
+                                   configuredModel: configuredModelIdentifier(cwd: cwd))
 
         let subagents = subagents(slug: slug, sessionId: sessionId, config: config)
 
@@ -229,17 +231,26 @@ enum ClaudeSessions {
     /// are sampled at different moments, and a numerator from one with a
     /// denominator from the other produced percentages such as `194k (97%)` for
     /// a session using 19% of a 1M window.
+    /// `configuredModel` is the alias Claude Code's own settings would start a
+    /// session in this directory with. It is the weakest of the sources and only
+    /// ever fills in a limit nothing else could supply — see
+    /// `configuredModelIdentifier(cwd:)`.
     static func contextUsage(transcript: TranscriptSummary,
-                             metrics: MetricsStatus?) -> (used: Int?, limit: Int?) {
+                             metrics: MetricsStatus?,
+                             configuredModel: String? = nil) -> (used: Int?, limit: Int?) {
         if let metrics, let used = metrics.usedTokens,
            !metricsAreStale(metrics: metrics, transcript: transcript) {
             // Nothing from the transcript is mixed in here, not even the model
             // identifier: this branch is statusLine's own reading of its own
-            // moment.
+            // moment. The configured model is not a reading of any moment — it
+            // is a property of how the session was started — so it stays
+            // available as the last resort.
             let isExtended = isExtendedContextModel([metrics.modelId])
             let limit = metrics.contextWindowSize
                 ?? limitFromPercentage(usedTokens: used, percentage: metrics.usedPercentage)
-                ?? contextLimitTokens(isExtendedContext: isExtended, usedTokens: used)
+                ?? contextLimitTokens(isExtendedContext: isExtended,
+                                      configuredModel: configuredModel,
+                                      usedTokens: used)
             return (used, limit)
         }
         // `message.model` in a transcript is always the plain id
@@ -248,7 +259,9 @@ enum ClaudeSessions {
         // a sample of a moment, so reading it from either source is safe.
         let isExtended = isExtendedContextModel([metrics?.modelId, transcript.model])
         guard let used = transcript.contextUsedTokens else { return (nil, nil) }
-        return (used, contextLimitTokens(isExtendedContext: isExtended, usedTokens: used))
+        return (used, contextLimitTokens(isExtendedContext: isExtended,
+                                         configuredModel: configuredModel,
+                                         usedTokens: used))
     }
 
     /// How far the transcript may run ahead of `.metrics.json` before that file
@@ -278,6 +291,18 @@ enum ClaudeSessions {
 
     /// Whether any known identifier of the session's model names the extended
     /// 1M-token variant.
+    ///
+    /// `[1m]` is the only window marker the CLI has: every accepted form is an
+    /// alias or a full id with that one suffix — `opus[1m]`, `sonnet[1m]`,
+    /// `opusplan[1m]`, `fable[1m]`, `claude-opus-5[1m]`,
+    /// `claude-sonnet-4-5-20250929[1m]`. So the test is for the marker, never
+    /// for a known string, and an identifier without it simply comes back false.
+    ///
+    /// What this cannot see is a session that was moved to another model after
+    /// it started: `/model` leaves no record on disk, and the only identifier a
+    /// transcript carries — `message.model` — is always the plain id, never the
+    /// suffixed one. (`toolUseResult.resolvedModel` does carry suffixes, but it
+    /// is the model of a spawned subagent, which is routinely a different one.)
     static func isExtendedContextModel(_ identifiers: [String?]) -> Bool {
         identifiers.contains { $0?.contains("[1m]") == true }
     }
@@ -311,11 +336,90 @@ enum ClaudeSessions {
     /// one: the default is 200k, but assuming it turns every 1M session into a
     /// near-full bar. A confidently wrong percentage is worse than none, so the
     /// UI is left to show the raw token count instead.
-    static func contextLimitTokens(isExtendedContext: Bool, usedTokens: Int) -> Int? {
+    ///
+    /// The three arguments are in descending order of authority, which is why
+    /// `configuredModel` comes last: it describes the model Claude Code *would*
+    /// start with, not the one this session is provably running.
+    static func contextLimitTokens(isExtendedContext: Bool,
+                                   configuredModel: String? = nil,
+                                   usedTokens: Int) -> Int? {
         if isExtendedContext { return 1_000_000 }
         // Evidence rather than a heuristic: a 200k window cannot hold this much.
         if usedTokens > 200_000 { return 1_000_000 }
+        if isExtendedContextModel([configuredModel]) { return 1_000_000 }
         return nil
+    }
+
+    // MARK: - Configured model
+
+    /// `ANTHROPIC_MODEL` as this process inherited it, read once: the
+    /// environment of a running process cannot change under it, and
+    /// `ProcessInfo.environment` rebuilds the whole dictionary on every access.
+    static let environmentModel: String? = nonEmpty(ProcessInfo.processInfo.environment["ANTHROPIC_MODEL"])
+
+    /// The model identifier Claude Code resolves for a session started in `cwd`,
+    /// or `nil` when nothing pins one and the built-in default applies.
+    ///
+    /// This is configuration, not a measurement, which is what makes it usable:
+    /// a `[1m]` suffix in a model alias is Claude Code's own way of asking for
+    /// the 1M window, so reading it is not a guess about the session. It is
+    /// still the weakest source available, because the setting only decides what
+    /// *new* sessions start on — `/model` and `--model` override it for a
+    /// running one, and nothing on disk records that they did (see
+    /// `isExtendedContextModel`).
+    ///
+    /// The chain is Claude Code's own, most specific first. A project that pins
+    /// `sonnet` must beat a user default of `opus[1m]`, and sessions live in
+    /// different directories, so the answer is per-`cwd` rather than global.
+    /// The inherited environment comes last: a menu bar agent launched by
+    /// launchd inherits almost nothing, so its absence proves nothing, and a
+    /// value that is there is the most global signal of the four.
+    static func configuredModelIdentifier(cwd: String,
+                                          claudeHome: URL = ClaudeSessions.claudeHome,
+                                          environmentModel: String? = ClaudeSessions.environmentModel) -> String? {
+        let projectSettings = URL(fileURLWithPath: cwd).appendingPathComponent(".claude")
+        let paths = [
+            projectSettings.appendingPathComponent("settings.local.json").path,
+            projectSettings.appendingPathComponent("settings.json").path,
+            claudeHome.appendingPathComponent("settings.json").path
+        ]
+        for path in paths {
+            if let model = modelSetting(atPath: path) { return model }
+        }
+        return environmentModel
+    }
+
+    private static let settingsCache = FileDerivedCache<String?>()
+
+    /// The model pinned by one settings file, cached against its own mtime.
+    ///
+    /// Settings files are read for every session on every snapshot — once a
+    /// second while the panel is open — and the user-level one is tens of
+    /// kilobytes of permissions and hooks. Parsing it per session per tick is
+    /// exactly the kind of idle disk traffic the transcript cache exists to
+    /// avoid.
+    static func modelSetting(atPath path: String) -> String? {
+        settingsCache.value(atPath: path) { uncachedModelSetting(atPath: path) }
+    }
+
+    private static func uncachedModelSetting(atPath path: String) -> String? {
+        guard let dict = JSONC.object(atPath: path) else { return nil }
+        return modelSetting(in: dict)
+    }
+
+    /// `model` is what `/model` and the settings UI write; `env.ANTHROPIC_MODEL`
+    /// is the other way the same file can pin one, and it loses to an explicit
+    /// `model` in that file.
+    static func modelSetting(in dict: [String: Any]) -> String? {
+        if let model = nonEmpty(dict["model"] as? String) { return model }
+        guard let environment = dict["env"] as? [String: Any] else { return nil }
+        return nonEmpty(environment["ANTHROPIC_MODEL"] as? String)
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     // MARK: - Hook state
