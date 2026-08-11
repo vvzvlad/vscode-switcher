@@ -124,15 +124,25 @@ esac
 # replacing it wholesale.
 prev="null"
 if [ -s "$target" ]; then
-	prev=$("$JQ" -c '.' "$target" 2>/dev/null)
+	# Anything that is not an object is treated as no previous record at all.
+	# `null.cwd` is valid jq and yields null, while `[1,2].cwd` is a fatal
+	# error that would take the whole program — and with it the new state —
+	# down with it.
+	prev=$("$JQ" -c 'if type == "object" then . else null end' "$target" 2>/dev/null)
 	[ -z "$prev" ] && prev="null"
 fi
 prev_state=$(printf '%s' "$prev" | "$JQ" -r '.state // ""' 2>/dev/null)
 
-# `idle_prompt` only says the user has not typed for a while — which is exactly
-# what happens while a permission dialog sits on screen. Letting it write
-# `waiting` would turn the orange indicator green with the dialog still open.
-if [ "$state" = "waiting" ] && [ "$notif_type" = "idle_prompt" ] && [ "$prev_state" = "permission" ]; then
+# A Notification never clears a permission wait. `idle_prompt` only says the
+# user has not typed for a while — which is exactly what happens while a
+# permission dialog sits on screen — and the guard must not depend on the type
+# being present: a payload without `notification_type` falls through to the
+# text heuristic, `"Claude is waiting for your input"` classifies as `waiting`,
+# and the orange indicator went green with the dialog still open.
+# `notification_type` was confirmed empirically for exactly one value on one CLI
+# version, so it is evidence, not a precondition. Only `Stop` and
+# `UserPromptSubmit` take `permission` off.
+if [ "$event" = "Notification" ] && [ "$state" = "waiting" ] && [ "$prev_state" = "permission" ]; then
 	exit 0
 fi
 
@@ -153,7 +163,14 @@ tmp="$STATUS_DIR/.tmp.$session_id.$$"
 	# UserPromptSubmit must not bury the Stop that overtook it. Emitting
 	# nothing leaves the temporary file empty, and the caller keeps the
 	# existing state.
-	if ($prev.ts // 0) > $ts then empty else
+	#
+	# The types are checked before the comparison, and not only to be tidy:
+	# in jq every number sorts before every string, so a `ts` of "abc" made
+	# the comparison true forever and no state could ever be written again,
+	# and a non-object `prev` such as `[1,2]` failed `.ts` outright, which
+	# killed the whole program with the same result.
+	if (($prev | type) == "object" and ($prev.ts | type) == "number" and $prev.ts > $ts)
+	then empty else
 	  # Notification payloads carry no cwd for some types; taking the empty
 	  # string would blank out the path a previous event recorded.
 	  {sessionId: $sessionId,
