@@ -28,6 +28,16 @@ final class SwitcherViewModel: ObservableObject {
     @Published private(set) var frontmostRowID: String?
     /// Set by the controller once it has taken keyboard focus for the panel.
     @Published var searchFieldFocused = false
+    /// The panel is on screen — false for most of the app's life.
+    ///
+    /// `withAnimation(.repeatForever)` does not stop when the window is ordered
+    /// out, and a row in `working` or `permission` is the normal state of this
+    /// user's machine. SwiftUI therefore went on laying the whole list out and
+    /// rendering its display list at display-link rate into a window nobody
+    /// could see: measured at 13.6% of a core with the panel closed, against
+    /// 2.0% once it stops. `StateBadge` keys its pulse on this as well as on the
+    /// state.
+    @Published private(set) var panelVisible = false
     @Published private(set) var snapshot: SwitcherSnapshot = .empty
     /// Row identifiers of the "open windows" section, in the order they were in
     /// when the panel appeared. Empty before the first show.
@@ -82,6 +92,13 @@ final class SwitcherViewModel: ObservableObject {
         query = ""
         windowOrder = snapshot.openWindows.map(\.id)
         orderPendingSince = Date()
+        panelVisible = true
+    }
+
+    /// Called when the panel starts going away. Only the pulse cares — see
+    /// `panelVisible`.
+    func panelDidHide() {
+        panelVisible = false
     }
 
     /// A row was clicked. Moves the highlight at once — the next snapshot
@@ -309,7 +326,8 @@ struct SwitcherView: View {
                         // position across the click.
                         ForEach(section.rows) { row in
                             SwitcherRowView(row: row,
-                                            isFrontmost: row.id == model.frontmostRowID)
+                                            isFrontmost: row.id == model.frontmostRowID,
+                                            panelVisible: model.panelVisible)
                                 .contentShape(Rectangle())
                                 .onTapGesture { model.onActivate?(row) }
                         }
@@ -403,6 +421,8 @@ struct SwitcherRowView: View {
     let row: SwitcherRow
     /// True for the row whose window is currently in front.
     let isFrontmost: Bool
+    /// Passed through to `StateBadge`, which must not animate off screen.
+    var panelVisible: Bool = true
 
     @State private var isHovering = false
 
@@ -461,7 +481,7 @@ struct SwitcherRowView: View {
                     .foregroundStyle(.secondary)
                 }
                 if let state = row.state {
-                    StateBadge(state: state, count: row.stateCount)
+                    StateBadge(state: state, count: row.stateCount, panelVisible: panelVisible)
                 }
             }
             HStack(spacing: 6) {
@@ -536,8 +556,22 @@ struct SwitcherRowView: View {
 struct StateBadge: View {
     let state: AgentState
     let count: Int
+    /// The badge is on screen. See `pulseState`.
+    var panelVisible: Bool = true
 
     @State private var pulsing = false
+
+    /// The state to pulse for, or `nil` when there must be no pulse at all —
+    /// including "the panel is not on screen", because `repeatForever` outlives
+    /// the window it was started in (see `SwitcherViewModel.panelVisible`).
+    ///
+    /// Both the `task` id and the dot's own identity hang off this, and both are
+    /// needed: the task decides when to start a pulse, the identity is what ends
+    /// one.
+    var pulseState: AgentState? {
+        guard panelVisible, Self.animates(state) else { return nil }
+        return state
+    }
 
     var body: some View {
         HStack(spacing: 3) {
@@ -546,22 +580,34 @@ struct StateBadge: View {
                 .frame(width: 8, height: 8)
                 .opacity(pulsing ? 0.3 : 1)
                 .scaleEffect(pulsing ? 0.78 : 1)
+                // The one thing that actually *stops* a `repeatForever`. Writing
+                // `pulsing = false` below only moves the value the animation
+                // drives at; the cycle goes on running against a target it
+                // already sits at — invisible, and every bit as expensive, since
+                // SwiftUI keeps laying the list out and rendering its display
+                // list once per display cycle. Probed: a single `working` row,
+                // panel closed, nothing pulsing on screen, 13.6% of a core. It
+                // dropped to 2.0% with this line, and to nothing more with the
+                // window's content view hidden as well, which was the other
+                // candidate. A new identity throws the animated attribute away
+                // and the animation attached to it with it.
+                .id(pulseState)
             if count > 1 {
                 Text("\(count)")
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
                     .foregroundStyle(Self.color(for: state))
             }
         }
-        // Keyed on the state, not on appearance. The badge sits in a stable spot
-        // in the hierarchy, so when a row changes state SwiftUI reuses the view
-        // and `onAppear` never runs again: a `working` row that received `Stop`
-        // turned green and kept the endless pulse of the blue dot it replaced,
-        // and a row first drawn as `idle` never started pulsing when the agent
-        // began its turn. With updates once a second that is the normal case,
-        // not an edge one — and §3 says the pulse means "working".
-        .task(id: state) {
+        // Keyed on `pulseState`, not on appearance. The badge sits in a stable
+        // spot in the hierarchy, so when a row changes state SwiftUI reuses the
+        // view and `onAppear` never runs again: a `working` row that received
+        // `Stop` turned green and kept the endless pulse of the blue dot it
+        // replaced, and a row first drawn as `idle` never started pulsing when
+        // the agent began its turn. With updates once a second that is the
+        // normal case, not an edge one — and §3 says the pulse means "working".
+        .task(id: pulseState) {
             pulsing = false
-            guard Self.animates(state) else { return }
+            guard pulseState != nil else { return }
             // Let the reset land in its own transaction. Both mutations in one
             // pass would cancel out for a state change that keeps the animation
             // on (working → permission), leaving the previous rhythm running.

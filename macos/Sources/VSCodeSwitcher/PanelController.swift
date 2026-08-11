@@ -209,6 +209,12 @@ final class PanelController {
         guard isVisible else { return }
         isVisible = false
         model.searchFieldFocused = false
+        // Told at the start of the hide, not in the completion handler: the
+        // panel is still on screen for the 0.10 s the slide-out takes, so the
+        // update is certain to be processed, whereas a view tree in an
+        // ordered-out window has no reason to be. The pulse stopping a tenth of
+        // a second early is invisible; see `SwitcherViewModel.panelVisible`.
+        model.panelDidHide()
         removeMonitors()
 
         var target = panel.frame

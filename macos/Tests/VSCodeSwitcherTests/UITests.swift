@@ -469,4 +469,27 @@ final class StateBadgeTests: XCTestCase {
         let labels = Set(AgentState.allCases.map { StateBadge.label(for: $0) })
         XCTAssertEqual(labels.count, AgentState.allCases.count)
     }
+
+    /// `repeatForever` does not stop when the panel is ordered out, so SwiftUI
+    /// went on laying the whole list out and rendering it once per display cycle
+    /// for a pulse nobody could see — 13.6% of a core against 2.0%. A `nil` key
+    /// is what ends the pulse, and the panel's visibility is half of that key.
+    @MainActor
+    func testThePulseOnlyRunsWhileThePanelIsOnScreen() {
+        XCTAssertEqual(StateBadge(state: .working, count: 1, panelVisible: true).pulseState,
+                       .working)
+        XCTAssertNil(StateBadge(state: .working, count: 1, panelVisible: false).pulseState)
+        XCTAssertNil(StateBadge(state: .waiting, count: 1, panelVisible: true).pulseState)
+    }
+
+    /// And the flag itself follows the panel.
+    @MainActor
+    func testTheVisibilityFlagFollowsTheShowAndTheHide() {
+        let model = SwitcherViewModel()
+        XCTAssertFalse(model.panelVisible)
+        model.panelDidShow()
+        XCTAssertTrue(model.panelVisible)
+        model.panelDidHide()
+        XCTAssertFalse(model.panelVisible)
+    }
 }
