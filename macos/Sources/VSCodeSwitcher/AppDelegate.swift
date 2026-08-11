@@ -191,13 +191,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Hook installer
 
-    /// Looks for `install-hooks.sh` in the app bundle first, then walks up from
-    /// the executable so a `swift run` from the checkout works too.
+    /// Finds `install-hooks.sh`, preferring a source checkout over the copy
+    /// inside the bundle.
+    ///
+    /// The script writes absolute paths into `~/.claude/settings.json`, so the
+    /// copy it is run from is the copy the hooks will point at forever after. A
+    /// checkout outlives `make clean`; a bundle sitting inside that checkout
+    /// does not.
     static func installHooksScriptURL() -> URL? {
         var candidates: [URL] = []
-        if let resources = Bundle.main.resourceURL {
-            candidates.append(resources.appendingPathComponent("scripts/install-hooks.sh"))
-        }
         if let executable = Bundle.main.executableURL?.resolvingSymlinksInPath() {
             var directory = executable.deletingLastPathComponent()
             for _ in 0..<6 {
@@ -205,7 +207,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 directory = directory.deletingLastPathComponent()
             }
         }
-        return candidates.first { FileManager.default.isReadableFile(atPath: $0.path) }
+        if let resources = Bundle.main.resourceURL {
+            candidates.append(resources.appendingPathComponent("scripts/install-hooks.sh"))
+        }
+        return candidates.first { candidate in
+            let root = candidate.deletingLastPathComponent().deletingLastPathComponent()
+            return FileManager.default.isReadableFile(atPath: candidate.path)
+                && FileManager.default.fileExists(atPath: root.appendingPathComponent("hooks").path)
+        }
     }
 
     nonisolated private static func run(script: URL) -> (status: Int32, output: String) {
