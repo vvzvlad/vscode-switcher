@@ -55,6 +55,10 @@ final class PanelController {
     private var clickMonitor: Any?
     private var cancellables = Set<AnyCancellable>()
 
+    /// The app was activated for the search field and has not handed the
+    /// keyboard back yet. See `releaseKeyboardFocus`.
+    private var didActivateForSearch = false
+
     init(config: Config, store: SnapshotStore) {
         self.config = config
         self.store = store
@@ -161,7 +165,7 @@ final class PanelController {
     func hide() {
         guard isVisible else { return }
         isVisible = false
-        releaseKeyboardFocus()
+        model.searchFieldFocused = false
         removeMonitors()
 
         var target = panel.frame
@@ -175,6 +179,7 @@ final class PanelController {
             MainActor.assumeIsolated {
                 guard let self, !self.isVisible else { return }
                 self.panel.orderOut(nil)
+                self.releaseKeyboardFocus()
             }
         })
 
@@ -219,15 +224,38 @@ final class PanelController {
     /// follows. The one visible side effect is that `frontmostApplication` stops
     /// being the editor, and `update(snapshot:)` only assigns the highlight when
     /// it can name a frontmost window — so the highlight stays where it was.
+    /// The activation is remembered, because it has to be given back when the
+    /// panel goes away — see `releaseKeyboardFocus`.
     private func takeKeyboardFocus() {
         guard isVisible else { return }
         NSApp.activate(ignoringOtherApps: true)
+        didActivateForSearch = true
         panel.makeKey()
         model.searchFieldFocused = true
     }
 
+    /// Hands the keyboard back after the panel is off screen.
+    ///
+    /// This app is an `.accessory` with no window of its own once the panel is
+    /// ordered out, and activating it is not undone by hiding that panel: it
+    /// stays the frontmost application, with nothing to type into. "Searched and
+    /// walked away without clicking a row" ended there — the user went back to
+    /// their editor, typed, and the keystrokes went nowhere while the editor
+    /// looked perfectly alive; only a click anywhere fixed it. Clicking a row
+    /// hid the defect, because that path activates the editor itself.
+    ///
+    /// `NSApp.deactivate()` does not do it — probed: the app is still frontmost
+    /// afterwards. `NSApp.hide(nil)` does, and the next `orderFrontRegardless`
+    /// clears the hidden state on its own, so there is nothing to undo on the
+    /// show path. It runs only when the app really is active: a row click has
+    /// already handed the front slot to the editor by then, and hiding is the
+    /// last thing that should happen to it.
     private func releaseKeyboardFocus() {
         model.searchFieldFocused = false
+        guard didActivateForSearch else { return }
+        didActivateForSearch = false
+        guard NSApp.isActive else { return }
+        NSApp.hide(nil)
     }
 
     // MARK: - Activation
