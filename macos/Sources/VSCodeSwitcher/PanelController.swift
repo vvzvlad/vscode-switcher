@@ -66,6 +66,10 @@ final class PanelController {
     /// How many of this app's menus are being tracked right now — the status
     /// item's, in practice. Counted rather than flagged so a submenu cannot
     /// close the count while its parent is still up.
+    ///
+    /// A count is a guess about the world, and one that drifts upwards never
+    /// comes back down on its own, so it is reconciled with reality in
+    /// `scheduleKeyboardReleaseRetry`.
     private var menuTrackingDepth = 0
     /// Retries a hand-back that had to wait. See `releaseKeyboardFocus`.
     private var keyboardReleaseRetry: Timer?
@@ -359,10 +363,28 @@ final class PanelController {
     /// *not* run, so the retry cannot fire inside either of the two states it is
     /// waiting out. The guards in `canHideApp` are still the ones that make it
     /// safe; the mode only keeps the timer quiet meanwhile.
+    ///
+    /// Which also makes this the one place the tracking count can be checked
+    /// against reality: the timer firing at all means the run loop is in the
+    /// default mode, so no menu of this app is being tracked, so a count still
+    /// above zero is a `didEndTracking` that went missing — the notifications
+    /// are observed with `object: nil`, for every menu the process puts up.
+    /// Left to stick, it makes `canHideApp` answer no for the rest of the run:
+    /// the keyboard is never handed back again, silently, which is the "typing
+    /// into nowhere" defect returning — and this timer goes on waking the
+    /// process five times a second forever. The count is therefore cleared
+    /// before every attempt; if that reasoning is ever wrong the cost is a
+    /// status menu closing under the pointer once, against a permanently broken
+    /// hand-back. `NSApp.modalWindow` needs no such repair — it is asked of the
+    /// system anew each time.
     private func scheduleKeyboardReleaseRetry() {
         guard keyboardReleaseRetry == nil else { return }
         let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.releaseKeyboardFocus() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.menuTrackingDepth = 0
+                self.releaseKeyboardFocus()
+            }
         }
         RunLoop.main.add(timer, forMode: .default)
         keyboardReleaseRetry = timer
