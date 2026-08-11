@@ -1,27 +1,6 @@
 import AppKit
 import SwiftUI
 
-// MARK: - Row identity
-
-extension SwitcherRow {
-    /// Identity that survives a z-order change.
-    ///
-    /// `SwitcherRow.id` embeds the window's position in the Accessibility array,
-    /// which is the z-order: clicking a row raises its window and renumbers every
-    /// other row. Using `id` for the list would therefore reset hover state and
-    /// scrolling on the very action the panel exists for, so the list is keyed on
-    /// the project instead.
-    var switcherStableKey: String {
-        switch kind {
-        case .window:
-            let name = project?.path ?? window?.rootName ?? displayName
-            return "window:\(window?.pid ?? 0):\(name)"
-        case .project:
-            return "project:\(project?.path ?? displayName)"
-        }
-    }
-}
-
 // MARK: - View model
 
 /// One rendered group of rows.
@@ -41,8 +20,12 @@ struct SwitcherSection: Identifiable {
 final class SwitcherViewModel: ObservableObject {
 
     @Published var query: String = ""
-    /// Stable key of the row whose window is frontmost, highlighted in the list.
-    @Published private(set) var frontmostKey: String?
+    /// `id` of the row whose window is frontmost, highlighted in the list.
+    ///
+    /// A row's `id` carries the window's `CGWindowID`, so it means the same row
+    /// before and after a raise; keying the highlight on anything derived from
+    /// the project instead would tie two windows of one project together.
+    @Published private(set) var frontmostRowID: String?
     /// Set by the controller once it has taken keyboard focus for the panel.
     @Published var searchFieldFocused = false
     @Published private(set) var snapshot: SwitcherSnapshot = .empty
@@ -62,7 +45,8 @@ final class SwitcherViewModel: ObservableObject {
 
     func update(snapshot: SwitcherSnapshot) {
         self.snapshot = snapshot
-        if let key = Self.frontmostWindowKey(in: snapshot) { frontmostKey = key }
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if let id = Self.frontmostWindowID(in: snapshot, frontmostPID: pid) { frontmostRowID = id }
     }
 
     /// Called when the panel opens, so every appearance starts on a clean list.
@@ -74,7 +58,7 @@ final class SwitcherViewModel: ObservableObject {
     /// confirms it a beat later.
     func markFrontmost(_ row: SwitcherRow) {
         guard row.kind == .window else { return }
-        frontmostKey = row.switcherStableKey
+        frontmostRowID = row.id
     }
 
     // MARK: Derived list
@@ -105,16 +89,18 @@ final class SwitcherViewModel: ObservableObject {
 
     /// The frontmost editor window, if the editor is the active application.
     ///
-    /// The window list is built per process, so index 0 repeats for every
-    /// running editor instance; only the one belonging to the active process is
-    /// actually in front. When something else is active the previous highlight
-    /// is kept rather than guessed at.
-    private static func frontmostWindowKey(in snapshot: SwitcherSnapshot) -> String? {
-        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
+    /// This is the one place the z-order is still the right answer: which window
+    /// is in front is precisely what `windowIndex == 0` means. The window list is
+    /// built per process, so index 0 repeats for every running editor instance;
+    /// only the one belonging to the active process is actually in front. When
+    /// something else is active the previous highlight is kept rather than
+    /// guessed at.
+    static func frontmostWindowID(in snapshot: SwitcherSnapshot, frontmostPID: pid_t?) -> String? {
+        guard let frontmostPID else { return nil }
         let row = snapshot.openWindows.first {
-            $0.window?.pid == pid && $0.window?.windowIndex == 0
+            $0.window?.pid == frontmostPID && $0.window?.windowIndex == 0
         }
-        return row?.switcherStableKey
+        return row?.id
     }
 }
 
@@ -180,9 +166,14 @@ struct SwitcherView: View {
             LazyVStack(alignment: .leading, spacing: 1, pinnedViews: [.sectionHeaders]) {
                 ForEach(model.sections) { section in
                     Section {
-                        ForEach(section.rows, id: \.switcherStableKey) { row in
+                        // Keyed on `SwitcherRow.id`, which holds the window's
+                        // `CGWindowID`: raising a window reorders the rows but
+                        // renames none of them, so SwiftUI keeps each row's
+                        // `@State` — its hover highlight — and the scroll
+                        // position across the click.
+                        ForEach(section.rows) { row in
                             SwitcherRowView(row: row,
-                                            isFrontmost: row.switcherStableKey == model.frontmostKey)
+                                            isFrontmost: row.id == model.frontmostRowID)
                                 .contentShape(Rectangle())
                                 .onTapGesture { model.onActivate?(row) }
                         }

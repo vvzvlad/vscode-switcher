@@ -916,6 +916,72 @@ final class WindowIdentityTests: XCTestCase {
         // Idempotent: the work happens once and the result is reused.
         XCTAssertTrue(VSCodeWindows.installMessagingTimeout())
     }
+
+    /// The list and the highlight are keyed on `SwitcherRow.id`, so two windows
+    /// of one project must not share one. The hand-rolled key the UI used before
+    /// was built from the project path and collided for exactly this case.
+    func testTwoWindowsOfOneProjectGetDistinctRowIdentities() {
+        let projects = [TestFixtures.project(path: "/p/a", rootName: "a")]
+        let first = TestFixtures.window(index: 0, title: "topic one \u{2014} a", windowNumber: 100)
+        let second = TestFixtures.window(index: 1, title: "topic two \u{2014} a", windowNumber: 200)
+
+        let snapshot = DataSource.assemble(projects: projects,
+                                           windows: [first, second],
+                                           sessions: [],
+                                           accessibilityTrusted: true)
+        XCTAssertEqual(Set(snapshot.openWindows.map(\.id)).count, 2)
+    }
+}
+
+/// The panel's highlight of the window that is currently in front.
+@MainActor
+final class FrontmostHighlightTests: XCTestCase {
+
+    private func snapshot(_ windows: [VSCodeWindowInfo]) -> SwitcherSnapshot {
+        DataSource.assemble(projects: [TestFixtures.project(path: "/p/a", rootName: "a"),
+                                       TestFixtures.project(path: "/p/b", rootName: "b")],
+                            windows: windows,
+                            sessions: [],
+                            accessibilityTrusted: true)
+    }
+
+    /// The one remaining z-order consumer in the UI: index 0 of the active
+    /// process is what "in front" means, and the new identity scheme leaves it
+    /// working.
+    func testHighlightsIndexZeroOfTheActiveProcess() {
+        let alpha = TestFixtures.window(index: 0, title: "t \u{2014} a", pid: 7, windowNumber: 100)
+        let beta = TestFixtures.window(index: 1, title: "t \u{2014} b", pid: 7, windowNumber: 200)
+        let id = SwitcherViewModel.frontmostWindowID(in: snapshot([alpha, beta]), frontmostPID: 7)
+        XCTAssertEqual(id, "window:7:w100")
+    }
+
+    /// After a click the raised window is index 0 and the highlight moves with
+    /// it — to the row whose identity never changed.
+    func testHighlightFollowsTheRaisedWindow() {
+        let raisedBeta = TestFixtures.window(index: 0, title: "t \u{2014} b", pid: 7, windowNumber: 200)
+        let loweredAlpha = TestFixtures.window(index: 1, title: "t \u{2014} a", pid: 7, windowNumber: 100)
+        let id = SwitcherViewModel.frontmostWindowID(in: snapshot([raisedBeta, loweredAlpha]),
+                                                     frontmostPID: 7)
+        XCTAssertEqual(id, "window:7:w200")
+    }
+
+    /// Index 0 repeats in every editor process, so it only means "in front" for
+    /// the process that is actually active.
+    func testIgnoresIndexZeroOfAnInactiveProcess() {
+        let other = TestFixtures.window(index: 0, title: "t \u{2014} a", pid: 7, windowNumber: 100)
+        XCTAssertNil(SwitcherViewModel.frontmostWindowID(in: snapshot([other]), frontmostPID: 9))
+        // Nothing is active at all: the previous highlight is kept, not guessed.
+        XCTAssertNil(SwitcherViewModel.frontmostWindowID(in: snapshot([other]), frontmostPID: nil))
+    }
+
+    /// Without the private window-number call the identity falls back to the
+    /// index. The highlight must still resolve rather than crash or go blank.
+    func testWorksWithoutWindowNumbers() {
+        let alpha = TestFixtures.window(index: 0, title: "t \u{2014} a", pid: 7, windowNumber: nil)
+        let beta = TestFixtures.window(index: 1, title: "t \u{2014} b", pid: 7, windowNumber: nil)
+        let id = SwitcherViewModel.frontmostWindowID(in: snapshot([alpha, beta]), frontmostPID: 7)
+        XCTAssertEqual(id, "window:7:0")
+    }
 }
 
 /// Concurrent callers of `DataSource.snapshot()`.

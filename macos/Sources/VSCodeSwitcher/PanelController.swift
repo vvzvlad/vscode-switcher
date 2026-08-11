@@ -191,16 +191,26 @@ final class PanelController {
     // MARK: - Activation
 
     /// Acts on a clicked row and leaves the panel up.
+    ///
+    /// Focusing a window is two separate steps in a fixed order. Bringing the
+    /// process forward is an AppKit call and stays on the main thread; raising
+    /// the window inside it is Accessibility, which can block for as long as the
+    /// messaging timeout when the editor is busy, so it goes to a background
+    /// queue. Raising first would be undone by the activation that follows.
+    ///
+    /// The row is handed to `raise` exactly as the snapshot built it: it carries
+    /// the window's `CGWindowID`, which no raise reshuffles, so a row clicked a
+    /// second ago still names the same window. Looking the window up again by
+    /// `pid` + project — as this used to do — picked an arbitrary one of the two
+    /// windows a project can have open, which is the very "clicking row 2 raises
+    /// window 4" defect the stable identity removed.
     private func activate(_ row: SwitcherRow) {
         let config = config
         if let window = row.window {
             model.markFrontmost(row)
-            // Activation is an AppKit call and stays on the main thread; only
-            // the Accessibility round trip, which can block for seconds if the
-            // editor is busy, goes to a background queue.
-            NSRunningApplication(processIdentifier: window.pid)?.activate()
+            VSCodeWindows.activate(pid: window.pid)
             DispatchQueue.global(qos: .userInitiated).async {
-                VSCodeWindows.focus(Self.reresolve(window, bundleID: config.editorBundleID))
+                VSCodeWindows.raise(window)
             }
         } else if let project = row.project {
             DispatchQueue.global(qos: .userInitiated).async {
@@ -210,21 +220,6 @@ final class PanelController {
         // The z-order has just changed; pull a fresh snapshot rather than wait
         // out the poll interval.
         store.refresh()
-    }
-
-    /// Looks the clicked window up again immediately before focusing it.
-    ///
-    /// A row carries the window as it was up to a second ago, and both fields
-    /// `VSCodeWindows.focus` matches on have moved by then: the title tracks the
-    /// active editor and the chat topic, and the index is the z-order that the
-    /// previous click reshuffled. Stepping through several windows in a row —
-    /// the whole point of leaving the panel up — would otherwise raise whatever
-    /// had slid into the remembered slot.
-    nonisolated private static func reresolve(_ window: VSCodeWindowInfo,
-                                              bundleID: String) -> VSCodeWindowInfo {
-        guard let rootName = window.rootName else { return window }
-        let current = VSCodeWindows.listWindows(bundleID: bundleID)
-        return current.first { $0.pid == window.pid && $0.rootName == rootName } ?? window
     }
 
     // MARK: - Event monitors
