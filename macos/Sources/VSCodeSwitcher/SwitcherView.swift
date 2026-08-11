@@ -254,9 +254,12 @@ struct SwitcherView: View {
     }
 
     private var list: some View {
-        ScrollView(.vertical) {
+        // Once per pass: `sections` sorts the windows and filters both lists, and
+        // reading it twice did all of that twice on every rebuild.
+        let sections = model.sections
+        return ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 1, pinnedViews: [.sectionHeaders]) {
-                ForEach(model.sections) { section in
+                ForEach(sections) { section in
                     Section {
                         // Keyed on `SwitcherRow.id`, which holds the window's
                         // `CGWindowID`: raising a window reorders the rows but
@@ -273,7 +276,7 @@ struct SwitcherView: View {
                         SectionHeader(title: section.title, count: section.rows.count)
                     }
                 }
-                if model.sections.isEmpty {
+                if sections.isEmpty {
                     Text(model.snapshot.generatedAt == .distantPast ? "Загрузка…" : "Ничего не найдено")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
