@@ -63,8 +63,13 @@ final class SwitcherViewModel: ObservableObject {
         // covers the degenerate case of a panel shown before the very first
         // snapshot, where the frozen order was empty and every click reshuffled
         // the list.
+        //
+        // Redone by insertion, not by replacement: the assembly takes 40–180 ms
+        // and the slide-in 140 ms, so this lands exactly when the panel has
+        // arrived and become worth aiming at. Replacing the whole order there
+        // reshuffled the list under a pointer already on its way to a row.
         if let pendingSince = orderPendingSince, snapshot.generatedAt >= pendingSince {
-            windowOrder = snapshot.openWindows.map(\.id)
+            windowOrder = Self.merged(windowOrder, with: snapshot.openWindows.map(\.id))
             orderPendingSince = nil
         }
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -164,6 +169,36 @@ final class SwitcherViewModel: ObservableObject {
         }
         frozen.sort { $0.0 < $1.0 }
         return frozen.map(\.1) + appeared
+    }
+
+    /// Folds a fresh z-order into an order already frozen, by inserting only the
+    /// windows the frozen one has never heard of.
+    ///
+    /// This runs once per appearance, at the worst possible moment: the panel
+    /// has just finished sliding in and the pointer is already travelling
+    /// towards a row. Taking the fresh order wholesale moved every row that had
+    /// been raised since the cached snapshot was read — for the sake of the one
+    /// window that genuinely was missing. A new window still lands where its
+    /// z-order says, so the window opened a second before the panel was summoned
+    /// is still at the top; the rows below the insertion point still shift by
+    /// one, which is as little as this can move at all.
+    ///
+    /// The insertion point is the frozen slot of the closest window in front of
+    /// the newcomer, so several new windows keep their relative z-order, and one
+    /// that is frontmost overall goes to the very top.
+    static func merged(_ order: [String], with fresh: [String]) -> [String] {
+        var result = order
+        var anchor: Int?
+        for id in fresh {
+            if let index = result.firstIndex(of: id) {
+                anchor = index
+            } else {
+                let insertAt = anchor.map { $0 + 1 } ?? 0
+                result.insert(id, at: insertAt)
+                anchor = insertAt
+            }
+        }
+        return result
     }
 
     private static func matches(_ row: SwitcherRow, _ needle: String) -> Bool {

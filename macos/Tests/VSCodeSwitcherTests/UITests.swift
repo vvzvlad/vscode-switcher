@@ -237,6 +237,43 @@ final class WindowOrderTests: XCTestCase {
                        ["c", "b", "a"])
     }
 
+    // MARK: Folding a fresh z-order into a frozen one
+
+    /// The re-freeze lands just as the panel finishes sliding in, with the
+    /// pointer already on its way to a row, so it may only add. Taking the fresh
+    /// order whole moved every window raised since the cached snapshot was read
+    /// — here "c" — for the sake of the one window that was genuinely missing.
+    func testOnlyTheUnknownWindowsAreWovenIn() {
+        XCTAssertEqual(SwitcherViewModel.merged(["a", "b", "c"], with: ["new", "c", "a", "b"]),
+                       ["new", "a", "b", "c"])
+    }
+
+    /// A newcomer goes to the frozen slot of the closest window in front of it,
+    /// which for the frontmost window means the very top — that is the whole
+    /// point of redoing the freeze.
+    func testANewWindowLandsBehindTheWindowInFrontOfIt() {
+        XCTAssertEqual(SwitcherViewModel.merged(["a", "b"], with: ["a", "new", "b"]),
+                       ["a", "new", "b"])
+        XCTAssertEqual(SwitcherViewModel.merged(["a", "b"], with: ["new", "a", "b"]),
+                       ["new", "a", "b"])
+    }
+
+    func testSeveralNewWindowsKeepTheirZOrderAmongThemselves() {
+        XCTAssertEqual(SwitcherViewModel.merged(["a"], with: ["x", "y", "a"]), ["x", "y", "a"])
+    }
+
+    func testAnEmptyFrozenOrderTakesTheZOrderWhole() {
+        XCTAssertEqual(SwitcherViewModel.merged([], with: ["c", "a", "b"]), ["c", "a", "b"])
+    }
+
+    /// A window that closed between the two snapshots keeps its slot in the
+    /// order; `ordered` drops it because no row carries that id any more, and
+    /// nothing below it moves.
+    func testAWindowThatWentAwayDoesNotShiftTheRest() {
+        XCTAssertEqual(SwitcherViewModel.merged(["a", "b", "c"], with: ["a", "c"]),
+                       ["a", "b", "c"])
+    }
+
     // MARK: When the order is taken
 
     private func snapshot(_ ids: [String], generatedAt: Date) -> SwitcherSnapshot {
@@ -270,16 +307,31 @@ final class WindowOrderTests: XCTestCase {
     }
 
     /// A snapshot already in flight when the panel appeared carries pre-show
-    /// data, so it is not the one to freeze on.
+    /// data, so it is not the one to freeze on: until one that was read after
+    /// the show arrives, a window the frozen order has never seen stays at the
+    /// end, where every newcomer goes.
     func testASnapshotReadBeforeTheShowDoesNotFreezeTheOrder() {
         let model = SwitcherViewModel()
         model.update(snapshot: snapshot(["a", "b"], generatedAt: Date()))
         model.panelDidShow()
 
-        model.update(snapshot: snapshot(["b", "a"], generatedAt: .distantPast))
-        XCTAssertEqual(windowIDs(model), ["a", "b"])
-        model.update(snapshot: snapshot(["b", "a"], generatedAt: Date()))
-        XCTAssertEqual(windowIDs(model), ["b", "a"])
+        model.update(snapshot: snapshot(["new", "a", "b"], generatedAt: .distantPast))
+        XCTAssertEqual(windowIDs(model), ["a", "b", "new"])
+        model.update(snapshot: snapshot(["new", "a", "b"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["new", "a", "b"])
+    }
+
+    /// The re-freeze may only add. It lands just as the panel finishes sliding
+    /// in, so re-sorting windows the frozen order already knows — here "c",
+    /// raised in the two seconds the cached snapshot was stale for — shifted
+    /// every row under a pointer already on its way to one.
+    func testTheRefreezeDoesNotResortWindowsItAlreadyKnows() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["a", "b", "c"], generatedAt: Date()))
+        model.panelDidShow()
+
+        model.update(snapshot: snapshot(["c", "a", "b"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
     }
 
     /// Clicking raises a window, and the snapshot that follows reports the new
