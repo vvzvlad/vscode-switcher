@@ -29,11 +29,15 @@ final class WorkspaceIndex: @unchecked Sendable {
     ]
 
     /// Returns the project list, rescanning only when the tree fingerprint moved.
-    func projects(config: Config, forceRefresh: Bool = false) -> [ProjectInfo] {
+    ///
+    /// There is no way to force a rescan and there is nothing to force: the
+    /// fingerprint covers every directory the scan listed and every color file
+    /// it read, so a change anywhere it looked already triggers one.
+    func projects(config: Config) -> [ProjectInfo] {
         lock.lock()
         defer { lock.unlock() }
 
-        if !forceRefresh, hasCache, fingerprintMatches(cachedFingerprint) {
+        if hasCache, fingerprintMatches(cachedFingerprint) {
             return cachedProjects
         }
 

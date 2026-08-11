@@ -248,19 +248,106 @@ final class ContextWindowTests: XCTestCase {
         XCTAssertEqual(usage.limit, 200_000)
     }
 
+    /// The numbers as they really arrive: `used_percentage` is a whole number,
+    /// so the quotient is off by thousands. The old test used 20 000 at 10%,
+    /// which divides exactly and hid that entirely.
     func testPercentageFillsInAMissingWindowSize() {
         var metrics = ClaudeSessions.MetricsStatus()
-        metrics.usedTokens = 20_000
-        metrics.usedPercentage = 10
+        metrics.usedTokens = 93_953
+        metrics.usedPercentage = 46
 
+        // The raw quotient here is 204 245.
         let usage = ClaudeSessions.contextUsage(transcript: ClaudeSessions.TranscriptSummary(), metrics: metrics)
-        XCTAssertEqual(usage.used, 20_000)
+        XCTAssertEqual(usage.used, 93_953)
         XCTAssertEqual(usage.limit, 200_000)
+    }
+
+    func testPercentageRecognisesTheLargeWindowToo() {
+        XCTAssertEqual(ClaudeSessions.limitFromPercentage(usedTokens: 463_000, percentage: 46), 1_000_000)
+        XCTAssertEqual(ClaudeSessions.limitFromPercentage(usedTokens: 20_000, percentage: 10), 200_000)
+    }
+
+    /// A window size nobody offers still comes back round rather than as a
+    /// quotient with five significant digits.
+    func testPercentageOfAnUnknownWindowIsRounded() {
+        // 300k at 33% divides to 909 090, which is neither window size.
+        XCTAssertEqual(ClaudeSessions.limitFromPercentage(usedTokens: 300_000, percentage: 33), 910_000)
     }
 
     func testZeroPercentageIsNotDividedBy() {
         XCTAssertNil(ClaudeSessions.limitFromPercentage(usedTokens: 100, percentage: 0))
         XCTAssertNil(ClaudeSessions.limitFromPercentage(usedTokens: 100, percentage: nil))
+    }
+
+    /// `.metrics.json` lives until `SessionEnd` and is never rewritten once
+    /// statusLine stops working — a replaced status line, `jq` gone from PATH,
+    /// hooks uninstalled. Its numbers then stayed authoritative forever and a
+    /// session at 46% of its window rendered as a confident 1%.
+    func testStaleMetricsLoseToATranscriptThatKeptMoving() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.contextUsedTokens = 460_494
+        transcript.lastActivity = now
+
+        var metrics = ClaudeSessions.MetricsStatus()
+        metrics.usedTokens = 5_000
+        metrics.contextWindowSize = 200_000
+        metrics.timestamp = now.addingTimeInterval(-3 * 3600)
+
+        let usage = ClaudeSessions.contextUsage(transcript: transcript, metrics: metrics)
+        XCTAssertEqual(usage.used, 460_494)
+        XCTAssertEqual(usage.limit, 1_000_000)
+    }
+
+    func testFreshMetricsStillWinOverTheTranscript() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.contextUsedTokens = 460_494
+        transcript.lastActivity = now
+
+        var metrics = ClaudeSessions.MetricsStatus()
+        metrics.usedTokens = 32_679
+        metrics.contextWindowSize = 200_000
+        metrics.timestamp = now.addingTimeInterval(-5)
+
+        let usage = ClaudeSessions.contextUsage(transcript: transcript, metrics: metrics)
+        XCTAssertEqual(usage.used, 32_679)
+        XCTAssertEqual(usage.limit, 200_000)
+    }
+
+    /// Nothing to fall back to: the transcript has no count of its own, so even
+    /// ancient metrics are the only numbers there are.
+    func testStaleMetricsAreKeptWhenTheTranscriptHasNoCount() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.lastActivity = now
+
+        var metrics = ClaudeSessions.MetricsStatus()
+        metrics.usedTokens = 5_000
+        metrics.contextWindowSize = 200_000
+        metrics.timestamp = now.addingTimeInterval(-3 * 3600)
+
+        let usage = ClaudeSessions.contextUsage(transcript: transcript, metrics: metrics)
+        XCTAssertEqual(usage.used, 5_000)
+        XCTAssertEqual(usage.limit, 200_000)
+    }
+
+    /// The metrics branch must not read the transcript at all — it claims to be
+    /// one source sampled at one moment.
+    func testMetricsBranchIgnoresTheTranscriptModel() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        // A transcript never carries the `[1m]` suffix; this is what the branch
+        // used to consult anyway.
+        transcript.model = "claude-opus-5[1m]"
+        transcript.lastActivity = now
+
+        var metrics = ClaudeSessions.MetricsStatus()
+        metrics.modelId = "claude-opus-5"
+        metrics.usedTokens = 100_000
+        metrics.timestamp = now
+
+        XCTAssertNil(ClaudeSessions.contextUsage(transcript: transcript, metrics: metrics).limit)
     }
 }
 
@@ -323,6 +410,38 @@ final class SessionStateTests: XCTestCase {
         XCTAssertEqual(resolved.source, .unknown)
     }
 
+    /// The gap the test above walked around by aging the transcript too: a
+    /// transcript touched a second ago is proof the agent is alive, and it is
+    /// available even when the tail yielded no state at all.
+    ///
+    /// `fallbackState == nil` next to a live transcript is not hypothetical —
+    /// a `stop_reason` outside the three known values (39 records in 11 114 on
+    /// real data), or a single assistant record larger than the whole 512 KiB
+    /// tail window (93 transcripts on this machine hold records over 200 KiB,
+    /// the largest 2.0 MB).
+    func testFreshTranscriptKeepsAStaleWorkingHookAliveWithoutAFallbackState() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = nil
+        transcript.lastActivity = now.addingTimeInterval(-1)
+
+        let hook = ClaudeSessions.HookStatus(state: .working,
+                                             event: "UserPromptSubmit",
+                                             timestamp: now.addingTimeInterval(-301))
+        XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now).state, .working)
+    }
+
+    func testStaleWorkingHookWithAStaleTranscriptStillDegrades() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.lastActivity = now.addingTimeInterval(-ClaudeSessions.transcriptLivenessSeconds - 1)
+
+        let hook = ClaudeSessions.HookStatus(state: .working,
+                                             event: "UserPromptSubmit",
+                                             timestamp: now.addingTimeInterval(-301))
+        XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now).state, .idle)
+    }
+
     func testWaitingAndPermissionAreNeverAgedOut() {
         // Both describe a condition that lasts until the user acts, so an old
         // timestamp says nothing against them.
@@ -335,6 +454,26 @@ final class SessionStateTests: XCTestCase {
                                                  event: "Notification",
                                                  timestamp: now.addingTimeInterval(-3 * 3600))
             XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now).state, state)
+        }
+    }
+
+    /// A permission dialog is invisible to the transcript: the last assistant
+    /// record still says `tool_use`, and the file goes on being touched. Every
+    /// such touch used to overrule the hook and turn the orange indicator off
+    /// while the dialog was still on screen.
+    func testATouchedTranscriptDoesNotClearAPermissionWait() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .working
+        transcript.lastActivity = now.addingTimeInterval(-1)
+
+        for state in [AgentState.permission, .waiting] {
+            let hook = ClaudeSessions.HookStatus(state: state,
+                                                 event: "Notification",
+                                                 timestamp: now.addingTimeInterval(-3 * 3600))
+            let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now)
+            XCTAssertEqual(resolved.state, state)
+            XCTAssertEqual(resolved.source, .hook)
         }
     }
 
@@ -395,6 +534,29 @@ final class SnapshotAssemblyTests: XCTestCase {
         XCTAssertEqual(snapshot.projects.first { $0.project?.path == "/p/a" }?.stateCount, 1)
     }
 
+    /// Six agents started in the same directory outside every scan root used to
+    /// produce six identical rows, while the same six inside a project were
+    /// aggregated into one.
+    func testOrphanSessionsFromOneDirectoryBecomeASingleRow() throws {
+        let sessions = [makeSession(id: "s1", cwd: "/elsewhere/tool", state: .working),
+                        makeSession(id: "s2", cwd: "/elsewhere/tool", state: .permission),
+                        makeSession(id: "s3", cwd: "/elsewhere/tool", state: .working),
+                        makeSession(id: "s4", cwd: "/elsewhere/other", state: .idle)]
+
+        let snapshot = DataSource.assemble(projects: [],
+                                           windows: [],
+                                           sessions: sessions,
+                                           accessibilityTrusted: false)
+
+        XCTAssertEqual(snapshot.projects.count, 2)
+        let row = try XCTUnwrap(snapshot.projects.first { $0.displayName == "tool" })
+        XCTAssertEqual(row.sessions.map(\.sessionId), ["s1", "s2", "s3"])
+        XCTAssertEqual(row.state, .permission)
+        XCTAssertEqual(row.stateCount, 1)
+        XCTAssertEqual(Set(snapshot.rows.map(\.id)).count, snapshot.rows.count)
+        XCTAssertEqual(snapshot.rows.flatMap(\.sessions).count, 4)
+    }
+
     func testAWindowStillTakesItsProjectsSessions() {
         let project = makeProject(path: "/p/home-network", rootName: "home-network")
         let window = makeWindow(index: 0, title: "topic \u{2014} home-network (Workspace)")
@@ -422,9 +584,33 @@ final class SnapshotAssemblyTests: XCTestCase {
     }
 
     private func makeWindow(index: Int, title: String) -> VSCodeWindowInfo {
+        TestFixtures.window(index: index, title: title)
+    }
+
+    private func makeSession(id: String, cwd: String, state: AgentState) -> ClaudeSessionInfo {
+        TestFixtures.session(id: id, cwd: cwd, state: state)
+    }
+}
+
+/// Fixtures shared by the assembly, identity and distribution suites.
+enum TestFixtures {
+    static func project(path: String, rootName: String) -> ProjectInfo {
+        ProjectInfo(path: path,
+                    displayName: (path as NSString).lastPathComponent,
+                    rootName: rootName,
+                    colorHex: "#123456",
+                    workspaceFile: nil,
+                    mtime: Date(timeIntervalSince1970: 1_700_000_000))
+    }
+
+    static func window(index: Int,
+                       title: String,
+                       pid: Int32 = 1,
+                       windowNumber: CGWindowID? = nil) -> VSCodeWindowInfo {
         let parsed = VSCodeWindows.parseTitle(title)
-        return VSCodeWindowInfo(pid: 1,
+        return VSCodeWindowInfo(pid: pid,
                                 windowIndex: index,
+                                windowNumber: windowNumber,
                                 title: title,
                                 rootName: parsed.rootName,
                                 chatTopicPrefix: parsed.chatTopic,
@@ -432,12 +618,16 @@ final class SnapshotAssemblyTests: XCTestCase {
                                 isMinimized: false)
     }
 
-    private func makeSession(id: String, cwd: String, state: AgentState) -> ClaudeSessionInfo {
+    static func session(id: String,
+                        cwd: String,
+                        state: AgentState,
+                        topic: String? = nil,
+                        lastActivity: Date = Date(timeIntervalSince1970: 1_700_000_000)) -> ClaudeSessionInfo {
         ClaudeSessionInfo(sessionId: id,
                           pid: 100,
                           cwd: cwd,
                           name: nil,
-                          aiTitle: "topic \(id)",
+                          aiTitle: topic ?? "topic \(id)",
                           lastPrompt: nil,
                           state: state,
                           stateSource: .hook,
@@ -446,7 +636,7 @@ final class SnapshotAssemblyTests: XCTestCase {
                           contextLimitTokens: nil,
                           activeSubagents: 0,
                           subagents: [],
-                          lastActivity: Date(timeIntervalSince1970: 1_700_000_000))
+                          lastActivity: lastActivity)
     }
 }
 
@@ -479,6 +669,20 @@ final class WorkspaceScanTests: XCTestCase {
         let projects = scan(root: root, depth: 2)
         XCTAssertEqual(projects.map(\.path), [root.appendingPathComponent("wirenboard/wb-mge").path])
         XCTAssertEqual(projects.first?.displayName, "wirenboard/wb-mge")
+    }
+
+    /// The whole scan rests on this: the root is descended into whatever it
+    /// looks like. A `~/Data/Projects` that is itself a git checkout would
+    /// otherwise become one row and hide every project under it.
+    func testTheRootItselfIsNeverAProjectAndIsAlwaysDescendedInto() throws {
+        let root = try makeTemporaryDirectory()
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".git"),
+                                                withIntermediateDirectories: true)
+        try "{}".write(to: root.appendingPathComponent("all.code-workspace"), atomically: true, encoding: .utf8)
+        try makeProjectDirectory(root.appendingPathComponent("inner"))
+
+        let paths = scan(root: root, depth: 2).map(\.path)
+        XCTAssertEqual(paths, [root.appendingPathComponent("inner").path])
     }
 
     func testRootNameKeepsTheWholeWorkspaceFileName() throws {
@@ -572,4 +776,484 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.resolvedProjectRoots.count, 1)
         XCTAssertFalse(config.resolvedProjectRoots[0].path.contains("~"))
     }
+}
+
+/// Spreading a project's sessions over the windows that show it.
+final class DistributeTests: XCTestCase {
+
+    func testASingleWindowTakesTheWholePool() {
+        let window = TestFixtures.window(index: 0, title: "тема \u{2014} proj (Workspace)", windowNumber: 10)
+        let sessions = [TestFixtures.session(id: "s1", cwd: "/p", state: .working),
+                        TestFixtures.session(id: "s2", cwd: "/p", state: .idle)]
+
+        let assigned = DataSource.distribute(sessions: sessions, over: [window])
+        XCTAssertEqual(assigned.map(\.0), [window.id])
+        XCTAssertEqual(assigned.first?.1.map(\.sessionId), ["s1", "s2"])
+    }
+
+    /// The window title carries the active chat topic, ellipsised, so each
+    /// window claims the session whose topic it is showing.
+    func testEachWindowClaimsTheChatItIsShowing() throws {
+        let first = TestFixtures.window(index: 0,
+                                        title: "Вторая тема сме\u{2026} \u{2014} proj (Workspace)",
+                                        windowNumber: 10)
+        let second = TestFixtures.window(index: 1,
+                                         title: "Первая тема жиз\u{2026} \u{2014} proj (Workspace)",
+                                         windowNumber: 11)
+        let sessions = [TestFixtures.session(id: "s1", cwd: "/p", state: .working, topic: "Первая тема жизни"),
+                        TestFixtures.session(id: "s2", cwd: "/p", state: .waiting, topic: "Вторая тема смерти")]
+
+        let assigned = Dictionary(uniqueKeysWithValues:
+            DataSource.distribute(sessions: sessions, over: [first, second]))
+        XCTAssertEqual(assigned[first.id]?.map(\.sessionId), ["s2"])
+        XCTAssertEqual(assigned[second.id]?.map(\.sessionId), ["s1"])
+    }
+
+    /// Whatever nobody claimed goes to the frontmost window rather than
+    /// disappearing.
+    func testUnclaimedSessionsGoToTheFrontmostWindow() {
+        let first = TestFixtures.window(index: 0,
+                                        title: "Первая тема жиз\u{2026} \u{2014} proj (Workspace)",
+                                        windowNumber: 10)
+        let second = TestFixtures.window(index: 1, title: "proj (Workspace)", windowNumber: 11)
+        let sessions = [TestFixtures.session(id: "s1", cwd: "/p", state: .working, topic: "Первая тема жизни"),
+                        TestFixtures.session(id: "s2", cwd: "/p", state: .waiting, topic: "Нечто иное"),
+                        TestFixtures.session(id: "s3", cwd: "/p", state: .idle, topic: "И ещё")]
+
+        let assigned = Dictionary(uniqueKeysWithValues:
+            DataSource.distribute(sessions: sessions, over: [first, second]))
+        XCTAssertEqual(assigned[first.id]?.map(\.sessionId), ["s1", "s2", "s3"])
+        XCTAssertEqual(assigned[second.id]?.count, 0)
+    }
+
+    func testNoWindowsMeansNoAssignments() {
+        XCTAssertTrue(DataSource.distribute(sessions: [TestFixtures.session(id: "s1", cwd: "/p", state: .idle)],
+                                            over: []).isEmpty)
+    }
+}
+
+/// Identifying a window in a way that survives raising another one.
+final class WindowIdentityTests: XCTestCase {
+
+    /// The private call is what makes any of this work; without it every window
+    /// falls back to being identified by its place in the z-order.
+    func testTheWindowNumberCallIsAvailable() {
+        XCTAssertTrue(VSCodeWindows.isWindowNumberAvailable)
+    }
+
+    func testIdentityIgnoresTheZOrder() {
+        let front = TestFixtures.window(index: 0, title: "a \u{2014} p", windowNumber: 25_990)
+        let back = TestFixtures.window(index: 3, title: "a \u{2014} p", windowNumber: 25_990)
+        XCTAssertEqual(front.id, back.id)
+
+        let other = TestFixtures.window(index: 0, title: "a \u{2014} p", windowNumber: 25_991)
+        XCTAssertNotEqual(front.id, other.id)
+    }
+
+    func testIdentityFallsBackToTheIndexWithoutAWindowNumber() {
+        let window = TestFixtures.window(index: 2, title: "a \u{2014} p", pid: 7, windowNumber: nil)
+        XCTAssertEqual(window.id, "7:2")
+    }
+
+    /// The user-visible defect: clicking a row raised its window, which
+    /// renumbered every row, which reset the selection, the hover highlight and
+    /// the scroll position of the whole list.
+    func testRowIdentityIsUnchangedAfterARaiseReordersTheList() {
+        let projects = [TestFixtures.project(path: "/p/a", rootName: "a"),
+                        TestFixtures.project(path: "/p/b", rootName: "b")]
+        let alpha = TestFixtures.window(index: 0, title: "topic \u{2014} a", windowNumber: 100)
+        let beta = TestFixtures.window(index: 1, title: "topic \u{2014} b", windowNumber: 200)
+
+        let before = DataSource.assemble(projects: projects,
+                                         windows: [alpha, beta],
+                                         sessions: [],
+                                         accessibilityTrusted: true)
+        // The click raised `beta`: same two windows, new z-order, new indices.
+        let raisedBeta = TestFixtures.window(index: 0, title: "topic \u{2014} b", windowNumber: 200)
+        let loweredAlpha = TestFixtures.window(index: 1, title: "topic \u{2014} a", windowNumber: 100)
+        let after = DataSource.assemble(projects: projects,
+                                        windows: [raisedBeta, loweredAlpha],
+                                        sessions: [],
+                                        accessibilityTrusted: true)
+
+        XCTAssertEqual(Set(before.openWindows.map(\.id)), Set(after.openWindows.map(\.id)))
+        XCTAssertEqual(before.openWindows.first { $0.displayName == "a" }?.id,
+                       after.openWindows.first { $0.displayName == "a" }?.id)
+    }
+
+    // MARK: - Matching for `raise`
+
+    func testMatchIndexFindsTheWindowWhereverItMoved() {
+        let window = TestFixtures.window(index: 0, title: "a \u{2014} p", windowNumber: 200)
+        // The list as it is now: the recorded window sank to the back.
+        XCTAssertEqual(VSCodeWindows.matchIndex(for: window, in: [100, 300, 200]), 2)
+    }
+
+    /// Falling back to the recorded index is exactly how clicking row 2 raised
+    /// window 4: the index had been renumbered by the previous click.
+    func testMatchIndexRefusesToGuessWhenTheWindowIsGone() {
+        let window = TestFixtures.window(index: 1, title: "a \u{2014} p", windowNumber: 200)
+        XCTAssertNil(VSCodeWindows.matchIndex(for: window, in: [100, 300, 400]))
+    }
+
+    func testMatchIndexUsesTheIndexOnlyWithoutAWindowNumber() {
+        let window = TestFixtures.window(index: 1, title: "a \u{2014} p", windowNumber: nil)
+        XCTAssertEqual(VSCodeWindows.matchIndex(for: window, in: [nil, nil, nil]), 1)
+        XCTAssertNil(VSCodeWindows.matchIndex(for: window, in: [nil]))
+    }
+
+    /// The Accessibility half of a click is safe to call on any queue and
+    /// simply fails when the process is gone — it never activates anything.
+    func testRaisingAWindowOfADeadProcessFails() {
+        let window = TestFixtures.window(index: 0, title: "a \u{2014} p", pid: 0x7FFF_FFFF, windowNumber: 1)
+        XCTAssertFalse(VSCodeWindows.raise(window))
+    }
+
+    /// The timeout has to be set on the system-wide element to apply to the
+    /// window elements, which is where every expensive read happens.
+    func testMessagingTimeoutIsInstalledProcessWide() {
+        XCTAssertTrue(VSCodeWindows.installMessagingTimeout())
+        // Idempotent: the work happens once and the result is reused.
+        XCTAssertTrue(VSCodeWindows.installMessagingTimeout())
+    }
+}
+
+/// Concurrent callers of `DataSource.snapshot()`.
+final class SnapshotCoalescingTests: XCTestCase {
+
+    private final class BuildCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func increment() { lock.lock(); count += 1; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    }
+
+    private func makeSource(counter: BuildCounter, duration: TimeInterval) -> DataSource {
+        DataSource(config: .default) {
+            counter.increment()
+            Thread.sleep(forTimeInterval: duration)
+            return SwitcherSnapshot(openWindows: [],
+                                    projects: [],
+                                    accessibilityTrusted: false,
+                                    generatedAt: Date())
+        }
+    }
+
+    /// The point of the coalescing: whoever queued up behind a build in flight
+    /// gets its result instead of rescanning the same disk.
+    func testCallersThatWaitedShareOneBuild() {
+        let counter = BuildCounter()
+        let source = makeSource(counter: counter, duration: 0.25)
+
+        DispatchQueue.concurrentPerform(iterations: 4) { _ in _ = source.snapshot() }
+        XCTAssertEqual(counter.value, 1)
+    }
+
+    /// And the defect: a fixed window after a build finished also served the
+    /// cache to callers that arrived *after* it. `SnapshotStore` fires exactly
+    /// such a call — a watcher event during a build is replayed the moment it
+    /// ends — and got back the very snapshot that had asked it to retry, so a
+    /// hook state change waited for the next timer tick.
+    func testACallerArrivingAfterTheBuildGetsAFreshOne() {
+        let counter = BuildCounter()
+        let source = makeSource(counter: counter, duration: 0.01)
+
+        let first = source.snapshot()
+        let second = source.snapshot()
+        XCTAssertEqual(counter.value, 2)
+        XCTAssertNotEqual(first.generatedAt, second.generatedAt)
+    }
+}
+
+/// The cache every transcript read goes through.
+final class FileDerivedCacheTests: XCTestCase {
+
+    func testAnUnchangedFileIsComputedOnce() throws {
+        let url = try makeTemporaryFile()
+        try "one".write(to: url, atomically: true, encoding: .utf8)
+        let cache = FileDerivedCache<Int>()
+        var computations = 0
+
+        XCTAssertEqual(cache.value(atPath: url.path) { computations += 1; return 1 }, 1)
+        XCTAssertEqual(cache.value(atPath: url.path) { computations += 1; return 2 }, 1)
+        XCTAssertEqual(computations, 1)
+    }
+
+    func testAChangedFileIsRecomputed() throws {
+        let url = try makeTemporaryFile()
+        try "one".write(to: url, atomically: true, encoding: .utf8)
+        let cache = FileDerivedCache<Int>()
+        var computations = 0
+
+        XCTAssertEqual(cache.value(atPath: url.path) { computations += 1; return 1 }, 1)
+        try "one and then some more".write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(cache.value(atPath: url.path) { computations += 1; return 2 }, 2)
+        XCTAssertEqual(computations, 2)
+    }
+
+    /// The tail size is part of the key: the same transcript summarised with a
+    /// different window is a different value.
+    func testVariantsOfOneFileDoNotCollide() throws {
+        let url = try makeTemporaryFile()
+        try "one".write(to: url, atomically: true, encoding: .utf8)
+        let cache = FileDerivedCache<Int>()
+
+        XCTAssertEqual(cache.value(atPath: url.path, variant: "small") { 1 }, 1)
+        XCTAssertEqual(cache.value(atPath: url.path, variant: "large") { 2 }, 2)
+        XCTAssertEqual(cache.value(atPath: url.path, variant: "small") { 3 }, 1)
+    }
+
+    /// A file that does not exist is never cached: most sessions have no
+    /// subagents directory, and it appears the moment the first one starts.
+    func testAMissingFileIsNeverCached() {
+        let cache = FileDerivedCache<Int>()
+        var computations = 0
+        let path = NSTemporaryDirectory() + "/vscode-switcher-missing-\(UUID().uuidString)"
+
+        for _ in 0..<3 { _ = cache.value(atPath: path) { computations += 1; return 0 } }
+        XCTAssertEqual(computations, 3)
+    }
+
+    /// Subagents go through the same cache now, keyed on their directory: the
+    /// listing and every `.meta.json` parse used to be redone on every snapshot.
+    func testSubagentEntriesAreReadFromTheDirectory() throws {
+        let directory = try makeTemporaryDirectory().appendingPathComponent("subagents")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try "{}\n".write(to: directory.appendingPathComponent("agent-abc.jsonl"),
+                         atomically: true,
+                         encoding: .utf8)
+        try ##"{"agentType": "general-purpose", "description": "Round 6 residual gate fixes"}"##
+            .write(to: directory.appendingPathComponent("agent-abc.meta.json"),
+                   atomically: true,
+                   encoding: .utf8)
+
+        let entries = ClaudeSessions.subagentEntries(in: directory)
+        XCTAssertEqual(entries.map(\.id), ["abc"])
+        XCTAssertEqual(entries.first?.agentType, "general-purpose")
+        XCTAssertEqual(entries.first?.description, "Round 6 residual gate fixes")
+        XCTAssertTrue(ClaudeSessions.subagentEntries(in: directory.appendingPathComponent("nope")).isEmpty)
+    }
+
+    private func makeTemporaryFile() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vscode-switcher-cache-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vscode-switcher-subagents-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+}
+
+/// Session files stay on disk after the process dies, and pids are reused.
+final class SessionLivenessTests: XCTestCase {
+
+    func testOurOwnProcessIsAlive() throws {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let start = try XCTUnwrap(ClaudeSessions.processStartTime(pid))
+        XCTAssertTrue(ClaudeSessions.isProcessAlive(pid))
+        // The session file is written a few seconds after the process started.
+        XCTAssertTrue(ClaudeSessions.isSessionProcessAlive(pid: pid, startedAt: start.addingTimeInterval(3)))
+    }
+
+    /// The reason `startedAt` is checked at all: a stranger's process that
+    /// inherited the pid started long after the session file was written.
+    func testARecycledPidDoesNotResurrectAnOldSession() {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        XCTAssertFalse(ClaudeSessions.isSessionProcessAlive(pid: pid,
+                                                            startedAt: Date(timeIntervalSince1970: 1_600_000_000)))
+    }
+
+    /// Session files without `startedAt` keep the old, weaker behaviour.
+    func testWithoutAStartTimeLivenessAloneDecides() {
+        XCTAssertTrue(ClaudeSessions.isSessionProcessAlive(pid: ProcessInfo.processInfo.processIdentifier,
+                                                           startedAt: nil))
+    }
+
+    func testAFinishedProcessIsNotAlive() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/echo")
+        process.arguments = ["-n"]
+        try process.run()
+        process.waitUntilExit()
+
+        XCTAssertFalse(ClaudeSessions.isProcessAlive(process.processIdentifier))
+        XCTAssertFalse(ClaudeSessions.isSessionProcessAlive(pid: process.processIdentifier, startedAt: Date()))
+    }
+
+    func testNonPositivePidsAreNeverAlive() {
+        XCTAssertFalse(ClaudeSessions.isProcessAlive(0))
+        XCTAssertFalse(ClaudeSessions.isProcessAlive(-1))
+        XCTAssertFalse(ClaudeSessions.isSessionProcessAlive(pid: 0, startedAt: nil))
+    }
+}
+/// `hooks/claude-window-status.sh`, run for real against a temporary state
+/// directory.
+final class HookScriptTests: XCTestCase {
+
+    private let sessionID = "11111111-2222-3333-4444-555555555555"
+
+    /// A `Notification` must never take a permission wait off, and the guard
+    /// cannot depend on `notification_type` being present: that field was
+    /// confirmed for exactly one value on one CLI version, and without it the
+    /// text heuristic classified "Claude is waiting for your input" as
+    /// `waiting` and wrote it straight over `permission`.
+    func testATypelessNotificationDoesNotDowngradePermission() throws {
+        let directory = try makeStatusDirectory()
+        try run(["hook_event_name": "Notification",
+                 "notification_type": "permission_prompt",
+                 "message": "Claude needs your permission to run Bash"],
+                in: directory)
+        XCTAssertEqual(try state(in: directory), "permission")
+
+        try run(["hook_event_name": "Notification",
+                 "message": "Claude is waiting for your input"],
+                in: directory)
+        XCTAssertEqual(try state(in: directory), "permission")
+    }
+
+    func testIdlePromptDoesNotDowngradePermissionEither() throws {
+        let directory = try makeStatusDirectory()
+        try run(["hook_event_name": "Notification",
+                 "notification_type": "elicitation_dialog",
+                 "message": "Claude Code needs your input"],
+                in: directory)
+        XCTAssertEqual(try state(in: directory), "permission")
+
+        try run(["hook_event_name": "Notification",
+                 "notification_type": "idle_prompt",
+                 "message": "Claude is waiting for your input"],
+                in: directory)
+        XCTAssertEqual(try state(in: directory), "permission")
+    }
+
+    /// Only these two clear it.
+    func testStopAndUserPromptSubmitDoClearPermission() throws {
+        for (event, expected) in [("Stop", "waiting"), ("UserPromptSubmit", "working")] {
+            let directory = try makeStatusDirectory()
+            try run(["hook_event_name": "Notification",
+                     "notification_type": "permission_prompt",
+                     "message": "Claude needs your permission to run Bash"],
+                    in: directory)
+            XCTAssertEqual(try state(in: directory), "permission")
+
+            try run(["hook_event_name": event, "cwd": "/tmp"], in: directory)
+            XCTAssertEqual(try state(in: directory), expected, "after \(event)")
+        }
+    }
+
+    /// In jq every number sorts before every string, so a `ts` that is not a
+    /// number made "the record on disk is newer" true forever and no state
+    /// could ever be written again.
+    func testANonNumericTimestampOnDiskDoesNotWedgeTheFile() throws {
+        let directory = try makeStatusDirectory()
+        try write(##"{"state": "waiting", "ts": "abc"}"##, to: directory)
+
+        try run(["hook_event_name": "UserPromptSubmit", "cwd": "/tmp"], in: directory)
+        XCTAssertEqual(try state(in: directory), "working")
+    }
+
+    /// And a state file that is not an object at all used to kill the jq
+    /// program outright, with the same result.
+    func testANonObjectStateFileDoesNotWedgeTheFileEither() throws {
+        let directory = try makeStatusDirectory()
+        try write("[1,2]", to: directory)
+
+        try run(["hook_event_name": "UserPromptSubmit", "cwd": "/tmp"], in: directory)
+        XCTAssertEqual(try state(in: directory), "working")
+    }
+
+    /// A `Notification` whose type says nothing about the agent leaves the file
+    /// alone rather than writing a state of its own.
+    func testUnrelatedNotificationsLeaveTheStateAlone() throws {
+        let directory = try makeStatusDirectory()
+        try run(["hook_event_name": "Stop"], in: directory)
+        try run(["hook_event_name": "Notification",
+                 "notification_type": "auth_success",
+                 "message": "Logged in"],
+                in: directory)
+        XCTAssertEqual(try state(in: directory), "waiting")
+    }
+
+    /// A `cwd` the hook cannot see must not blank out the one a previous event
+    /// recorded, and a backslash in it has to survive intact.
+    func testAPathWithABackslashSurvivesAndIsNotBlankedOut() throws {
+        let directory = try makeStatusDirectory()
+        try run(["hook_event_name": "UserPromptSubmit", "cwd": #"/a\b"#], in: directory)
+        try run(["hook_event_name": "Notification",
+                 "notification_type": "permission_prompt",
+                 "message": "needs your permission"],
+                in: directory)
+
+        let record = try XCTUnwrap(JSONC.object(atPath: statusFile(in: directory).path))
+        XCTAssertEqual(record["cwd"] as? String, #"/a\b"#)
+        XCTAssertEqual(record["state"] as? String, "permission")
+    }
+
+    // MARK: - Harness
+
+    private func run(_ fields: [String: String], in directory: URL) throws {
+        let script = Self.repositoryRoot.appendingPathComponent("hooks/claude-window-status.sh")
+        guard FileManager.default.isReadableFile(atPath: script.path) else {
+            throw XCTSkip("hook script not found at \(script.path)")
+        }
+        guard Self.hasJQ else { throw XCTSkip("jq is not installed") }
+
+        var payload = fields
+        payload["session_id"] = sessionID
+        let data = try JSONSerialization.data(withJSONObject: payload)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/bash")
+        process.arguments = [script.path]
+        process.environment = ["VSCODE_SWITCHER_STATUS_DIR": directory.path,
+                               "PATH": ProcessInfo.processInfo.environment["PATH"] ?? ""]
+        let input = Pipe()
+        process.standardInput = input
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        input.fileHandleForWriting.write(data)
+        try input.fileHandleForWriting.close()
+        process.waitUntilExit()
+        // A failing hook surfaces as an error inside the user's session.
+        XCTAssertEqual(process.terminationStatus, 0)
+    }
+
+    private func statusFile(in directory: URL) -> URL {
+        directory.appendingPathComponent("\(sessionID).json")
+    }
+
+    private func write(_ contents: String, to directory: URL) throws {
+        try contents.write(to: statusFile(in: directory), atomically: true, encoding: .utf8)
+    }
+
+    private func state(in directory: URL) throws -> String? {
+        let path = statusFile(in: directory).path
+        let object = try XCTUnwrap(JSONC.object(atPath: path), "no state file at \(path)")
+        return object["state"] as? String
+    }
+
+    private func makeStatusDirectory() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vscode-switcher-hook-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    /// `<repo>/macos/Tests/VSCodeSwitcherTests/<this file>`.
+    private static let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+
+    private static let hasJQ: Bool = ["/opt/homebrew/bin/jq", "/usr/local/bin/jq", "/usr/bin/jq"]
+        .contains { FileManager.default.isExecutableFile(atPath: $0) }
 }

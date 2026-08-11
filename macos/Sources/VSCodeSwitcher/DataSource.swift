@@ -8,44 +8,66 @@ import Foundation
 /// — with the result applied on the main thread. It blocks on disk for 0.1 s or
 /// more, so calling it on the main thread freezes the UI for that long.
 ///
-/// `@unchecked Sendable`: every stored property is either a `let` holding a
-/// value type or an object whose own mutable state sits behind a lock.
+/// `@unchecked Sendable`: `config` and `index` are a `let` value type and an
+/// object with its own lock; `lastSnapshot` is mutable and is read and written
+/// only while `snapshotLock` is held.
 final class DataSource: @unchecked Sendable {
     private let config: Config
     private let index = WorkspaceIndex()
+    /// Test seam: replaces the disk-bound assembly, so the coalescing around it
+    /// can be exercised with a build of a known duration.
+    private let buildOverride: (@Sendable () -> SwitcherSnapshot)?
 
     private let snapshotLock = NSLock()
     private var lastSnapshot: SwitcherSnapshot?
-
-    /// A caller that had to wait for a snapshot already in flight gets that
-    /// snapshot instead of immediately rescanning the same disk. Short enough
-    /// that a UI refreshing once a second is never served a stale list.
-    private static let coalesceWindow: TimeInterval = 0.2
+    /// When `lastSnapshot` became available, as opposed to when its sources were
+    /// read. Callers are coalesced against this.
+    private var lastSnapshotFinishedAt: Date = .distantPast
 
     init(config: Config) {
         self.config = config
+        self.buildOverride = nil
+    }
+
+    init(config: Config, build: @escaping @Sendable () -> SwitcherSnapshot) {
+        self.config = config
+        self.buildOverride = build
     }
 
     /// Builds a complete snapshot. Blocking and disk-bound: call it off the main
-    /// thread. Concurrent calls are serialised, and overlapping ones share a
-    /// result rather than doubling the I/O.
+    /// thread. Concurrent calls are serialised, and a caller that waited out a
+    /// build already in flight gets its result rather than doubling the I/O.
+    ///
+    /// The comparison is against the moment this call was made, not the age of
+    /// the cached snapshot. A fixed window after a build finished also served
+    /// the cache to callers that arrived *after* it — including the rebuild
+    /// `SnapshotStore` fires when a watcher event landed mid-build, which then
+    /// got back the very snapshot that had asked it to retry. The hook state
+    /// change reached the panel only on the next timer tick, which made the
+    /// file system watcher pointless.
     func snapshot() -> SwitcherSnapshot {
+        let requestedAt = Date()
         snapshotLock.lock()
         defer { snapshotLock.unlock() }
 
-        if let lastSnapshot, Date().timeIntervalSince(lastSnapshot.generatedAt) < Self.coalesceWindow {
-            return lastSnapshot
-        }
+        if let lastSnapshot, lastSnapshotFinishedAt >= requestedAt { return lastSnapshot }
         let fresh = build()
         lastSnapshot = fresh
+        lastSnapshotFinishedAt = Date()
         return fresh
     }
 
     private func build() -> SwitcherSnapshot {
-        Self.assemble(projects: index.projects(config: config),
-                      windows: VSCodeWindows.listWindows(bundleID: config.editorBundleID),
-                      sessions: ClaudeSessions.liveSessions(config: config),
-                      accessibilityTrusted: VSCodeWindows.isAccessibilityTrusted())
+        if let buildOverride { return buildOverride() }
+        // Stamped before the sources are read, not after: the assembly takes
+        // 40–180 ms, and a snapshot that claims to be from the moment it
+        // finished is younger than its own data.
+        let readAt = Date()
+        return Self.assemble(projects: index.projects(config: config),
+                             windows: VSCodeWindows.listWindows(bundleID: config.editorBundleID),
+                             sessions: ClaudeSessions.liveSessions(config: config),
+                             accessibilityTrusted: VSCodeWindows.isAccessibilityTrusted(),
+                             generatedAt: readAt)
     }
 
     /// The join itself, with the three sources already read. Pure, so the row
@@ -53,16 +75,13 @@ final class DataSource: @unchecked Sendable {
     static func assemble(projects: [ProjectInfo],
                          windows: [VSCodeWindowInfo],
                          sessions: [ClaudeSessionInfo],
-                         accessibilityTrusted: Bool) -> SwitcherSnapshot {
+                         accessibilityTrusted: Bool,
+                         generatedAt: Date = Date()) -> SwitcherSnapshot {
         let projectsByRootName = Dictionary(grouping: projects, by: \.rootName)
         var sessionsByProjectPath: [String: [ClaudeSessionInfo]] = [:]
-        var orphanSessions: [ClaudeSessionInfo] = []
         for session in sessions {
-            if let project = Self.project(for: session.cwd, in: projects) {
-                sessionsByProjectPath[project.path, default: []].append(session)
-            } else {
-                orphanSessions.append(session)
-            }
+            guard let project = Self.project(for: session.cwd, in: projects) else { continue }
+            sessionsByProjectPath[project.path, default: []].append(session)
         }
 
         // Windows in z-order, grouped by project so several windows on the same
@@ -84,18 +103,12 @@ final class DataSource: @unchecked Sendable {
             }
         }
 
-        // Sessions that no window claimed. This is the normal case, not an edge
-        // one: without Accessibility permission the window list is empty, and
-        // reading the session pool only through the windows made every running
-        // agent disappear from a panel that had already read all of it.
-        var assignedSessionIDs = Set<String>()
+        // Every session that ended up on a row. What is left over at the end is
+        // the definition of an orphan, which makes the assembly total: a
+        // running agent can never be silently dropped from the list.
+        var claimedSessionIDs = Set<String>()
         for assigned in sessionsByWindow.values {
-            for session in assigned { assignedSessionIDs.insert(session.sessionId) }
-        }
-        var unassignedByProjectPath: [String: [ClaudeSessionInfo]] = [:]
-        for (path, pool) in sessionsByProjectPath {
-            let unassigned = pool.filter { !assignedSessionIDs.contains($0.sessionId) }
-            if !unassigned.isEmpty { unassignedByProjectPath[path] = unassigned }
+            for session in assigned { claimedSessionIDs.insert(session.sessionId) }
         }
 
         var openWindows: [SwitcherRow] = []
@@ -109,46 +122,59 @@ final class DataSource: @unchecked Sendable {
                                                   sessions: sessionsByWindow[window.id] ?? []))
         }
 
+        // A project with no window of its own keeps its sessions. This is the
+        // normal case, not an edge one: without Accessibility permission the
+        // window list is empty, and reading the session pool only through the
+        // windows made every running agent disappear from a panel that had
+        // already read all of it.
         var projectRows: [SwitcherRow] = []
         for project in projects where !openProjectPaths.contains(project.path) {
-            let sessions = unassignedByProjectPath.removeValue(forKey: project.path) ?? []
-            projectRows.append(Self.makeProjectRow(project: project, sessions: sessions))
-        }
-
-        // A project can have a window and still hold sessions that window did
-        // not take (its own sessions went to a different key). They join the
-        // orphans rather than vanish.
-        for path in unassignedByProjectPath.keys.sorted() {
-            orphanSessions.append(contentsOf: unassignedByProjectPath[path] ?? [])
+            let pool = (sessionsByProjectPath[project.path] ?? [])
+                .filter { !claimedSessionIDs.contains($0.sessionId) }
+            for session in pool { claimedSessionIDs.insert(session.sessionId) }
+            projectRows.append(Self.makeProjectRow(project: project, sessions: pool))
         }
 
         // Sessions whose cwd is outside every scan root belong to no project and
-        // therefore to no window; they get rows of their own so a running agent
-        // is never silently dropped from the list.
-        for session in orphanSessions {
-            let name = (session.cwd as NSString).lastPathComponent
-            projectRows.append(SwitcherRow(id: "session:\(session.sessionId)",
+        // therefore to no window. They are grouped by working directory and
+        // aggregated exactly like the sessions that did land in a project:
+        // six agents in one directory are one place to look, not six identical
+        // rows. Most recent group first, then by path so the order is stable.
+        let orphansByCwd = Dictionary(grouping: sessions.filter { !claimedSessionIDs.contains($0.sessionId) },
+                                      by: \.cwd)
+        let orphanCwds = orphansByCwd.keys.sorted { left, right in
+            let leftActivity = orphansByCwd[left]?.compactMap(\.lastActivity).max() ?? .distantPast
+            let rightActivity = orphansByCwd[right]?.compactMap(\.lastActivity).max() ?? .distantPast
+            if leftActivity != rightActivity { return leftActivity > rightActivity }
+            return left < right
+        }
+        for cwd in orphanCwds {
+            let group = orphansByCwd[cwd] ?? []
+            let name = (cwd as NSString).lastPathComponent
+            let active = group.first
+            let aggregate = Self.aggregate(group)
+            projectRows.append(SwitcherRow(id: "cwd:\(cwd)",
                                            kind: .project,
                                            displayName: name,
                                            colorHex: WorkspaceIndex.fallbackColor(for: name),
                                            project: nil,
                                            window: nil,
-                                           sessions: [session],
-                                           state: session.state,
-                                           stateCount: 1,
-                                           activeSubagents: session.activeSubagents,
-                                           subagentDescriptions: session.subagents.filter(\.isActive).compactMap(\.description),
-                                           chatTopic: session.topic,
-                                           model: session.model,
-                                           contextUsedTokens: session.contextUsedTokens,
-                                           contextLimitTokens: session.contextLimitTokens,
-                                           lastActivity: session.lastActivity))
+                                           sessions: group,
+                                           state: aggregate.state,
+                                           stateCount: aggregate.stateCount,
+                                           activeSubagents: aggregate.activeSubagents,
+                                           subagentDescriptions: aggregate.subagentDescriptions,
+                                           chatTopic: active?.topic,
+                                           model: active?.model,
+                                           contextUsedTokens: active?.contextUsedTokens,
+                                           contextLimitTokens: active?.contextLimitTokens,
+                                           lastActivity: group.compactMap(\.lastActivity).max()))
         }
 
         return SwitcherSnapshot(openWindows: openWindows,
                                 projects: projectRows,
                                 accessibilityTrusted: accessibilityTrusted,
-                                generatedAt: Date())
+                                generatedAt: generatedAt)
     }
 
     private static func makeWindowRow(window: VSCodeWindowInfo,

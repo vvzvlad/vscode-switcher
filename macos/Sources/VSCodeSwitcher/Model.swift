@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// What a Claude session is doing right now.
@@ -104,13 +105,24 @@ struct ProjectInfo: Sendable, Codable, Identifiable, Hashable {
 /// A VSCode window as reported by the Accessibility API.
 ///
 /// Deliberately free of `AXUIElement` so the model stays `Sendable`: the element
-/// is resolved again from `pid` + `windowIndex` when a window has to be focused.
+/// is resolved again from `pid` + `windowNumber` when a window has to be raised.
 struct VSCodeWindowInfo: Sendable, Codable, Identifiable, Hashable {
-    var id: String { "\(pid):\(windowIndex)" }
+    /// Stable for as long as the window exists, and — unlike the z-order index
+    /// it falls back to — unaffected by raising any window. Every row's
+    /// identity used to change on every click, which reset the selection, the
+    /// hover highlight and the scroll position of the whole list.
+    var id: String {
+        guard let windowNumber else { return "\(pid):\(windowIndex)" }
+        return "\(pid):w\(windowNumber)"
+    }
 
     var pid: Int32
     /// Position in the AX window array, which is the z-order (0 = frontmost).
+    /// Changes whenever any window is raised; only good for MRU ordering.
     var windowIndex: Int
+    /// `CGWindowID` of the window, from the private `_AXUIElementGetWindow`.
+    /// `nil` only when that call is unavailable.
+    var windowNumber: CGWindowID?
     var title: String
     /// Tail of the title after the last separator, without ` (Workspace)`.
     var rootName: String?
@@ -168,6 +180,8 @@ struct SwitcherSnapshot: Sendable, Codable {
     var openWindows: [SwitcherRow]
     var projects: [SwitcherRow]
     var accessibilityTrusted: Bool
+    /// When the sources were read, not when the assembly finished — the two are
+    /// 40–180 ms apart and this is the age of the data.
     var generatedAt: Date
 
     var rows: [SwitcherRow] { openWindows + projects }

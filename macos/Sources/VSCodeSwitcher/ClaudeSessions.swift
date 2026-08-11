@@ -170,6 +170,11 @@ enum ClaudeSessions {
     /// discredits the whole list.
     static let hookWorkingMaxAgeSeconds: TimeInterval = 300
 
+    /// How recently the transcript must have moved to count as proof that the
+    /// session is alive right now. Its mtime advances on every record written,
+    /// so a working agent touches it many times a minute.
+    static let transcriptLivenessSeconds: TimeInterval = 120
+
     /// The state of a session, reconciling the hook signal with the transcript.
     ///
     /// The hook file is the freshest source but it is a level, not an event
@@ -184,18 +189,34 @@ enum ClaudeSessions {
         guard let hookState = hook?.state else { return fromTranscript ?? (.idle, .unknown) }
         guard let hookTime = hook?.timestamp else { return (hookState, .hook) }
 
+        // `waiting` and `permission` describe a condition the transcript cannot
+        // see: while a permission dialog sits on screen the last assistant
+        // record still says `tool_use` and the file keeps being touched, so
+        // every touch older than the tolerance used to turn the orange
+        // indicator off. Only a newer hook — `Stop`, `UserPromptSubmit` — takes
+        // those two states away.
+        let mayBeOverruled = hookState == .working || hookState == .idle
+
         // The session went on working long after the hook state was written, so
         // the hook is provably behind and the transcript is the better guess.
-        if let activity = transcript.lastActivity,
+        if mayBeOverruled,
+           let activity = transcript.lastActivity,
            activity.timeIntervalSince(hookTime) > hookLagToleranceSeconds,
            let fromTranscript {
             return fromTranscript
         }
-        // Only `working` asserts activity happening right now; `waiting` and
-        // `permission` describe a condition that legitimately lasts for hours
-        // until the user acts, so they are never aged out.
+        // Only `working` asserts activity happening right now, so only it is
+        // aged out — and only when nothing else says the session is alive. A
+        // transcript touched seconds ago is the strongest such signal there is,
+        // and it is there even when the tail yielded no usable state: an
+        // assistant record whose `stop_reason` is outside the three known
+        // values, or a single record larger than the whole tail window, both
+        // leave `fallbackState` empty while the session is plainly running.
         if hookState == .working, now.timeIntervalSince(hookTime) > hookWorkingMaxAgeSeconds {
-            return (.idle, .unknown)
+            guard let activity = transcript.lastActivity,
+                  now.timeIntervalSince(activity) <= transcriptLivenessSeconds
+            else { return (.idle, .unknown) }
+            return fromTranscript ?? (.working, .hook)
         }
         return (hookState, .hook)
     }
@@ -210,19 +231,49 @@ enum ClaudeSessions {
     /// a session using 19% of a 1M window.
     static func contextUsage(transcript: TranscriptSummary,
                              metrics: MetricsStatus?) -> (used: Int?, limit: Int?) {
-        // `message.model` in a transcript is always the plain id
-        // (`claude-opus-5`); only `model.id` from statusLine carries the `[1m]`
-        // suffix, so both have to be inspected.
-        let isExtended = isExtendedContextModel([metrics?.modelId, transcript.model])
-
-        if let metrics, let used = metrics.usedTokens {
+        if let metrics, let used = metrics.usedTokens,
+           !metricsAreStale(metrics: metrics, transcript: transcript) {
+            // Nothing from the transcript is mixed in here, not even the model
+            // identifier: this branch is statusLine's own reading of its own
+            // moment.
+            let isExtended = isExtendedContextModel([metrics.modelId])
             let limit = metrics.contextWindowSize
                 ?? limitFromPercentage(usedTokens: used, percentage: metrics.usedPercentage)
                 ?? contextLimitTokens(isExtendedContext: isExtended, usedTokens: used)
             return (used, limit)
         }
+        // `message.model` in a transcript is always the plain id
+        // (`claude-opus-5`); only `model.id` from statusLine carries the `[1m]`
+        // suffix, so both have to be inspected. The model a session runs is not
+        // a sample of a moment, so reading it from either source is safe.
+        let isExtended = isExtendedContextModel([metrics?.modelId, transcript.model])
         guard let used = transcript.contextUsedTokens else { return (nil, nil) }
         return (used, contextLimitTokens(isExtendedContext: isExtended, usedTokens: used))
+    }
+
+    /// How far the transcript may run ahead of `.metrics.json` before that file
+    /// stops being believed. statusLine runs on every state change, so an active
+    /// session refreshes it within seconds.
+    static let metricsLagToleranceSeconds: TimeInterval = 300
+
+    /// Whether `.metrics.json` has been left behind by a statusLine that stopped
+    /// running.
+    ///
+    /// The file survives until `SessionEnd` and is never rewritten if statusLine
+    /// breaks — the user replaces their own status line, uninstalls the hooks
+    /// (`--uninstall` does not delete metrics), `jq` leaves the PATH. Its numbers
+    /// then stay authoritative forever: a stale `5k` against a transcript at
+    /// `460k` rendered as a confident `2.5%`. Only claimed when the transcript
+    /// can actually replace both numbers.
+    static func metricsAreStale(metrics: MetricsStatus,
+                                transcript: TranscriptSummary) -> Bool {
+        guard transcript.contextUsedTokens != nil,
+              let activity = transcript.lastActivity
+        else { return false }
+        // A file that does not say when it was written cannot be shown to be
+        // fresh, and the transcript here demonstrably is.
+        guard let written = metrics.timestamp else { return true }
+        return activity.timeIntervalSince(written) > metricsLagToleranceSeconds
     }
 
     /// Whether any known identifier of the session's model names the extended
@@ -234,9 +285,24 @@ enum ClaudeSessions {
     /// Window size implied by statusLine's own percentage, used only when the
     /// same payload did not state the size outright. Both numbers describe the
     /// same moment, so this is a reading, not a guess.
+    ///
+    /// The percentage arrives rounded to a whole number, so the quotient carries
+    /// that rounding: a real payload gave `204 244` for a 200k window. A limit
+    /// is a round number in every window Claude offers, so the quotient is
+    /// snapped — to a known window size when the rounding interval covers one,
+    /// and to two significant digits otherwise.
     static func limitFromPercentage(usedTokens: Int, percentage: Double?) -> Int? {
         guard let percentage, percentage >= 1, usedTokens > 0 else { return nil }
-        return Int((Double(usedTokens) * 100 / percentage).rounded())
+        let raw = Double(usedTokens) * 100 / percentage
+        let scale = Double(usedTokens) * 100
+        let lowest = scale / (percentage + 0.5)
+        let highest = percentage > 0.5 ? scale / (percentage - 0.5) : .greatestFiniteMagnitude
+        let known = [200_000, 1_000_000]
+            .filter { Double($0) >= lowest && Double($0) <= highest }
+            .min { abs(Double($0) - raw) < abs(Double($1) - raw) }
+        if let known { return known }
+        let magnitude = pow(10, max(0, log10(raw).rounded(.down) - 1))
+        return Int((raw / magnitude).rounded() * magnitude)
     }
 
     /// Window size when statusLine did not report one.
@@ -405,41 +471,74 @@ enum ClaudeSessions {
 
     // MARK: - Subagents
 
+    /// The part of a subagent that never changes once it exists: identity and
+    /// the metadata written when it was spawned.
+    struct SubagentEntry: Sendable {
+        var id: String
+        var agentType: String?
+        var description: String?
+        var transcriptPath: String
+    }
+
+    private static let subagentListCache = FileDerivedCache<[SubagentEntry]>()
+
     /// Background subagents of a session.
     ///
     /// Each one is a pair of `agent-<id>.jsonl` and `agent-<id>.meta.json` inside
     /// `<transcript dir>/<sessionId>/subagents/`. A subagent counts as active
     /// while its transcript was touched recently and its last record is not a
     /// finished answer.
+    ///
+    /// The directory listing and the `.meta.json` parses are cached against the
+    /// directory's own mtime, which moves exactly when an entry is added or
+    /// removed. This was the last uncached hot path: nine live sessions meant
+    /// re-listing nine directories and re-parsing 152 metadata files on every
+    /// snapshot, about 9 ms of a 44 ms build. Only the freshness of each
+    /// transcript is re-read, because that is what changes between snapshots.
     static func subagents(slug: String, sessionId: String, config: Config) -> [SubagentInfo] {
         let directory = projectsDirectory
             .appendingPathComponent(slug)
             .appendingPathComponent(sessionId)
             .appendingPathComponent("subagents")
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
+        let entries = subagentListCache.value(atPath: directory.path) {
+            subagentEntries(in: directory)
+        }
 
         var result: [SubagentInfo] = []
-        for name in names where name.hasPrefix("agent-") && name.hasSuffix(".jsonl") {
-            let identifier = String(name.dropFirst("agent-".count).dropLast(".jsonl".count))
-            let transcriptPath = directory.appendingPathComponent(name).path
-            let metaPath = directory.appendingPathComponent("agent-\(identifier).meta.json").path
-
-            let meta = JSONC.object(atPath: metaPath)
-            let mtime = (try? FileManager.default.attributesOfItem(atPath: transcriptPath))?[.modificationDate] as? Date
+        for entry in entries {
+            let mtime = (try? FileManager.default.attributesOfItem(atPath: entry.transcriptPath))?[.modificationDate]
+                as? Date
 
             var isActive = false
             if let mtime, Date().timeIntervalSince(mtime) <= config.subagentActiveSeconds {
-                isActive = !isFinished(transcriptPath: transcriptPath)
+                isActive = !isFinished(transcriptPath: entry.transcriptPath)
             }
 
-            result.append(SubagentInfo(id: identifier,
-                                       agentType: meta?["agentType"] as? String,
-                                       description: meta?["description"] as? String,
+            result.append(SubagentInfo(id: entry.id,
+                                       agentType: entry.agentType,
+                                       description: entry.description,
                                        lastActivity: mtime,
                                        isActive: isActive))
         }
         result.sort { ($0.lastActivity ?? .distantPast) > ($1.lastActivity ?? .distantPast) }
         return result
+    }
+
+    /// Lists a `subagents` directory and reads every `.meta.json` in it. A
+    /// missing directory is not an error: most sessions never spawn one.
+    static func subagentEntries(in directory: URL) -> [SubagentEntry] {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
+        var entries: [SubagentEntry] = []
+        for name in names.sorted() where name.hasPrefix("agent-") && name.hasSuffix(".jsonl") {
+            let identifier = String(name.dropFirst("agent-".count).dropLast(".jsonl".count))
+            let metaPath = directory.appendingPathComponent("agent-\(identifier).meta.json").path
+            let meta = JSONC.object(atPath: metaPath)
+            entries.append(SubagentEntry(id: identifier,
+                                         agentType: meta?["agentType"] as? String,
+                                         description: meta?["description"] as? String,
+                                         transcriptPath: directory.appendingPathComponent(name).path))
+        }
+        return entries
     }
 
     private static let subagentFinishedCache = FileDerivedCache<Bool>()
@@ -473,6 +572,11 @@ enum ClaudeSessions {
 /// of the file's bytes, and a transcript is only ever appended to. Without this
 /// every snapshot re-read and re-parsed several megabytes of tails that could
 /// not possibly have changed.
+///
+/// A directory works as the key too — its mtime moves exactly when an entry is
+/// added or removed, which is when a listing of it changes. A file that does not
+/// exist is never cached: a `subagents` directory appears the moment the session
+/// spawns its first background agent.
 ///
 /// `@unchecked Sendable`: the only mutable state is `entries`, and it is never
 /// touched outside `lock`.
