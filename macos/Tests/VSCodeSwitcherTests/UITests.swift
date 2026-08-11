@@ -262,6 +262,23 @@ final class WindowOrderTests: XCTestCase {
         XCTAssertEqual(SwitcherViewModel.merged(["a"], with: ["x", "y", "a"]), ["x", "y", "a"])
     }
 
+    /// The window in front of the newcomer can be the oldest one in the frozen
+    /// order — open a window, click an old one, summon the panel — and then
+    /// "just after the anchor" is the very bottom of the list, where the window
+    /// most likely to be wanted must not go. The closest known window behind it
+    /// anchors the insertion instead.
+    func testTheAnchorInFrontDoesNotSendANewWindowToTheBottom() {
+        XCTAssertEqual(SwitcherViewModel.merged(["a", "b", "c"], with: ["c", "new", "a", "b"]),
+                       ["new", "a", "b", "c"])
+    }
+
+    /// With nothing known behind it, the end is where the newcomer belongs —
+    /// that is the plain "opened while the panel was up" case.
+    func testANewWindowBehindEverythingKnownStillGoesToTheEnd() {
+        XCTAssertEqual(SwitcherViewModel.merged(["a", "b"], with: ["b", "new"]),
+                       ["a", "b", "new"])
+    }
+
     func testAnEmptyFrozenOrderTakesTheZOrderWhole() {
         XCTAssertEqual(SwitcherViewModel.merged([], with: ["c", "a", "b"]), ["c", "a", "b"])
     }

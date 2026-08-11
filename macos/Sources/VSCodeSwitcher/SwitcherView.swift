@@ -234,17 +234,29 @@ final class SwitcherViewModel: ObservableObject {
     /// The insertion point is the frozen slot of the closest window in front of
     /// the newcomer, so several new windows keep their relative z-order, and one
     /// that is frontmost overall goes to the very top.
+    ///
+    /// Unless that slot is the last one, which would put the newest window at the
+    /// very bottom of the list — the one place it must not be. It happens
+    /// whenever the window in front of the newcomer is the *oldest* one in the
+    /// frozen order: open a window, then click an old one, then summon the panel.
+    /// The closest known window *behind* the newcomer is then the anchor instead,
+    /// and the newcomer goes in just above it — the same rule seen from the other
+    /// side. With nothing known behind it either, the end is where it belongs.
     static func merged(_ order: [String], with fresh: [String]) -> [String] {
         var result = order
         var anchor: Int?
-        for id in fresh {
+        for (offset, id) in fresh.enumerated() {
             if let index = result.firstIndex(of: id) {
                 anchor = index
-            } else {
-                let insertAt = anchor.map { $0 + 1 } ?? 0
-                result.insert(id, at: insertAt)
-                anchor = insertAt
+                continue
             }
+            var insertAt = anchor.map { $0 + 1 } ?? 0
+            if insertAt == result.count,
+               let behind = fresh[(offset + 1)...].lazy.compactMap({ result.firstIndex(of: $0) }).first {
+                insertAt = behind
+            }
+            result.insert(id, at: insertAt)
+            anchor = insertAt
         }
         return result
     }
