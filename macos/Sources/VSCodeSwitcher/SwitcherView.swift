@@ -29,10 +29,13 @@ final class SwitcherViewModel: ObservableObject {
     /// Set by the controller once it has taken keyboard focus for the panel.
     @Published var searchFieldFocused = false
     @Published private(set) var snapshot: SwitcherSnapshot = .empty
+    /// Row identifiers of the "open windows" section, in the order they were in
+    /// when the panel appeared. Empty before the first show.
+    @Published private var windowOrder: [String] = []
 
-    /// How many closed projects are listed when nothing is typed. Search still
-    /// looks through all of them.
-    private static let projectLimit = 30
+    /// How many *session-less* projects are listed when nothing is typed.
+    /// Search still looks through all of them.
+    static let projectLimit = 30
 
     /// A row was clicked: focus that window or open that project.
     var onActivate: ((SwitcherRow) -> Void)?
@@ -49,9 +52,11 @@ final class SwitcherViewModel: ObservableObject {
         if let id = Self.frontmostWindowID(in: snapshot, frontmostPID: pid) { frontmostRowID = id }
     }
 
-    /// Called when the panel opens, so every appearance starts on a clean list.
-    func resetQuery() {
+    /// Called when the panel opens, so every appearance starts on a clean list
+    /// and a freshly frozen window order.
+    func panelDidShow() {
         query = ""
+        windowOrder = snapshot.openWindows.map(\.id)
     }
 
     /// Moves the highlight the moment a row is clicked; the next snapshot
@@ -67,17 +72,70 @@ final class SwitcherViewModel: ObservableObject {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var result: [SwitcherSection] = []
 
-        let windows = snapshot.openWindows.filter { Self.matches($0, needle) }
+        let windows = Self.ordered(snapshot.openWindows, by: windowOrder)
+            .filter { Self.matches($0, needle) }
         if !windows.isEmpty {
             result.append(SwitcherSection(title: "Открытые окна", rows: windows))
         }
 
         var projects = snapshot.projects.filter { Self.matches($0, needle) }
-        if needle.isEmpty { projects = Array(projects.prefix(Self.projectLimit)) }
+        if needle.isEmpty { projects = Self.limited(projects, to: Self.projectLimit) }
         if !projects.isEmpty {
             result.append(SwitcherSection(title: "Проекты", rows: projects))
         }
         return result
+    }
+
+    /// Caps the list of projects without ever hiding a row that has a live
+    /// session behind it.
+    ///
+    /// `snapshot.projects` is a concatenation: first the projects with no window
+    /// of their own, ordered by directory mtime, then — at the very end — the
+    /// orphan `cwd:` rows for sessions running outside every scan root. A flat
+    /// `prefix` therefore drops every orphan the moment the index holds more
+    /// projects than the limit, which it always does. The same cut hides a
+    /// project inside a root whose directory mtime is old (editing files does
+    /// not move it), so an agent stuck on a permission dialog could sit there
+    /// for hours without ever appearing. The data layer is deliberately total —
+    /// "a working agent must never silently vanish from the list" — and the
+    /// limit is not allowed to undo that.
+    static func limited(_ rows: [SwitcherRow], to limit: Int) -> [SwitcherRow] {
+        var remaining = limit
+        return rows.filter { row in
+            guard row.sessions.isEmpty else { return true }
+            guard remaining > 0 else { return false }
+            remaining -= 1
+            return true
+        }
+    }
+
+    /// Puts the open windows back into the order frozen at the last show.
+    ///
+    /// `DataSource` hands them over in z-order, which is correct of it and
+    /// unusable here: raising a window is exactly what the panel is for, and the
+    /// next snapshot — one second later at most — moved the row the user had
+    /// just clicked to the top and shifted every other row under the pointer.
+    /// Stepping through several windows in a row meant chasing a list that
+    /// reshuffled after each click. Only the sequence is frozen; the contents of
+    /// the rows keep updating.
+    ///
+    /// Matching is by `row.id`, which carries the `CGWindowID`, so a window that
+    /// was closed simply drops out and leaves no hole, and one opened while the
+    /// panel is up is appended rather than wedged into the middle. The order is
+    /// taken afresh at every show, so the list is back in z-order — most
+    /// recently used first — as soon as the panel is reopened.
+    static func ordered(_ rows: [SwitcherRow], by order: [String]) -> [SwitcherRow] {
+        guard !order.isEmpty else { return rows }
+        var position: [String: Int] = [:]
+        for (index, id) in order.enumerated() where position[id] == nil { position[id] = index }
+
+        var frozen: [(Int, SwitcherRow)] = []
+        var appeared: [SwitcherRow] = []
+        for row in rows {
+            if let index = position[row.id] { frozen.append((index, row)) } else { appeared.append(row) }
+        }
+        frozen.sort { $0.0 < $1.0 }
+        return frozen.map(\.1) + appeared
     }
 
     private static func matches(_ row: SwitcherRow, _ needle: String) -> Bool {
@@ -132,13 +190,31 @@ struct SwitcherView: View {
 
     private var searchField: some View {
         HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-                .font(.system(size: 12, weight: .medium))
-            TextField("Поиск проекта или темы", text: $model.query)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13))
-                .focused($searchFocused)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12, weight: .medium))
+                TextField("Поиск проекта или темы", text: $model.query)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .focused($searchFocused)
+            }
+            .padding(.vertical, 9)
+            .contentShape(Rectangle())
+            // Until the panel holds keyboard focus the text field cannot edit
+            // anything, so the first click is caught here and asks the
+            // controller for focus instead of landing in a dead field. The
+            // catcher spans the field only: stretched across the whole row it
+            // also swallowed the clicks meant for the clear button beside it,
+            // which is reachable exactly when the field is not focused but the
+            // query is not empty.
+            .overlay {
+                if !model.searchFieldFocused {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { model.onSearchFieldTap?() }
+                }
+            }
             if !model.query.isEmpty {
                 Button { model.query = "" } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
@@ -147,18 +223,6 @@ struct SwitcherView: View {
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .contentShape(Rectangle())
-        // Until the panel holds keyboard focus the text field cannot edit
-        // anything, so the first click is caught here and asks the controller
-        // for focus instead of landing in a dead field.
-        .overlay {
-            if !model.searchFieldFocused {
-                Color.clear
-                    .contentShape(Rectangle())
-                    .onTapGesture { model.onSearchFieldTap?() }
-            }
-        }
     }
 
     private var list: some View {
@@ -220,9 +284,22 @@ private struct AccessibilityBanner: View {
         .background(hovering ? Color.primary.opacity(0.07) : Color.clear)
         .contentShape(Rectangle())
         .onTapGesture(perform: action)
+        // `push` and `pop` have to balance, and `onHover` does not guarantee it
+        // on its own: it repeats `true` when SwiftUI rebuilds the row (once a
+        // second here), and it never delivers `false` when the view simply
+        // leaves the hierarchy — which is exactly what this banner does the
+        // moment the permission is granted. Either one leaves the pointing hand
+        // stuck over the whole panel until the app restarts, with nothing left
+        // to pop it. Hence the state guard and the teardown.
         .onHover { inside in
+            guard inside != hovering else { return }
             hovering = inside
             if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+        }
+        .onDisappear {
+            guard hovering else { return }
+            hovering = false
+            NSCursor.pop()
         }
     }
 }
@@ -333,10 +410,12 @@ struct SwitcherRowView: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
+    /// Hover deepens the frontmost highlight instead of replacing it: swapping
+    /// the accent tint for the plain grey one made pointing at the front row
+    /// *less* visible than not pointing at it, while §4 asks for the opposite.
     private var backgroundColor: Color {
-        if isHovering { return Color.primary.opacity(0.10) }
-        if isFrontmost { return Color.accentColor.opacity(0.20) }
-        return .clear
+        if isFrontmost { return Color.accentColor.opacity(isHovering ? 0.34 : 0.20) }
+        return isHovering ? Color.primary.opacity(0.10) : .clear
     }
 
     private var tooltip: String {
@@ -347,7 +426,9 @@ struct SwitcherRowView: View {
             lines.append("Фоновые агенты:")
             lines.append(contentsOf: row.subagentDescriptions.map { "• " + $0 })
         }
-        if row.kind == .project, let path = row.project?.path {
+        // An orphan row has no indexed project, only the sessions' working
+        // directory — and that is the one thing worth showing about it.
+        if row.kind == .project, let path = row.project?.path ?? row.sessions.first?.cwd {
             lines.append("")
             lines.append(path)
         }
@@ -399,8 +480,21 @@ struct StateBadge: View {
                     .foregroundStyle(Self.color(for: state))
             }
         }
-        .onAppear {
+        // Keyed on the state, not on appearance. The badge sits in a stable spot
+        // in the hierarchy, so when a row changes state SwiftUI reuses the view
+        // and `onAppear` never runs again: a `working` row that received `Stop`
+        // turned green and kept the endless pulse of the blue dot it replaced,
+        // and a row first drawn as `idle` never started pulsing when the agent
+        // began its turn. With updates once a second that is the normal case,
+        // not an edge one — and §3 says the pulse means "working".
+        .task(id: state) {
+            pulsing = false
             guard Self.animates(state) else { return }
+            // Let the reset land in its own transaction. Both mutations in one
+            // pass would cancel out for a state change that keeps the animation
+            // on (working → permission), leaving the previous rhythm running.
+            try? await Task.sleep(for: .milliseconds(50))
+            guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: state == .permission ? 0.55 : 0.9)
                 .repeatForever(autoreverses: true)) {
                 pulsing = true
