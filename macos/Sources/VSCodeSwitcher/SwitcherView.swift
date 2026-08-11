@@ -32,6 +32,10 @@ final class SwitcherViewModel: ObservableObject {
     /// Row identifiers of the "open windows" section, in the order they were in
     /// when the panel appeared. Empty before the first show.
     @Published private var windowOrder: [String] = []
+    /// Set when the panel appears: the order above came from the cache and is
+    /// provisional until a snapshot whose sources were read after this instant
+    /// arrives. Cleared by that snapshot, and by the first click.
+    private var orderPendingSince: Date?
 
     /// How many *session-less* projects are listed when nothing is typed.
     /// Search still looks through all of them.
@@ -48,6 +52,21 @@ final class SwitcherViewModel: ObservableObject {
 
     func update(snapshot: SwitcherSnapshot) {
         self.snapshot = snapshot
+        // The order frozen at show time came from the cache, which is up to two
+        // seconds old and has no watcher behind it — nothing tells the store
+        // that a window was opened. A window opened a second before the panel
+        // was summoned was therefore missing from it, counted as "appeared
+        // while the panel was up" and pinned to the *bottom* of the list for as
+        // long as the panel stayed open — and the newest window is usually the
+        // one being looked for. So the freeze is redone once, on the first
+        // snapshot that was actually read after the panel appeared. It also
+        // covers the degenerate case of a panel shown before the very first
+        // snapshot, where the frozen order was empty and every click reshuffled
+        // the list.
+        if let pendingSince = orderPendingSince, snapshot.generatedAt >= pendingSince {
+            windowOrder = snapshot.openWindows.map(\.id)
+            orderPendingSince = nil
+        }
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         if let id = Self.frontmostWindowID(in: snapshot, frontmostPID: pid) { frontmostRowID = id }
     }
@@ -57,11 +76,19 @@ final class SwitcherViewModel: ObservableObject {
     func panelDidShow() {
         query = ""
         windowOrder = snapshot.openWindows.map(\.id)
+        orderPendingSince = Date()
     }
 
-    /// Moves the highlight the moment a row is clicked; the next snapshot
-    /// confirms it a beat later.
-    func markFrontmost(_ row: SwitcherRow) {
+    /// A row was clicked. Moves the highlight at once — the next snapshot
+    /// confirms it a beat later — and settles the window order for good.
+    ///
+    /// The click is about to raise a window or open a new one, and both change
+    /// the z-order the next snapshot reports. Whatever the list looked like when
+    /// the user aimed at it is what it has to keep looking like, so the pending
+    /// re-freeze is dropped here rather than allowed to fold the click's own
+    /// effect into the order.
+    func rowActivated(_ row: SwitcherRow) {
+        orderPendingSince = nil
         guard row.kind == .window else { return }
         frontmostRowID = row.id
     }
@@ -122,8 +149,9 @@ final class SwitcherViewModel: ObservableObject {
     /// Matching is by `row.id`, which carries the `CGWindowID`, so a window that
     /// was closed simply drops out and leaves no hole, and one opened while the
     /// panel is up is appended rather than wedged into the middle. The order is
-    /// taken afresh at every show, so the list is back in z-order — most
-    /// recently used first — as soon as the panel is reopened.
+    /// taken afresh at every show — from the first snapshot read after that show
+    /// (see `update(snapshot:)`) — so the list is back in z-order, most recently
+    /// used first, as soon as the panel is reopened.
     static func ordered(_ rows: [SwitcherRow], by order: [String]) -> [SwitcherRow] {
         guard !order.isEmpty else { return rows }
         var position: [String: Int] = [:]

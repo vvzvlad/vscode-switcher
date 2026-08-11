@@ -236,6 +236,75 @@ final class WindowOrderTests: XCTestCase {
         XCTAssertEqual(SwitcherViewModel.ordered(rows(["c", "b", "a"]), by: []).map(\.id),
                        ["c", "b", "a"])
     }
+
+    // MARK: When the order is taken
+
+    private func snapshot(_ ids: [String], generatedAt: Date) -> SwitcherSnapshot {
+        SwitcherSnapshot(openWindows: rows(ids),
+                         projects: [],
+                         accessibilityTrusted: true,
+                         generatedAt: generatedAt)
+    }
+
+    private func windowIDs(_ model: SwitcherViewModel) -> [String] {
+        model.sections.first { $0.title == "Открытые окна" }?.rows.map(\.id) ?? []
+    }
+
+    /// The cache the panel opens on is up to two seconds old and no watcher
+    /// tells it about a new editor window, so a window opened just before the
+    /// panel was summoned is missing from the frozen order — and "not in the
+    /// order" means "appended at the end", which is exactly where the newest
+    /// window must not be. The freeze is therefore redone on the first snapshot
+    /// read after the show.
+    func testTheOrderIsTakenFromTheFirstSnapshotReadAfterTheShow() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["a", "b"], generatedAt: Date()))
+        model.panelDidShow()
+
+        model.update(snapshot: snapshot(["new", "a", "b"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["new", "a", "b"])
+
+        // And it is frozen from then on: the click that raises "b" must not move it.
+        model.update(snapshot: snapshot(["b", "new", "a"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["new", "a", "b"])
+    }
+
+    /// A snapshot already in flight when the panel appeared carries pre-show
+    /// data, so it is not the one to freeze on.
+    func testASnapshotReadBeforeTheShowDoesNotFreezeTheOrder() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["a", "b"], generatedAt: Date()))
+        model.panelDidShow()
+
+        model.update(snapshot: snapshot(["b", "a"], generatedAt: .distantPast))
+        XCTAssertEqual(windowIDs(model), ["a", "b"])
+        model.update(snapshot: snapshot(["b", "a"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["b", "a"])
+    }
+
+    /// Clicking raises a window, and the snapshot that follows reports the new
+    /// z-order. It must not be mistaken for the fresh order to freeze on.
+    func testAClickSettlesTheOrderStraightAway() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["a", "b"], generatedAt: Date()))
+        model.panelDidShow()
+
+        model.rowActivated(rows(["b"])[0])
+        model.update(snapshot: snapshot(["b", "a"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["a", "b"])
+    }
+
+    /// The panel can open before the very first snapshot has landed. The frozen
+    /// order was empty then, `ordered` fell through to the raw z-order, and the
+    /// list reshuffled after every click for the rest of that appearance.
+    func testAPanelShownBeforeTheFirstSnapshotStillFreezes() {
+        let model = SwitcherViewModel()
+        model.panelDidShow()
+
+        model.update(snapshot: snapshot(["a", "b", "c"], generatedAt: Date()))
+        model.update(snapshot: snapshot(["c", "a", "b"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
+    }
 }
 
 /// Clicking an orphan row. It has neither a window nor an indexed project, and

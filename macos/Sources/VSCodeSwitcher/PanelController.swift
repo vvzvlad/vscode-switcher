@@ -276,8 +276,8 @@ final class PanelController {
     /// window 4" defect the stable identity removed.
     private func activate(_ row: SwitcherRow) {
         let config = config
+        model.rowActivated(row)
         if let window = row.window {
-            model.markFrontmost(row)
             VSCodeWindows.activate(pid: window.pid)
             DispatchQueue.global(qos: .userInitiated).async {
                 VSCodeWindows.raise(window)
