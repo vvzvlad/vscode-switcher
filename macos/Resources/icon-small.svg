@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>VSCode Switcher — app icon, 16/32 px variant</title>
+  <!--
+    Same idea as icon.svg, redrawn for 16 and 32 points (rendered at 16, 32 and
+    64 px). Five rows turn into a grey smear below ~128 px, so this variant:
+      - keeps three rows instead of five,
+      - roughly doubles the width of the colour tag, so a tag is ~2.5 px at
+        16 px instead of a sub-pixel sliver,
+      - drops the "selected row" tint, which at this scale is only noise,
+      - lifts the row background and the title bar, because the whole tile
+        otherwise reads as one dark blob.
+    The blue is lifted from the real #1857a4 to #2f78d0: at two pixels on a dark
+    plate the original goes black.
+  -->
+  <defs>
+    <!-- Continuous-corner squircle: 824x824 at (100,100), r=185.8, smoothing 0.6. -->
+    <path id="tile" d="M 626.72 100 c 104.06 0 156.09 0 195.83 20.25 a 185.8 185.8 0 0 1 81.2 81.2 c 20.25 39.74 20.25 91.77 20.25 195.83 L 924 626.72 c 0 104.06 0 156.09 -20.25 195.83 a 185.8 185.8 0 0 1 -81.2 81.2 c -39.74 20.25 -91.77 20.25 -195.83 20.25 L 397.28 924 c -104.06 0 -156.09 0 -195.83 -20.25 a 185.8 185.8 0 0 1 -81.2 -81.2 c -20.25 -39.74 -20.25 -91.77 -20.25 -195.83 L 100 397.28 c 0 -104.06 0 -156.09 20.25 -195.83 a 185.8 185.8 0 0 1 81.2 -81.2 c 39.74 -20.25 91.77 -20.25 195.83 -20.25 Z"/>
+
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#33333c"/>
+      <stop offset="1" stop-color="#1d1d22"/>
+    </linearGradient>
+
+    <filter id="tileShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.42"/>
+    </filter>
+
+    <clipPath id="tileClip">
+      <use href="#tile"/>
+    </clipPath>
+  </defs>
+
+  <use href="#tile" fill="url(#plate)" filter="url(#tileShadow)"/>
+
+  <g clip-path="url(#tileClip)">
+    <g>
+      <rect x="30" y="214" width="836" height="180" rx="48" fill="#4b4b58"/>
+      <rect x="30" y="214" width="298" height="180" rx="48" fill="#e2681c"/>
+      <rect x="380" y="278" width="404" height="52" rx="26" fill="#d6d7de"/>
+    </g>
+    <g>
+      <rect x="30" y="422" width="836" height="180" rx="48" fill="#4b4b58"/>
+      <rect x="30" y="422" width="298" height="180" rx="48" fill="#2f78d0"/>
+      <rect x="380" y="486" width="330" height="52" rx="26" fill="#d6d7de"/>
+    </g>
+    <g>
+      <rect x="30" y="630" width="836" height="180" rx="48" fill="#4b4b58"/>
+      <rect x="30" y="630" width="298" height="180" rx="48" fill="#58c045"/>
+      <rect x="380" y="694" width="446" height="52" rx="26" fill="#d6d7de"/>
+    </g>
+  </g>
+
+  <use href="#tile" fill="none" stroke="#ffffff" stroke-opacity="0.14" stroke-width="5"/>
+</svg>

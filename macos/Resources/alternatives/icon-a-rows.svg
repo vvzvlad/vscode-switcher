@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>VSCode Switcher — app icon, variant A "rows"</title>
+  <!--
+    Rejected in favour of Resources/icon.svg. Kept in case the composition is
+    ever worth replaying.
+
+    Variant A: the panel in close-up. Five list rows, each tagged with the
+    Peacock colour of its VSCode window. Nothing else competes for attention.
+    Rejected because the rows float in the middle of the tile with no hint of
+    the screen edge, and the thin tags are the first thing to die on downscale.
+
+    Geometry follows the Big Sur grid: the tile is 824x824 centred on a
+    1024x1024 canvas, corner radius 185.8 with Apple-style continuous corners
+    (a squircle, not a plain rounded rect).
+  -->
+  <defs>
+    <!-- Continuous-corner squircle, 824x824 at (100,100), r=185.8, smoothing 0.6. -->
+    <path id="tile" d="M 626.72 100 c 104.06 0 156.09 0 195.83 20.25 a 185.8 185.8 0 0 1 81.2 81.2 c 20.25 39.74 20.25 91.77 20.25 195.83 L 924 626.72 c 0 104.06 0 156.09 -20.25 195.83 a 185.8 185.8 0 0 1 -81.2 81.2 c -39.74 20.25 -91.77 20.25 -195.83 20.25 L 397.28 924 c -104.06 0 -156.09 0 -195.83 -20.25 a 185.8 185.8 0 0 1 -81.2 -81.2 c -20.25 -39.74 -20.25 -91.77 -20.25 -195.83 L 100 397.28 c 0 -104.06 0 -156.09 20.25 -195.83 a 185.8 185.8 0 0 1 81.2 -81.2 c 39.74 -20.25 91.77 -20.25 195.83 -20.25 Z"/>
+
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a3a42"/>
+      <stop offset="0.55" stop-color="#26262b"/>
+      <stop offset="1" stop-color="#1a1a1e"/>
+    </linearGradient>
+
+    <!-- Baked drop shadow: .icns icons get no shadow from the dock. -->
+    <filter id="tileShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.42"/>
+    </filter>
+
+    <clipPath id="tileClip">
+      <use href="#tile"/>
+    </clipPath>
+  </defs>
+
+  <use href="#tile" fill="url(#plate)" filter="url(#tileShadow)"/>
+
+  <g clip-path="url(#tileClip)">
+    <!-- Rows: selected one on top, exactly like the live panel. -->
+    <g>
+      <rect x="196" y="206" width="632" height="100" rx="26" fill="#3f4356"/>
+      <rect x="196" y="206" width="44" height="100" rx="22" fill="#e2681c"/>
+      <rect x="278" y="246" width="380" height="20" rx="10" fill="#c9cbd4"/>
+    </g>
+    <g>
+      <rect x="196" y="334" width="632" height="100" rx="26" fill="#33333a"/>
+      <rect x="196" y="334" width="44" height="100" rx="22" fill="#1857a4"/>
+      <rect x="278" y="374" width="300" height="20" rx="10" fill="#83848f"/>
+    </g>
+    <g>
+      <rect x="196" y="462" width="632" height="100" rx="26" fill="#33333a"/>
+      <rect x="196" y="462" width="44" height="100" rx="22" fill="#58c045"/>
+      <rect x="278" y="502" width="430" height="20" rx="10" fill="#83848f"/>
+    </g>
+    <g>
+      <rect x="196" y="590" width="632" height="100" rx="26" fill="#33333a"/>
+      <rect x="196" y="590" width="44" height="100" rx="22" fill="#a43683"/>
+      <rect x="278" y="630" width="340" height="20" rx="10" fill="#83848f"/>
+    </g>
+    <g>
+      <rect x="196" y="718" width="632" height="100" rx="26" fill="#33333a"/>
+      <rect x="196" y="718" width="44" height="100" rx="22" fill="#d3ba41"/>
+      <rect x="278" y="758" width="270" height="20" rx="10" fill="#83848f"/>
+    </g>
+  </g>
+
+  <!-- Rim light: keeps the tile readable against a dark dock. -->
+  <use href="#tile" fill="none" stroke="#ffffff" stroke-opacity="0.10" stroke-width="3"/>
+</svg>

@@ -67,9 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func installStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        let image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "VSCode Switcher")
-        image?.isTemplate = true
-        item.button?.image = image
+        item.button?.image = Self.statusItemImage()
         item.button?.toolTip = "VSCode Switcher"
 
         let menu = NSMenu()
@@ -82,6 +80,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(menuItem("Выход", #selector(quit), key: "q"))
         item.menu = menu
         statusItem = item
+    }
+
+    /// The status item glyph: `MenuBarIconTemplate.png` / `@2x` from the bundle.
+    ///
+    /// The `Template` suffix already makes AppKit tint the image for the current
+    /// menu bar appearance, but `isTemplate` is set explicitly so a renamed file
+    /// cannot silently turn it into a flat black blob. The binary can also be
+    /// run straight out of `.build` with no bundle around it, hence the SF
+    /// Symbol fallback.
+    private static func statusItemImage() -> NSImage? {
+        let image = NSImage(named: "MenuBarIconTemplate")
+            ?? NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "VSCode Switcher")
+        image?.isTemplate = true
+        image?.size = NSSize(width: 18, height: 18)
+        image?.accessibilityDescription = "VSCode Switcher"
+        return image
     }
 
     private func menuItem(_ title: String, _ action: Selector, key: String) -> NSMenuItem {

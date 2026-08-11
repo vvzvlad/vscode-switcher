@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>VSCode Switcher — app icon, variant B "window"</title>
+  <!--
+    Rejected in favour of Resources/icon.svg. Kept in case the composition is
+    ever worth replaying.
+
+    Variant B: the panel slid out over an editor window. The right half hints at
+    code, the left half is the switcher panel with its colour-tagged rows, and a
+    pointer sits on the second row. Rejected because it tells too much: below
+    256 px the code column and the pointer turn into grain, and the two-column
+    split reads louder than the colours.
+  -->
+  <defs>
+    <path id="tile" d="M 626.72 100 c 104.06 0 156.09 0 195.83 20.25 a 185.8 185.8 0 0 1 81.2 81.2 c 20.25 39.74 20.25 91.77 20.25 195.83 L 924 626.72 c 0 104.06 0 156.09 -20.25 195.83 a 185.8 185.8 0 0 1 -81.2 81.2 c -39.74 20.25 -91.77 20.25 -195.83 20.25 L 397.28 924 c -104.06 0 -156.09 0 -195.83 -20.25 a 185.8 185.8 0 0 1 -81.2 -81.2 c -20.25 -39.74 -20.25 -91.77 -20.25 -195.83 L 100 397.28 c 0 -104.06 0 -156.09 20.25 -195.83 a 185.8 185.8 0 0 1 81.2 -81.2 c 39.74 -20.25 91.77 -20.25 195.83 -20.25 Z"/>
+
+    <linearGradient id="editor" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#24242a"/>
+      <stop offset="1" stop-color="#141417"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3c3c45"/>
+      <stop offset="1" stop-color="#2a2a31"/>
+    </linearGradient>
+    <linearGradient id="panelEdge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#000000" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </linearGradient>
+
+    <filter id="tileShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.42"/>
+    </filter>
+
+    <clipPath id="tileClip">
+      <use href="#tile"/>
+    </clipPath>
+  </defs>
+
+  <use href="#tile" fill="url(#editor)" filter="url(#tileShadow)"/>
+
+  <g clip-path="url(#tileClip)">
+    <!-- Editor behind the panel: a few dim code lines. -->
+    <g fill="#41414c">
+      <rect x="676" y="236" width="168" height="18" rx="9"/>
+      <rect x="676" y="290" width="112" height="18" rx="9" fill="#4d6a94"/>
+      <rect x="700" y="344" width="146" height="18" rx="9"/>
+      <rect x="700" y="398" width="96" height="18" rx="9"/>
+      <rect x="676" y="452" width="132" height="18" rx="9" fill="#6b6a4a"/>
+      <rect x="676" y="506" width="180" height="18" rx="9"/>
+      <rect x="700" y="560" width="118" height="18" rx="9"/>
+      <rect x="700" y="614" width="152" height="18" rx="9"/>
+      <rect x="676" y="668" width="104" height="18" rx="9" fill="#4d6a94"/>
+      <rect x="676" y="722" width="164" height="18" rx="9"/>
+    </g>
+
+    <!-- The panel itself, flush against the left edge of the screen. -->
+    <rect x="100" y="100" width="520" height="824" fill="url(#panel)"/>
+    <rect x="620" y="100" width="72" height="824" fill="url(#panelEdge)"/>
+
+    <g>
+      <rect x="152" y="230" width="420" height="92" rx="24" fill="#4a4f66"/>
+      <rect x="152" y="230" width="38" height="92" rx="19" fill="#e2681c"/>
+      <rect x="222" y="266" width="252" height="20" rx="10" fill="#d2d4dc"/>
+    </g>
+    <g>
+      <rect x="152" y="348" width="420" height="92" rx="24" fill="#3a3a44"/>
+      <rect x="152" y="348" width="38" height="92" rx="19" fill="#1857a4"/>
+      <rect x="222" y="384" width="196" height="20" rx="10" fill="#8d8e9a"/>
+    </g>
+    <g>
+      <rect x="152" y="466" width="420" height="92" rx="24" fill="#3a3a44"/>
+      <rect x="152" y="466" width="38" height="92" rx="19" fill="#58c045"/>
+      <rect x="222" y="502" width="286" height="20" rx="10" fill="#8d8e9a"/>
+    </g>
+    <g>
+      <rect x="152" y="584" width="420" height="92" rx="24" fill="#3a3a44"/>
+      <rect x="152" y="584" width="38" height="92" rx="19" fill="#a43683"/>
+      <rect x="222" y="620" width="224" height="20" rx="10" fill="#8d8e9a"/>
+    </g>
+    <g>
+      <rect x="152" y="702" width="420" height="92" rx="24" fill="#3a3a44"/>
+      <rect x="152" y="702" width="38" height="92" rx="19" fill="#d3ba41"/>
+      <rect x="222" y="738" width="180" height="20" rx="10" fill="#8d8e9a"/>
+    </g>
+
+    <!-- Pointer picking the second row. -->
+    <g transform="translate(524 372)">
+      <path d="M 0 0 L 0 128 L 33 98 L 55 146 L 84 132 L 61 86 L 104 82 Z"
+            fill="#ffffff" stroke="#101014" stroke-width="10" stroke-linejoin="round"/>
+      <path d="M 0 0 L 0 128 L 33 98 L 55 146 L 84 132 L 61 86 L 104 82 Z" fill="#ffffff"/>
+    </g>
+  </g>
+
+  <use href="#tile" fill="none" stroke="#ffffff" stroke-opacity="0.10" stroke-width="3"/>
+</svg>

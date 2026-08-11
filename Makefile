@@ -1,7 +1,10 @@
-.PHONY: build test app install uninstall run dump hooks clean
+.PHONY: build test app icons install uninstall run dump hooks clean
 
 build:
 	cd macos && swift build -c release
+
+icons:
+	bash macos/scripts/make-icons.sh
 
 test:
 	cd macos && swift test

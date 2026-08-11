@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
+  <title>VSCode Switcher — menu bar icon</title>
+  <!--
+    Monochrome silhouette of the app icon: three rows, each with a colour tag on
+    the left. At 18 px nothing more survives, so there is no panel outline, no
+    badge and no indicator.
+
+    This is a template image: AppKit throws the colours away and keeps only the
+    alpha channel, tinting it for the current menu bar appearance and for the
+    highlighted state. That is why the row bodies are drawn at partial opacity —
+    it is the only way to get two weights out of a template.
+  -->
+  <g fill="#000000">
+    <rect x="2" y="2" width="3.4" height="3.2" rx="1.2"/>
+    <rect x="6.4" y="2" width="9.6" height="3.2" rx="1.6" opacity="0.42"/>
+
+    <rect x="2" y="7.4" width="3.4" height="3.2" rx="1.2"/>
+    <rect x="6.4" y="7.4" width="9.6" height="3.2" rx="1.6" opacity="0.42"/>
+
+    <rect x="2" y="12.8" width="3.4" height="3.2" rx="1.2"/>
+    <rect x="6.4" y="12.8" width="9.6" height="3.2" rx="1.6" opacity="0.42"/>
+  </g>
+</svg>
