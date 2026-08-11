@@ -249,6 +249,6 @@ final class WorkspaceIndex: @unchecked Sendable {
     }
 
     private static func modificationDate(atPath path: String) -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+        fileStamp(atPath: path)?.modificationDate
     }
 }

@@ -493,7 +493,7 @@ enum ClaudeSessions {
 
     private static func uncachedTranscriptSummary(atPath path: String, tailBytes: Int) -> TranscriptSummary {
         var summary = TranscriptSummary()
-        summary.lastActivity = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+        summary.lastActivity = fileStamp(atPath: path)?.modificationDate
 
         let lines = tailLines(atPath: path, maxBytes: tailBytes)
         guard !lines.isEmpty else { return summary }
@@ -610,8 +610,7 @@ enum ClaudeSessions {
 
         var result: [SubagentInfo] = []
         for entry in entries {
-            let mtime = (try? FileManager.default.attributesOfItem(atPath: entry.transcriptPath))?[.modificationDate]
-                as? Date
+            let mtime = fileStamp(atPath: entry.transcriptPath)?.modificationDate
 
             var isActive = false
             if let mtime, Date().timeIntervalSince(mtime) <= config.subagentActiveSeconds {
@@ -669,6 +668,24 @@ enum ClaudeSessions {
     }
 }
 
+/// Size and modification time of a path, or `nil` when it cannot be stat'ed.
+///
+/// `stat(2)` rather than `FileManager.attributesOfItem`, which is what this used
+/// to be everywhere. That call goes through `NSURL`'s resource-value machinery
+/// and builds a whole dictionary of bridged objects — `_catInfo` and
+/// `resourceValuesForKeys` are what the profile showed — for the two integers
+/// wanted here. It runs once per live session transcript and once per subagent
+/// transcript on every snapshot, several hundred times a second on a busy
+/// machine, and cost about 4% of a core with the panel closed.
+func fileStamp(atPath path: String) -> (size: UInt64, modificationDate: Date)? {
+    var info = stat()
+    guard stat(path, &info) == 0 else { return nil }
+    let seconds = Double(info.st_mtimespec.tv_sec)
+        + Double(info.st_mtimespec.tv_nsec) / 1_000_000_000
+    return (size: UInt64(max(0, info.st_size)),
+            modificationDate: Date(timeIntervalSince1970: seconds))
+}
+
 /// Values derived from a file, kept for as long as the file itself does not
 /// change.
 ///
@@ -701,14 +718,12 @@ final class FileDerivedCache<Value: Sendable>: @unchecked Sendable {
     /// The cached value for `path`, computing it when the file moved. `variant`
     /// separates values derived from the same file under different parameters.
     func value(atPath path: String, variant: String = "", compute: () -> Value) -> Value {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
-              let modificationDate = attributes[.modificationDate] as? Date
-        else { return compute() }
-        let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+        guard let stamp = fileStamp(atPath: path) else { return compute() }
         let key = variant.isEmpty ? path : "\(variant)|\(path)"
 
         lock.lock()
-        if let entry = entries[key], entry.size == size, entry.modificationDate == modificationDate {
+        if let entry = entries[key], entry.size == stamp.size,
+           entry.modificationDate == stamp.modificationDate {
             defer { lock.unlock() }
             return entry.value
         }
@@ -721,7 +736,7 @@ final class FileDerivedCache<Value: Sendable>: @unchecked Sendable {
         // entries that are still in use, and nothing here is expensive to redo
         // once.
         if entries.count >= Self.capacity { entries.removeAll(keepingCapacity: true) }
-        entries[key] = Entry(size: size, modificationDate: modificationDate, value: value)
+        entries[key] = Entry(size: stamp.size, modificationDate: stamp.modificationDate, value: value)
         lock.unlock()
         return value
     }
