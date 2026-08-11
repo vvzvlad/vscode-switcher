@@ -63,6 +63,12 @@ final class PanelController {
     /// The app was activated for the search field and has not handed the
     /// keyboard back yet. See `releaseKeyboardFocus`.
     private var didActivateForSearch = false
+    /// How many of this app's menus are being tracked right now — the status
+    /// item's, in practice. Counted rather than flagged so a submenu cannot
+    /// close the count while its parent is still up.
+    private var menuTrackingDepth = 0
+    /// Retries a hand-back that had to wait. See `releaseKeyboardFocus`.
+    private var keyboardReleaseRetry: Timer?
 
     init(config: Config, store: SnapshotStore) {
         self.config = config
@@ -121,6 +127,28 @@ final class PanelController {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] snapshot in self?.model.update(snapshot: snapshot) }
             .store(in: &cancellables)
+
+        observeMenuTracking()
+    }
+
+    /// Follows the tracking of every menu this app puts up, because
+    /// `releaseKeyboardFocus` must not run while one is open — see `canHideApp`.
+    /// Observed with `object: nil`: the only menu here belongs to the status
+    /// item, which `AppDelegate` owns, and the rule is about menus in general
+    /// rather than that one.
+    private func observeMenuTracking() {
+        let center = NotificationCenter.default
+        _ = center.addObserver(forName: NSMenu.didBeginTrackingNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.menuTrackingDepth += 1 }
+        }
+        _ = center.addObserver(forName: NSMenu.didEndTrackingNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.menuTrackingDepth = max(0, self.menuTrackingDepth - 1)
+            }
+        }
     }
 
     // MARK: - Show / hide
@@ -255,12 +283,78 @@ final class PanelController {
     /// show path. It runs only when the app really is active: a row click has
     /// already handed the front slot to the editor by then, and hiding is the
     /// last thing that should happen to it.
+    ///
+    /// When `canHideApp` says no, the hand-back is postponed rather than
+    /// dropped: the app would otherwise stay frontmost with no window and
+    /// swallow every keystroke, which is the whole defect this method exists
+    /// for.
     private func releaseKeyboardFocus() {
+        // The panel came back up while a hand-back was still pending. The app is
+        // legitimately active for the new search now.
+        guard !isVisible else {
+            cancelKeyboardReleaseRetry()
+            return
+        }
         model.searchFieldFocused = false
-        guard didActivateForSearch else { return }
+        guard didActivateForSearch else {
+            cancelKeyboardReleaseRetry()
+            return
+        }
+        // Not active any more: a row click already handed the front slot to the
+        // editor, so there is nothing left to give back.
+        guard NSApp.isActive else {
+            didActivateForSearch = false
+            cancelKeyboardReleaseRetry()
+            return
+        }
+        guard canHideApp else {
+            scheduleKeyboardReleaseRetry()
+            return
+        }
         didActivateForSearch = false
-        guard NSApp.isActive else { return }
+        cancelKeyboardReleaseRetry()
         NSApp.hide(nil)
+    }
+
+    /// Whether `NSApp.hide` is safe to call at all right now.
+    ///
+    /// Two states of this app's own make it destructive, and both are reachable
+    /// from the ordinary "clicked the search field, then walked away" path,
+    /// because the auto-hide fires 400 ms after the pointer leaves and its timer
+    /// runs in `.common`:
+    ///
+    /// - **A modal session.** `hide` orders the `NSAlert`'s window out, but
+    ///   `runModal` keeps spinning on the main thread. The app is then stuck in
+    ///   a modal loop with no window on screen: the status item menu stops
+    ///   responding, the panel cannot open, and only Force Quit gets out of it.
+    ///   Probed — `modalWindow=true, canHide=true` before, `isHidden=true,
+    ///   visible=false` after, and the app never came back.
+    /// - **Menu tracking.** `hide` cancels it, so the status item menu collapsed
+    ///   under the pointer while the user was reading it — probed: `popUp`
+    ///   returned 0.26 s after the hide that was scheduled during the tracking.
+    private var canHideApp: Bool {
+        NSApp.modalWindow == nil && menuTrackingDepth == 0
+    }
+
+    /// Retries a postponed hand-back.
+    ///
+    /// Deliberately scheduled in `.default` only, unlike every other timer here:
+    /// that is precisely the mode a menu tracking loop and a modal session do
+    /// *not* run, so the retry cannot fire inside either of the two states it is
+    /// waiting out. The guards in `canHideApp` are still the ones that make it
+    /// safe; the mode only keeps the timer quiet meanwhile.
+    private func scheduleKeyboardReleaseRetry() {
+        guard keyboardReleaseRetry == nil else { return }
+        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.releaseKeyboardFocus() }
+        }
+        RunLoop.main.add(timer, forMode: .default)
+        keyboardReleaseRetry = timer
+    }
+
+    private func cancelKeyboardReleaseRetry() {
+        keyboardReleaseRetry?.invalidate()
+        keyboardReleaseRetry = nil
     }
 
     // MARK: - Activation
