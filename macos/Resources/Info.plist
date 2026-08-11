@@ -30,7 +30,5 @@
     <false/>
     <key>NSSupportsSuddenTermination</key>
     <false/>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>VSCode Switcher переключает окна VSCode.</string>
 </dict>
 </plist>
