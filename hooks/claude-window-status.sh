@@ -10,7 +10,8 @@
 # surface as an error inside the user's Claude session.
 #
 # Debugging: with VSCODE_SWITCHER_DEBUG=1 the raw stdin payload is appended to
-# $STATUS_DIR/_debug.jsonl so the real payload schema can be inspected.
+# $STATUS_DIR/_debug.jsonl so the real payload schema can be inspected. That
+# file contains whole prompts and assistant replies, so it is opt-in and capped.
 
 # Byte semantics, not character semantics. Every comparison this script makes is
 # against an ASCII literal, but in a UTF-8 locale bash walks a multi-megabyte
@@ -22,6 +23,7 @@
 export LC_ALL=C
 
 STATUS_DIR="${VSCODE_SWITCHER_STATUS_DIR:-$HOME/.claude/window-status}"
+DEBUG_MAX_BYTES=4194304
 
 payload=$(cat 2>/dev/null)
 
@@ -68,8 +70,17 @@ esac
 # state, which is what the dump is for.
 mkdir -p "$STATUS_DIR" 2>/dev/null
 
+# The dump holds raw payloads — whole prompts and assistant replies — so it is
+# capped rather than left to grow: one rotation at 4 MiB keeps the recent
+# payloads (the interesting ones) and bounds the total at twice that. It ran to
+# 6.8 MB of chat text in a fortnight before the cap existed.
 if [ "${VSCODE_SWITCHER_DEBUG:-0}" = "1" ]; then
-	printf '%s\n' "$payload" >>"$STATUS_DIR/_debug.jsonl" 2>/dev/null
+	debug_log="$STATUS_DIR/_debug.jsonl"
+	debug_size=$(stat -f %z "$debug_log" 2>/dev/null || echo 0)
+	if [ "${debug_size:-0}" -ge "$DEBUG_MAX_BYTES" ]; then
+		mv -f "$debug_log" "$debug_log.1" 2>/dev/null
+	fi
+	printf '%s\n' "$payload" >>"$debug_log" 2>/dev/null
 fi
 
 # Hooks run with a minimal PATH, so jq has to be located explicitly.
