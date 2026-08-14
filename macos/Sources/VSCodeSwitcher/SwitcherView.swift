@@ -56,10 +56,6 @@ final class SwitcherViewModel: ObservableObject {
     /// arrives. Cleared by that snapshot, and by the first click.
     private var orderPendingSince: Date?
 
-    /// How many *session-less* projects are listed when nothing is typed.
-    /// Search still looks through all of them.
-    static let projectLimit = 30
-
     /// A row was clicked: focus that window or open that project.
     var onActivate: ((SwitcherRow) -> Void)?
     /// The user clicked the search field and wants to type into it.
@@ -173,35 +169,17 @@ final class SwitcherViewModel: ObservableObject {
             result.append(SwitcherSection(title: "Открытые окна", rows: windows))
         }
 
-        var projects = snapshot.projects.filter { Self.matches($0, needle) }
-        if needle.isEmpty { projects = Self.limited(projects, to: Self.projectLimit) }
+        // Every project, in the order `DataSource.ranked` put them in. There was
+        // a cap of thirty here, and it cost more than it saved: the section had
+        // to be read as "the top of the list" rather than "the list", and the
+        // rows it dropped were exactly the ones the ranking is now good at
+        // finding. `LazyVStack` builds only the rows on screen, so the length is
+        // not what the list costs.
+        let projects = snapshot.projects.filter { Self.matches($0, needle) }
         if !projects.isEmpty {
             result.append(SwitcherSection(title: "Проекты", rows: projects))
         }
         return result
-    }
-
-    /// Caps the list of projects without ever hiding a row that has a live
-    /// session behind it.
-    ///
-    /// `snapshot.projects` is a concatenation: first the projects with no window
-    /// of their own, ordered by directory mtime, then — at the very end — the
-    /// orphan `cwd:` rows for sessions running outside every scan root. A flat
-    /// `prefix` therefore drops every orphan the moment the index holds more
-    /// projects than the limit, which it always does. The same cut hides a
-    /// project inside a root whose directory mtime is old (editing files does
-    /// not move it), so an agent stuck on a permission dialog could sit there
-    /// for hours without ever appearing. The data layer is deliberately total —
-    /// "a working agent must never silently vanish from the list" — and the
-    /// limit is not allowed to undo that.
-    static func limited(_ rows: [SwitcherRow], to limit: Int) -> [SwitcherRow] {
-        var remaining = limit
-        return rows.filter { row in
-            guard row.sessions.isEmpty else { return true }
-            guard remaining > 0 else { return false }
-            remaining -= 1
-            return true
-        }
     }
 
     /// Puts the open windows back into the order frozen at the last show.

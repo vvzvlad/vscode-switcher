@@ -106,10 +106,11 @@ final class RowLabelTests: XCTestCase {
     }
 }
 
-/// The list cap. It exists to keep the "not open" section short, and it is not
-/// allowed to hide a row that has a live session behind it.
+/// The "projects" section lists every project, in the order the data layer
+/// ranked them. It used to be cut at thirty rows, which made it a top-of-list
+/// rather than a list.
 @MainActor
-final class ProjectLimitTests: XCTestCase {
+final class ProjectSectionTests: XCTestCase {
 
     private func row(_ name: String, sessions: Int = 0) -> SwitcherRow {
         let session = ClaudeSessionInfo(sessionId: "s-\(name)",
@@ -144,38 +145,37 @@ final class ProjectLimitTests: XCTestCase {
                            lastActivity: nil)
     }
 
-    func testCapsTheSessionLessRows() {
-        let rows = (0..<50).map { row("p\($0)") }
-        XCTAssertEqual(SwitcherViewModel.limited(rows, to: 30).count, 30)
-        XCTAssertEqual(SwitcherViewModel.limited(rows, to: 30).first?.displayName, "p0")
-        XCTAssertEqual(SwitcherViewModel.limited(rows, to: 30).last?.displayName, "p29")
+    private func snapshot(_ rows: [SwitcherRow]) -> SwitcherSnapshot {
+        SwitcherSnapshot(openWindows: [], projects: rows, accessibilityTrusted: true, generatedAt: Date())
     }
 
-    func testKeepsEveryRowWithASessionHoweverFarDownTheList() {
-        // The orphan `cwd:` rows are appended at the very end of
-        // `snapshot.projects`, so with 92 project rows a flat `prefix(30)` hid
-        // all of them, always. So did an old directory mtime for a project whose
-        // agent is sitting on a permission dialog.
+    func testListsEveryProject() {
+        // 92 rows is the real count on this machine, and the section header
+        // shows it: the cap made the number a lie as well as the list.
         var rows = (0..<92).map { row("p\($0)") }
         rows.append(row("orphan", sessions: 2))
-        rows.insert(row("stale-but-busy", sessions: 1), at: 60)
 
-        let limited = SwitcherViewModel.limited(rows, to: 30)
-        XCTAssertTrue(limited.contains { $0.displayName == "orphan" })
-        XCTAssertTrue(limited.contains { $0.displayName == "stale-but-busy" })
-        XCTAssertEqual(limited.filter { $0.sessions.isEmpty }.count, 30)
-        XCTAssertEqual(limited.count, 32)
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(rows))
+
+        let section = model.sections.first { $0.title == "Проекты" }
+        XCTAssertEqual(section?.rows.count, 93)
+        XCTAssertEqual(section?.rows.map(\.displayName), rows.map(\.displayName))
     }
 
-    func testPreservesTheOriginalOrder() {
+    func testKeepsTheOrderTheDataLayerRanked() {
         let rows = [row("a"), row("live", sessions: 1), row("b"), row("c")]
-        XCTAssertEqual(SwitcherViewModel.limited(rows, to: 2).map(\.displayName),
-                       ["a", "live", "b"])
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(rows))
+        XCTAssertEqual(model.sections.first?.rows.map(\.displayName), ["a", "live", "b", "c"])
     }
 
-    func testAZeroLimitStillShowsTheLiveRows() {
-        let rows = [row("a"), row("live", sessions: 1)]
-        XCTAssertEqual(SwitcherViewModel.limited(rows, to: 0).map(\.displayName), ["live"])
+    func testSearchStillSpansEveryProject() {
+        let rows = (0..<92).map { row("p\($0)") } + [row("needle")]
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(rows))
+        model.query = "needle"
+        XCTAssertEqual(model.sections.first?.rows.map(\.displayName), ["needle"])
     }
 }
 
