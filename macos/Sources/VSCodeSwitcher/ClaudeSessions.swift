@@ -8,13 +8,17 @@ import Foundation
 /// data for this session".
 enum ClaudeSessions {
 
-    static var claudeHome: URL {
+    /// Constants, not computed properties: the home directory cannot change
+    /// under a running process, while `homeDirectoryForCurrentUser` plus an
+    /// `appendingPathComponent` cost about 13 µs together. These are rebuilt
+    /// several times per session on every snapshot — once a second while the
+    /// panel is open — which is enough to be worth not doing.
+    static let claudeHome: URL =
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
-    }
 
-    static var sessionsDirectory: URL { claudeHome.appendingPathComponent("sessions") }
-    static var projectsDirectory: URL { claudeHome.appendingPathComponent("projects") }
-    static var windowStatusDirectory: URL { claudeHome.appendingPathComponent("window-status") }
+    static let sessionsDirectory: URL = claudeHome.appendingPathComponent("sessions")
+    static let projectsDirectory: URL = claudeHome.appendingPathComponent("projects")
+    static let windowStatusDirectory: URL = claudeHome.appendingPathComponent("window-status")
 
     // MARK: - Slug
 
