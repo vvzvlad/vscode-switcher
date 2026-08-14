@@ -372,9 +372,8 @@ final class StateBreakdownTests: XCTestCase {
                        [StateCount(state: .question, count: 1),
                         StateCount(state: .waiting, count: 4),
                         StateCount(state: .working, count: 1)])
-        // The single top state is still what the ordering and `--dump` use.
+        // The single top state is still what the ordering uses.
         XCTAssertEqual(aggregate.state, .question)
-        XCTAssertEqual(aggregate.stateCount, 1)
         XCTAssertEqual(aggregate.stateCounts.map(\.count).reduce(0, +), sessions.count)
     }
 
@@ -1078,7 +1077,7 @@ final class SnapshotAssemblyTests: XCTestCase {
         let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == project.path })
         XCTAssertEqual(row.sessions.map(\.sessionId), ["s1"])
         XCTAssertEqual(row.state, .working)
-        XCTAssertEqual(row.stateCount, 1)
+        XCTAssertEqual(row.stateCounts, [StateCount(state: .working, count: 1)])
         XCTAssertEqual(snapshot.rows.flatMap(\.sessions).count, 1)
     }
 
@@ -1098,7 +1097,7 @@ final class SnapshotAssemblyTests: XCTestCase {
         XCTAssertEqual(snapshot.rows.flatMap(\.sessions).count, 4)
         // The row shows the highest state of the sessions it holds.
         XCTAssertEqual(snapshot.projects.first { $0.project?.path == "/p/a" }?.state, .waiting)
-        XCTAssertEqual(snapshot.projects.first { $0.project?.path == "/p/a" }?.stateCount, 1)
+        XCTAssertEqual(snapshot.projects.first { $0.project?.path == "/p/a" }?.stateCounts.first?.count, 1)
     }
 
     /// Six agents started in the same directory outside every scan root used to
@@ -1119,7 +1118,7 @@ final class SnapshotAssemblyTests: XCTestCase {
         let row = try XCTUnwrap(snapshot.projects.first { $0.displayName == "tool" })
         XCTAssertEqual(row.sessions.map(\.sessionId), ["s1", "s2", "s3"])
         XCTAssertEqual(row.state, .permission)
-        XCTAssertEqual(row.stateCount, 1)
+        XCTAssertEqual(row.stateCounts.first, StateCount(state: .permission, count: 1))
         XCTAssertEqual(Set(snapshot.rows.map(\.id)).count, snapshot.rows.count)
         XCTAssertEqual(snapshot.rows.flatMap(\.sessions).count, 4)
     }
@@ -1295,7 +1294,7 @@ final class ProjectRankingTests: XCTestCase {
                                window: nil,
                                sessions: [],
                                state: nil,
-                               stateCount: 0,
+                               stateCounts: [],
                                activeSubagents: 0,
                                subagentDescriptions: [],
                                chatTopic: nil,

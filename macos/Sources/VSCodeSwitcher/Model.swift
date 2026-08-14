@@ -181,8 +181,6 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     var sessions: [ClaudeSessionInfo]
     /// Highest state among `sessions`; `nil` when the row has none.
     var state: AgentState?
-    /// How many sessions are in `state`. Kept for ordering and `--dump`.
-    var stateCount: Int
     /// Every state present among `sessions` with its own count, most urgent
     /// first. This is what the row draws: showing only the top state hid the
     /// other chats entirely.

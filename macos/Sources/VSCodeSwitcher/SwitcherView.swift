@@ -684,7 +684,10 @@ struct StateBadge: View {
             // on (working → permission), leaving the previous rhythm running.
             try? await Task.sleep(for: .milliseconds(50))
             guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: Self.animates(state) && state != .working ? 0.55 : 0.9)
+            // `pulseState` is nil unless the state animates, so only the three
+            // animating states reach here: the ones that want the user now
+            // (`question`, `permission`) beat faster than plain `working`.
+            withAnimation(.easeInOut(duration: state == .working ? 0.9 : 0.55)
                 .repeatForever(autoreverses: true)) {
                 pulsing = true
             }

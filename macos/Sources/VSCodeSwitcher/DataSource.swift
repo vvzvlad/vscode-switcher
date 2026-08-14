@@ -171,7 +171,6 @@ final class DataSource: @unchecked Sendable {
                                           window: nil,
                                           sessions: group,
                                           state: aggregate.state,
-                                          stateCount: aggregate.stateCount,
                            stateCounts: aggregate.stateCounts,
                                           activeSubagents: aggregate.activeSubagents,
                                           subagentDescriptions: aggregate.subagentDescriptions,
@@ -205,7 +204,6 @@ final class DataSource: @unchecked Sendable {
                            window: window,
                            sessions: sessions,
                            state: aggregate.state,
-                           stateCount: aggregate.stateCount,
                            stateCounts: aggregate.stateCounts,
                            activeSubagents: aggregate.activeSubagents,
                            subagentDescriptions: aggregate.subagentDescriptions,
@@ -231,7 +229,6 @@ final class DataSource: @unchecked Sendable {
                            window: nil,
                            sessions: sessions,
                            state: aggregate.state,
-                           stateCount: aggregate.stateCount,
                            stateCounts: aggregate.stateCounts,
                            activeSubagents: aggregate.activeSubagents,
                            subagentDescriptions: aggregate.subagentDescriptions,
@@ -250,7 +247,7 @@ final class DataSource: @unchecked Sendable {
     /// other two were nowhere. `stateCounts` runs from the most urgent state
     /// down, which is the order the row draws them in.
     static func aggregate(_ sessions: [ClaudeSessionInfo])
-        -> (state: AgentState?, stateCount: Int, stateCounts: [StateCount],
+        -> (state: AgentState?, stateCounts: [StateCount],
             activeSubagents: Int, subagentDescriptions: [String]) {
         let state = sessions.map(\.state).max()
         let counts = AgentState.allCases
@@ -258,7 +255,6 @@ final class DataSource: @unchecked Sendable {
             .filter { $0.count > 0 }
             .sorted { $0.state > $1.state }
         return (state: state,
-                stateCount: state.map { value in sessions.filter { $0.state == value }.count } ?? 0,
                 stateCounts: counts,
                 activeSubagents: sessions.reduce(0) { $0 + $1.activeSubagents },
                 subagentDescriptions: sessions.flatMap { $0.subagents.filter(\.isActive).compactMap(\.description) })
@@ -280,10 +276,10 @@ final class DataSource: @unchecked Sendable {
     /// at position 93 of 93 — four screens down, at the moment it was wanted
     /// most.
     ///
-    /// Among themselves: the most urgent state first (`permission` over
-    /// `waiting` over `working` over `idle`), then the most recent activity,
-    /// then the path. Paths are unique, so the order is fully determined and
-    /// does not depend on the sort being stable.
+    /// Among themselves: the most urgent state first (`question` over
+    /// `permission` over `waiting` over `working` over `idle`), then the most
+    /// recent activity, then the path. Paths are unique, so the order is fully
+    /// determined and does not depend on the sort being stable.
     static func rankedOrphans(_ rows: [SwitcherRow]) -> [SwitcherRow] {
         rows.sorted { left, right in
             // An orphan group is never empty, so `state` is never `nil` here;
