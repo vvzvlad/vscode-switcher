@@ -559,6 +559,36 @@ final class StateBadgeTests: XCTestCase {
         XCTAssertEqual(labels.count, AgentState.allCases.count)
     }
 
+    /// The dot was replaced by an icon because a coloured dot names nothing:
+    /// the user had to remember what the colour meant, and the number beside it
+    /// looked like a count of something unnamed. Two states sharing a shape
+    /// would put that back.
+    func testEveryStateHasItsOwnSymbol() {
+        let symbols = AgentState.allCases.map { StateBadge.symbol(for: $0) }
+        XCTAssertEqual(Set(symbols).count, AgentState.allCases.count)
+        XCTAssertFalse(symbols.contains(where: \.isEmpty))
+    }
+
+    /// A name SF Symbols does not know draws nothing at all — the chip would be
+    /// an empty box with a number next to it, which is worse than the dot it
+    /// replaced. There is no compiler check for these strings.
+    func testEverySymbolNameActuallyResolves() {
+        for state in AgentState.allCases {
+            let name = StateBadge.symbol(for: state)
+            XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
+                            "\(name) is not an SF Symbol")
+        }
+        XCTAssertNotNil(NSImage(systemSymbolName: "gearshape.2.fill", accessibilityDescription: nil))
+    }
+
+    /// The pulse marks "somebody has to do something, now" — plus the agent
+    /// actually moving. An answered chat is neither.
+    func testAQuestionPulsesAndAnAnsweredChatDoesNot() {
+        XCTAssertTrue(StateBadge.animates(.question))
+        XCTAssertFalse(StateBadge.animates(.waiting))
+        XCTAssertFalse(StateBadge.animates(.idle))
+    }
+
     /// `repeatForever` does not stop when the panel is ordered out, so SwiftUI
     /// went on laying the whole list out and rendering it once per display cycle
     /// for a pulse nobody could see — 13.6% of a core against 2.0%. A `nil` key
@@ -580,5 +610,115 @@ final class StateBadgeTests: XCTestCase {
         XCTAssertTrue(model.panelVisible)
         model.panelDidHide()
         XCTAssertFalse(model.panelVisible)
+    }
+}
+
+/// The row carries exactly one tooltip, and it has to say everything the row
+/// itself stopped saying: what each icon means, and the context and model of
+/// each individual chat.
+@MainActor
+final class RowTooltipTests: XCTestCase {
+
+    private func session(_ id: String,
+                         _ state: AgentState,
+                         topic: String?,
+                         used: Int? = nil,
+                         limit: Int? = nil,
+                         model: String? = "claude-opus-5") -> ClaudeSessionInfo {
+        ClaudeSessionInfo(sessionId: id,
+                          pid: 1,
+                          cwd: "/tmp/home-network",
+                          name: nil,
+                          aiTitle: topic,
+                          lastPrompt: nil,
+                          state: state,
+                          stateSource: .hook,
+                          model: model,
+                          contextUsedTokens: used,
+                          contextLimitTokens: limit,
+                          activeSubagents: 0,
+                          subagents: [],
+                          lastActivity: nil)
+    }
+
+    private func row(_ sessions: [ClaudeSessionInfo],
+                     kind: SwitcherRowKind = .window,
+                     subagents: [String] = []) -> SwitcherRow {
+        let aggregate = DataSource.aggregate(sessions)
+        return SwitcherRow(id: "window:1:w1",
+                           kind: kind,
+                           displayName: "home-network",
+                           colorHex: "#1857a4",
+                           project: nil,
+                           window: nil,
+                           sessions: sessions,
+                           state: aggregate.state,
+                           stateCount: aggregate.stateCount,
+                           stateCounts: aggregate.stateCounts,
+                           activeSubagents: subagents.count,
+                           subagentDescriptions: subagents,
+                           chatTopic: sessions.first?.topic,
+                           model: sessions.first?.model,
+                           contextUsedTokens: sessions.first?.contextUsedTokens,
+                           contextLimitTokens: sessions.first?.contextLimitTokens,
+                           lastActivity: nil)
+    }
+
+    func testEveryChatIsNamedWithItsStateContextAndModel() {
+        let text = SwitcherRowView.tooltipText(for: row([
+            session("a", .permission, topic: "Перенести CI/CD на Gitea", used: 168_000, limit: 200_000),
+            session("b", .working, topic: "Маршрутизация Docker", used: 116_000, limit: 200_000),
+        ]))
+
+        XCTAssertTrue(text.contains("Ждёт разрешения · Перенести CI/CD на Gitea · 84% · opus-5"), text)
+        XCTAssertTrue(text.contains("Работает · Маршрутизация Docker · 58% · opus-5"), text)
+        XCTAssertTrue(text.contains("home-network"))
+    }
+
+    /// Every icon the row can draw is spelled out in words somewhere in the
+    /// tooltip — that is the whole legend for the chips.
+    func testTheStateOfEveryChatIsSpelledOutInWords() {
+        let sessions = AgentState.allCases.enumerated().map { index, state in
+            session("s\(index)", state, topic: "тема \(index)")
+        }
+        let text = SwitcherRowView.tooltipText(for: row(sessions))
+        for state in AgentState.allCases {
+            XCTAssertTrue(text.contains(StateBadge.label(for: state)), "missing \(state)")
+        }
+    }
+
+    /// The percentage is what the data layer could prove, so a chat with no
+    /// known window shows tokens and no percentage — same rule as the row had.
+    func testAnUnknownWindowShowsTokensInsteadOfAPercentage() {
+        let text = SwitcherRowView.tooltipText(for: row([
+            session("a", .working, topic: "тема", used: 194_000, limit: nil),
+        ]))
+        XCTAssertTrue(text.contains("194k"), text)
+        XCTAssertFalse(text.contains("%"), text)
+    }
+
+    /// A chat with no `ai-title` falls back to the last prompt, which can be a
+    /// whole paragraph; the tooltip is a list, not an essay.
+    func testALongTopicIsCutDown() {
+        let long = String(repeating: "длинная тема ", count: 40)
+        let text = SwitcherRowView.tooltipText(for: row([session("a", .working, topic: long)]))
+        let chatLine = try? XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix("• ") })
+        XCTAssertNotNil(chatLine)
+        XCTAssertLessThan(chatLine?.count ?? .max, 100)
+        XCTAssertTrue(text.contains("…"))
+    }
+
+    func testSubagentsAndThePathAreStillThere() {
+        var built = row([session("a", .working, topic: "тема")], kind: .project, subagents: ["Round 6 fixes"])
+        built.sessions = [session("a", .working, topic: "тема")]
+        let text = SwitcherRowView.tooltipText(for: built)
+        XCTAssertTrue(text.contains("Фоновые агенты:"), text)
+        XCTAssertTrue(text.contains("Round 6 fixes"), text)
+        XCTAssertTrue(text.contains("/tmp/home-network"), text)
+    }
+
+    func testARowWithNoChatsHasNoChatSection() {
+        let text = SwitcherRowView.tooltipText(for: row([]))
+        XCTAssertFalse(text.contains("Чаты:"), text)
     }
 }

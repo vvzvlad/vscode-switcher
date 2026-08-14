@@ -494,44 +494,31 @@ struct SwitcherRowView: View {
         .help(tooltip)
     }
 
-    private var subtitle: String? {
-        guard let topic = row.chatTopic?
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespaces), !topic.isEmpty
-        else { return nil }
-        return topic
-    }
+    private var subtitle: String? { Self.rowSubtitle(row) }
 
+    /// One chip per state actually present in the row, plus the subagent count.
+    ///
+    /// Two things used to sit here and no longer do. The row showed only the
+    /// highest state, so a window with six chats — four answered, two working —
+    /// read `4` and said nothing about the other two. And the context percentage
+    /// and the model belonged to *one* of those six chats while the numbers
+    /// beside them counted all six: two scales in one block with nothing marking
+    /// the boundary. Both moved into the tooltip, which has room to name the
+    /// chat each number belongs to.
     @ViewBuilder
     private var metrics: some View {
-        VStack(alignment: .trailing, spacing: 2) {
-            HStack(spacing: 6) {
-                if row.activeSubagents > 0 {
-                    HStack(spacing: 2) {
-                        Image(systemName: "gearshape.2.fill")
-                            .font(.system(size: 9))
-                        Text("\(row.activeSubagents)")
-                            .font(.system(size: 10, weight: .medium).monospacedDigit())
-                    }
-                    .foregroundStyle(.secondary)
-                }
-                if let state = row.state {
-                    StateBadge(state: state, count: row.stateCount, panelVisible: panelVisible)
-                }
-            }
-            HStack(spacing: 6) {
-                if let context = Self.contextLabel(used: row.contextUsedTokens,
-                                                   fraction: row.contextFraction) {
-                    Text(context)
+        HStack(spacing: 7) {
+            if row.activeSubagents > 0 {
+                HStack(spacing: 2) {
+                    Image(systemName: "gearshape.2.fill")
+                        .font(.system(size: 9))
+                    Text("\(row.activeSubagents)")
                         .font(.system(size: 10, weight: .medium).monospacedDigit())
-                        .foregroundStyle(.secondary)
                 }
-                if let model = Self.shortModelName(row.model) {
-                    Text(model)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
+                .foregroundStyle(.secondary)
+            }
+            ForEach(row.stateCounts, id: \.state) { entry in
+                StateBadge(state: entry.state, count: entry.count, panelVisible: panelVisible)
             }
         }
         .fixedSize(horizontal: true, vertical: false)
@@ -545,9 +532,33 @@ struct SwitcherRowView: View {
         return isHovering ? Color.primary.opacity(0.10) : .clear
     }
 
-    private var tooltip: String {
+    private var tooltip: String { Self.tooltipText(for: row) }
+
+    /// The row's only tooltip.
+    ///
+    /// There used to be a second one on the badge, so what the user read
+    /// depended on which pixel the pointer had landed on. This one is on the
+    /// whole row and carries everything: the icons spelled out as words, and
+    /// the per-chat context and model that the row itself no longer shows.
+    static func tooltipText(for row: SwitcherRow) -> String {
         var lines: [String] = [row.displayName]
-        if let topic = subtitle { lines.append(topic) }
+        if let topic = rowSubtitle(row) { lines.append(topic) }
+
+        if !row.sessions.isEmpty {
+            lines.append("")
+            lines.append("Чаты:")
+            for session in row.sessions {
+                var parts = [StateBadge.label(for: session.state)]
+                if let topic = shorten(session.topic, 56) { parts.append(topic) }
+                if let context = contextLabel(used: session.contextUsedTokens,
+                                              fraction: session.contextFraction) {
+                    parts.append(context)
+                }
+                if let model = shortModelName(session.model) { parts.append(model) }
+                lines.append("• " + parts.joined(separator: " · "))
+            }
+        }
+
         if !row.subagentDescriptions.isEmpty {
             lines.append("")
             lines.append("Фоновые агенты:")
@@ -560,6 +571,26 @@ struct SwitcherRowView: View {
             lines.append(path)
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// The chat topic as the second line of the row shows it: one line, trimmed.
+    static func rowSubtitle(_ row: SwitcherRow) -> String? {
+        guard let topic = row.chatTopic?
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespaces), !topic.isEmpty
+        else { return nil }
+        return topic
+    }
+
+    /// One line, cut with an ellipsis. A topic falls back to the last prompt,
+    /// which can be a whole paragraph.
+    static func shorten(_ raw: String?, _ limit: Int) -> String? {
+        guard let text = raw?
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespaces), !text.isEmpty
+        else { return nil }
+        guard text.count > limit else { return text }
+        return text.prefix(limit - 1).trimmingCharacters(in: .whitespaces) + "…"
     }
 
     /// Context usage as a percentage, or the raw token count when the size of
@@ -609,12 +640,17 @@ struct StateBadge: View {
     }
 
     var body: some View {
-        HStack(spacing: 3) {
-            Circle()
-                .fill(Self.color(for: state))
-                .frame(width: 8, height: 8)
-                .opacity(pulsing ? 0.3 : 1)
-                .scaleEffect(pulsing ? 0.78 : 1)
+        HStack(spacing: 2) {
+            // An icon rather than a coloured dot: the dot told the user there
+            // was *a* state and left the meaning to be memorised, while the
+            // number beside it looked like a count of something unnamed. The
+            // shape names the state, and the tooltip spells it out in words.
+            Image(systemName: Self.symbol(for: state))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Self.color(for: state))
+                .frame(width: 13, height: 11)
+                .opacity(pulsing ? 0.35 : 1)
+                .scaleEffect(pulsing ? 0.86 : 1)
                 // The one thing that actually *stops* a `repeatForever`. Writing
                 // `pulsing = false` below only moves the value the animation
                 // drives at; the cycle goes on running against a target it
@@ -648,17 +684,31 @@ struct StateBadge: View {
             // on (working → permission), leaving the previous rhythm running.
             try? await Task.sleep(for: .milliseconds(50))
             guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: state == .permission ? 0.55 : 0.9)
+            withAnimation(.easeInOut(duration: Self.animates(state) && state != .working ? 0.55 : 0.9)
                 .repeatForever(autoreverses: true)) {
                 pulsing = true
             }
         }
-        .help(Self.label(for: state))
+        // No `.help` here on purpose. The row carries one tooltip for the whole
+        // line; a second one on the badge made the text the user got depend on
+        // which pixel the pointer happened to be over.
+    }
+
+    /// SF Symbols, one shape per state.
+    static func symbol(for state: AgentState) -> String {
+        switch state {
+        case .question: return "questionmark.bubble.fill"
+        case .permission: return "hand.raised.fill"
+        case .waiting: return "checkmark.circle.fill"
+        case .working: return "arrow.triangle.2.circlepath"
+        case .idle: return "moon.zzz.fill"
+        }
     }
 
     /// Semantic system colours only — they follow light and dark appearance.
     static func color(for state: AgentState) -> Color {
         switch state {
+        case .question: return .yellow
         case .permission: return .orange
         case .waiting: return .green
         case .working: return .blue
@@ -666,12 +716,15 @@ struct StateBadge: View {
         }
     }
 
+    /// The states that are waiting on the user or moving right now. `waiting`
+    /// is neither: the agent finished its turn and nothing is on fire.
     static func animates(_ state: AgentState) -> Bool {
-        state == .permission || state == .working
+        state == .permission || state == .working || state == .question
     }
 
     static func label(for state: AgentState) -> String {
         switch state {
+        case .question: return "Задал вопрос"
         case .permission: return "Ждёт разрешения"
         case .waiting: return "Ответил, ждёт реакции"
         case .working: return "Работает"

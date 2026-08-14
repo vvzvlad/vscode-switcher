@@ -86,8 +86,7 @@ enum ConsoleDump {
 
         print("Open windows (z-order, front first): \(snapshot.openWindows.count)")
         for (position, row) in snapshot.openWindows.enumerated() {
-            let state = row.state.map { "\($0.rawValue)\(row.stateCount > 1 ? " x\(row.stateCount)" : "")" } ?? "-"
-            print("  \(position + 1). \(row.displayName)  \(row.colorHex)  [\(state)]")
+            print("  \(position + 1). \(row.displayName)  \(row.colorHex)  [\(stateBreakdown(row))]")
             print("      title:     \(shorten(row.window?.title, 90))")
             print("      topic:     \(shorten(row.chatTopic, 90))")
             print("      model:     \(row.model ?? "-")   context: \(formatContext(row))   subagents: \(row.activeSubagents)")
@@ -111,7 +110,7 @@ enum ConsoleDump {
         if !strayed.isEmpty {
             print("Live sessions without a window: \(strayed.count)")
             for row in strayed {
-                print("  - \(row.displayName)  [\(row.state?.rawValue ?? "-")]  \(shorten(row.chatTopic, 60))")
+                print("  - \(row.displayName)  [\(stateBreakdown(row))]  \(shorten(row.chatTopic, 60))")
             }
             print("")
         }
@@ -133,6 +132,16 @@ enum ConsoleDump {
         guard let last = activity.lastSession else { return "no sessions" }
         let days = Int(Date().timeIntervalSince(last) / 86_400)
         return "\(activity.recentSessions) in \(config.activityWindowDays)d, last \(days)d ago"
+    }
+
+    /// Every state the row's sessions are in, most urgent first — the same
+    /// breakdown the panel draws as chips, so the console can be used to check
+    /// what the row should look like.
+    private static func stateBreakdown(_ row: SwitcherRow) -> String {
+        guard !row.stateCounts.isEmpty else { return "-" }
+        return row.stateCounts
+            .map { "\($0.state.rawValue)\($0.count > 1 ? " x\($0.count)" : "")" }
+            .joined(separator: " ")
     }
 
     private static func formatContext(_ row: SwitcherRow) -> String {

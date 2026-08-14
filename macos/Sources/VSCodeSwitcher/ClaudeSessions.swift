@@ -249,12 +249,14 @@ enum ClaudeSessions {
         guard let hookState = hook?.state else { return fromTranscript ?? (.idle, .unknown) }
         guard let hookTime = hook?.timestamp else { return (hookState, .hook) }
 
-        // `waiting` and `permission` describe a condition the transcript cannot
-        // see: while a permission dialog sits on screen the last assistant
-        // record still says `tool_use` and the file keeps being touched, so
-        // every touch older than the tolerance used to turn the orange
-        // indicator off. Only a newer hook — `Stop`, `UserPromptSubmit` — takes
-        // those two states away.
+        // `waiting`, `permission` and `question` describe a condition the
+        // transcript cannot see: while a dialog sits on screen the last
+        // assistant record still says `tool_use` and the file keeps being
+        // touched, so every touch older than the tolerance used to turn the
+        // orange indicator off. Only a newer hook — `Stop`, `UserPromptSubmit`,
+        // `PostToolUse` — takes those states away. `question` needs this most of
+        // all: `Stop` does not fire for `AskUserQuestion`, so nothing else would
+        // ever put the state back.
         let mayBeOverruled = hookState == .working || hookState == .idle
 
         // The session went on working long after the hook state was written, so
@@ -595,7 +597,14 @@ enum ClaudeSessions {
                 }
                 switch message["stop_reason"] as? String {
                 case "end_turn", "stop_sequence": summary.fallbackState = .waiting
-                case "tool_use": summary.fallbackState = .working
+                case "tool_use":
+                    // Most tool calls mean the turn is running, but two of them
+                    // are the agent handing control back and standing still
+                    // until a human answers. They are worth telling apart:
+                    // otherwise "asked a question" is indistinguishable from
+                    // "busy", which is the state the user is least likely to
+                    // interrupt.
+                    summary.fallbackState = asksTheUser(message: message) ? .question : .working
                 default: break
                 }
                 needsAssistant = false
@@ -604,6 +613,24 @@ enum ClaudeSessions {
             }
         }
         return summary
+    }
+
+    /// Tools whose call is a question to the user rather than work being done.
+    ///
+    /// `ExitPlanMode` is in here for the same reason as `AskUserQuestion`: the
+    /// plan is finished and the agent waits for a human to approve it.
+    static let userFacingTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
+
+    /// True when an assistant message's tool calls include one of those.
+    ///
+    /// Unlike the permission dialog, this leaves a trace in the transcript, so
+    /// it is a signal that works without any hook at all.
+    static func asksTheUser(message: [String: Any]) -> Bool {
+        guard let content = message["content"] as? [[String: Any]] else { return false }
+        return content.contains { block in
+            (block["type"] as? String) == "tool_use"
+                && userFacingTools.contains((block["name"] as? String) ?? "")
+        }
     }
 
     /// Last `maxBytes` of a file split into lines, without the first partial one.

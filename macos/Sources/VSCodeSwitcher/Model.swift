@@ -14,6 +14,9 @@ enum AgentState: String, Codable, Sendable, CaseIterable, Comparable {
     case waiting
     /// Claude is blocked on a permission or elicitation dialog.
     case permission
+    /// Claude asked the user something — `AskUserQuestion`, or a plan waiting
+    /// for approval — and cannot go on until it is answered.
+    case question
 
     var priority: Int {
         switch self {
@@ -21,12 +24,24 @@ enum AgentState: String, Codable, Sendable, CaseIterable, Comparable {
         case .working: return 1
         case .waiting: return 2
         case .permission: return 3
+        case .question: return 4
         }
     }
 
     static func < (lhs: AgentState, rhs: AgentState) -> Bool {
         lhs.priority < rhs.priority
     }
+}
+
+/// How many of a row's sessions sit in one state.
+///
+/// A `[AgentState: Int]` would say the same thing, but `SwitcherRow` is
+/// `Codable` and Swift encodes dictionaries with non-`String` keys as a flat
+/// array of alternating keys and values, which is neither readable in `--dump
+/// --json` nor stable to read back. The pair is spelled out instead.
+struct StateCount: Sendable, Codable, Equatable {
+    var state: AgentState
+    var count: Int
 }
 
 /// Where a session's state came from. Useful for diagnostics: the hook value is
@@ -166,8 +181,12 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     var sessions: [ClaudeSessionInfo]
     /// Highest state among `sessions`; `nil` when the row has none.
     var state: AgentState?
-    /// How many sessions are in `state` — the number shown on the badge.
+    /// How many sessions are in `state`. Kept for ordering and `--dump`.
     var stateCount: Int
+    /// Every state present among `sessions` with its own count, most urgent
+    /// first. This is what the row draws: showing only the top state hid the
+    /// other chats entirely.
+    var stateCounts: [StateCount] = []
     /// Total active background subagents across `sessions`.
     var activeSubagents: Int
     var subagentDescriptions: [String]

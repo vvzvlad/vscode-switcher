@@ -183,6 +183,147 @@ final class AgentStateTests: XCTestCase {
         XCTAssertEqual([AgentState.idle].max(), .idle)
     }
 
+    /// A question outranks a permission wait: both stop the agent dead, but the
+    /// question is the one the user cannot even guess the answer to from the
+    /// row, so it is the one worth surfacing first.
+    func testAQuestionOutranksEverything() {
+        XCTAssertEqual([AgentState.permission, .question].max(), .question)
+        XCTAssertEqual([AgentState.question, .working, .waiting, .idle].max(), .question)
+    }
+
+    func testTheOrderIsTotalAndInTheDocumentedSequence() {
+        XCTAssertEqual(AgentState.allCases.sorted(),
+                       [.idle, .working, .waiting, .permission, .question])
+        XCTAssertEqual(Set(AgentState.allCases.map(\.priority)).count, AgentState.allCases.count)
+    }
+}
+
+/// `AskUserQuestion` and `ExitPlanMode` are the two tool calls that mean the
+/// agent stopped and is waiting for a human. Everything else under
+/// `stop_reason: tool_use` is work in progress.
+final class QuestionDetectionTests: XCTestCase {
+    private func message(toolNames: [String], stopReason: String = "tool_use") -> [String: Any] {
+        ["stop_reason": stopReason,
+         "content": [["type": "text", "text": "hi"]]
+             + toolNames.map { ["type": "tool_use", "name": $0] }]
+    }
+
+    func testAskUserQuestionIsAQuestion() {
+        XCTAssertTrue(ClaudeSessions.asksTheUser(message: message(toolNames: ["AskUserQuestion"])))
+    }
+
+    /// A finished plan waiting for approval is the same thing: the agent has
+    /// stopped and only a human moves it on.
+    func testExitPlanModeIsAQuestionToo() {
+        XCTAssertTrue(ClaudeSessions.asksTheUser(message: message(toolNames: ["ExitPlanMode"])))
+    }
+
+    func testAnOrdinaryToolCallIsNot() {
+        XCTAssertFalse(ClaudeSessions.asksTheUser(message: message(toolNames: ["Bash", "Read"])))
+    }
+
+    func testTheQuestionCountsEvenNextToOtherCalls() {
+        XCTAssertTrue(ClaudeSessions.asksTheUser(message: message(toolNames: ["Read", "AskUserQuestion"])))
+    }
+
+    func testAMessageWithoutContentIsNot() {
+        XCTAssertFalse(ClaudeSessions.asksTheUser(message: ["stop_reason": "tool_use"]))
+        XCTAssertFalse(ClaudeSessions.asksTheUser(message: ["content": "not an array"]))
+    }
+
+    /// A text block that merely mentions the name is not a call.
+    func testTheNameHasToBeOnAToolUseBlock() {
+        let message: [String: Any] = ["content": [["type": "text", "name": "AskUserQuestion"]]]
+        XCTAssertFalse(ClaudeSessions.asksTheUser(message: message))
+    }
+}
+
+/// The same signal read off a real transcript tail.
+final class TranscriptQuestionTests: XCTestCase {
+    private func record(toolName: String, isSidechain: Bool = false) -> String {
+        let content = "[{\"type\":\"tool_use\",\"name\":\"\(toolName)\"}]"
+        return "{\"type\":\"assistant\",\"isSidechain\":\(isSidechain),"
+            + "\"message\":{\"model\":\"claude-opus-5\",\"stop_reason\":\"tool_use\","
+            + "\"content\":\(content)}}"
+    }
+
+    func testAQuestionInTheTailBecomesTheQuestionState() throws {
+        let url = try temporaryFile()
+        try (record(toolName: "AskUserQuestion") + "\n").write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(ClaudeSessions.transcriptSummary(atPath: url.path, tailBytes: 64 * 1024).fallbackState,
+                       .question)
+    }
+
+    func testAPlainToolCallStaysWorking() throws {
+        let url = try temporaryFile()
+        try (record(toolName: "Bash") + "\n").write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(ClaudeSessions.transcriptSummary(atPath: url.path, tailBytes: 64 * 1024).fallbackState,
+                       .working)
+    }
+
+    /// A subagent asking its parent something says nothing about the chat the
+    /// row is showing, and sidechain records were already skipped for the model
+    /// and the token count for exactly this reason.
+    func testASubagentsQuestionIsIgnored() throws {
+        let url = try temporaryFile()
+        let text = record(toolName: "Bash") + "\n" + record(toolName: "AskUserQuestion", isSidechain: true) + "\n"
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(ClaudeSessions.transcriptSummary(atPath: url.path, tailBytes: 64 * 1024).fallbackState,
+                       .working)
+    }
+
+    private func temporaryFile() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vscode-switcher-question-\(UUID().uuidString).jsonl")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+}
+
+/// A row shows every state its chats are in, not just the top one. Showing only
+/// the top one meant a window with six chats — four answered, two working —
+/// displayed `4` and said nothing at all about the other two.
+final class StateBreakdownTests: XCTestCase {
+    private func session(_ id: String, _ state: AgentState) -> ClaudeSessionInfo {
+        TestFixtures.session(id: id, cwd: "/tmp/p", state: state)
+    }
+
+    func testEveryStatePresentIsCountedAndOrderedByUrgency() {
+        let sessions = [session("a", .waiting), session("b", .working), session("c", .waiting),
+                        session("d", .question), session("e", .waiting), session("f", .waiting)]
+        let aggregate = DataSource.aggregate(sessions)
+
+        XCTAssertEqual(aggregate.stateCounts,
+                       [StateCount(state: .question, count: 1),
+                        StateCount(state: .waiting, count: 4),
+                        StateCount(state: .working, count: 1)])
+        // The single top state is still what the ordering and `--dump` use.
+        XCTAssertEqual(aggregate.state, .question)
+        XCTAssertEqual(aggregate.stateCount, 1)
+        XCTAssertEqual(aggregate.stateCounts.map(\.count).reduce(0, +), sessions.count)
+    }
+
+    func testStatesWithNoSessionsAreLeftOut() {
+        let aggregate = DataSource.aggregate([session("a", .idle), session("b", .idle)])
+        XCTAssertEqual(aggregate.stateCounts, [StateCount(state: .idle, count: 2)])
+    }
+
+    func testARowWithoutSessionsHasNoBreakdown() {
+        let aggregate = DataSource.aggregate([])
+        XCTAssertTrue(aggregate.stateCounts.isEmpty)
+        XCTAssertNil(aggregate.state)
+    }
+
+    /// The breakdown has to reach the row, not just the aggregate.
+    func testTheBreakdownIsOnTheAssembledRow() {
+        let snapshot = DataSource.assemble(projects: [],
+                                           windows: [],
+                                           sessions: [session("a", .working), session("b", .question)],
+                                           accessibilityTrusted: false)
+        let row = try? XCTUnwrap(snapshot.projects.first)
+        XCTAssertEqual(row?.stateCounts,
+                       [StateCount(state: .question, count: 1), StateCount(state: .working, count: 1)])
+    }
 }
 
 /// The window limit decides every percentage the panel shows, and it used to be
@@ -782,6 +923,50 @@ final class SessionStateTests: XCTestCase {
             XCTAssertEqual(resolved.state, state)
             XCTAssertEqual(resolved.source, .hook)
         }
+    }
+
+    /// `Stop` never fires for `AskUserQuestion` (verified on CLI 2.1.227), so
+    /// nothing but a later hook can take this state off — and an old timestamp
+    /// is exactly what a question that has been waiting for an hour looks like.
+    func testAQuestionIsNeverAgedOutOrOverruledByTheTranscript() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .working
+        transcript.lastActivity = now.addingTimeInterval(-1)
+
+        let hook = ClaudeSessions.HookStatus(state: .question,
+                                             event: "PermissionRequest",
+                                             timestamp: now.addingTimeInterval(-3 * 3600))
+        let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now)
+        XCTAssertEqual(resolved.state, .question)
+        XCTAssertEqual(resolved.source, .hook)
+    }
+
+    /// The other direction: the answer arrives, a hook writes over the question,
+    /// and the state has to follow it down again.
+    func testALaterHookTakesTheQuestionAway() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .working
+        transcript.lastActivity = now.addingTimeInterval(-1)
+
+        for (event, state) in [("PostToolUse", AgentState.working),
+                               ("Stop", .waiting),
+                               ("UserPromptSubmit", .working)] {
+            let hook = ClaudeSessions.HookStatus(state: state, event: event, timestamp: now)
+            XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now).state,
+                           state, "after \(event)")
+        }
+    }
+
+    /// With no hooks installed at all the transcript is the only source, and it
+    /// carries the question too.
+    func testWithoutAHookAQuestionStillShows() {
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .question
+        let resolved = ClaudeSessions.resolveState(hook: nil, transcript: transcript)
+        XCTAssertEqual(resolved.state, .question)
+        XCTAssertEqual(resolved.source, .transcript)
     }
 
     func testWithoutAHookTheTranscriptIsUsed() {
