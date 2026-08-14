@@ -12,26 +12,40 @@
 # Debugging: with VSCODE_SWITCHER_DEBUG=1 the raw stdin payload is appended to
 # $STATUS_DIR/_debug.jsonl so the real payload schema can be inspected.
 
+# Byte semantics, not character semantics. Every comparison this script makes is
+# against an ASCII literal, but in a UTF-8 locale bash walks a multi-megabyte
+# payload character by character: on a 5 MB PostToolUse body the head slice
+# below costs 31 ms and a glob over the whole payload 107 ms, against 4.4 ms for
+# the slice and the match together under LC_ALL=C (measurements in SPEC §2.6.3).
+# Nothing is lost: the payload's own UTF-8 text is only ever copied around, and
+# the one case conversion further down folds ASCII by design.
+export LC_ALL=C
+
 STATUS_DIR="${VSCODE_SWITCHER_STATUS_DIR:-$HOME/.claude/window-status}"
 
 payload=$(cat 2>/dev/null)
-
-mkdir -p "$STATUS_DIR" 2>/dev/null
 
 # PostToolUse is the one event on a hot path: it fires after *every* tool call,
 # while the rest fire a handful of times per turn. Its only job here is to end a
 # permission wait the moment the approved tool actually runs — before this, the
 # orange indicator stayed on until the whole turn ended, because `permission` is
 # by design only cleared by a later hook. So it exits before spawning jq unless
-# there is a permission wait to clear, using only shell built-ins: no fork, no
-# subprocess, nothing read from disk beyond one small state file.
+# there is a permission wait to clear, using only shell built-ins from there on:
+# beyond the `cat` that reads stdin (a builtin `read -r -d ""` would do it
+# without the fork, but it consumes a pipe one byte at a time — two seconds on a
+# 5 MB payload against 31 ms) nothing else is forked and nothing is read from
+# disk except one small state file.
 #
-# The payload is cut to its head first. `session_id` is the first key in every
-# payload observed, and a PostToolUse body carries the whole tool response —
-# megabytes for a large file read — which is not something to run a regex over.
-case "$payload" in
+# The head is cut *first* and the event name is matched inside the head only: a
+# glob over the whole payload would walk the entire tool response — megabytes
+# for a large file read — to find a key that sits in the first few hundred
+# bytes. The window is far wider than needed (the key ends by byte 580 in all
+# 1865 payloads captured, and it is preceded only by `session_id`,
+# `transcript_path` and `cwd`); an event name that still falls outside it simply
+# takes the slow path below, which is correct, only slower.
+head=${payload:0:2048}
+case $head in
 *'"hook_event_name": "PostToolUse"'* | *'"hook_event_name":"PostToolUse"'*)
-	head=${payload:0:400}
 	if [[ $head =~ \"session_id\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
 		probe="$STATUS_DIR/${BASH_REMATCH[1]}.json"
 		[ -s "$probe" ] || exit 0
@@ -46,10 +60,14 @@ case "$payload" in
 	;;
 esac
 
-# After the early exit, not before it: with debugging on, dumping every payload
-# would append the whole tool response of every tool call in every session, and
-# a PostToolUse body is megabytes for a large file read. The events that survive
-# to here are the ones that change the state, which is what the dump is for.
+# Both of these come after the early exit, not before it. `mkdir` is a
+# subprocess, and the exit above is meant to run without spawning any; with
+# debugging on, dumping every payload would append the whole tool response of
+# every tool call in every session, and a PostToolUse body is megabytes for a
+# large file read. The events that survive to here are the ones that change the
+# state, which is what the dump is for.
+mkdir -p "$STATUS_DIR" 2>/dev/null
+
 if [ "${VSCODE_SWITCHER_DEBUG:-0}" = "1" ]; then
 	printf '%s\n' "$payload" >>"$STATUS_DIR/_debug.jsonl" 2>/dev/null
 fi
