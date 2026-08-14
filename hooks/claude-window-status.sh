@@ -3,7 +3,7 @@
 #
 # Reads a hook payload from stdin, derives a coarse agent state and writes it
 # atomically to $STATUS_DIR/<session_id>.json. Installed for UserPromptSubmit,
-# Stop, Notification and SessionEnd.
+# PermissionRequest, PostToolUse, Stop, Notification and SessionEnd.
 #
 # The script is deliberately defensive: any missing field, missing tool or
 # unexpected payload results in a silent exit 0, because a failing hook would
@@ -18,6 +18,38 @@ payload=$(cat 2>/dev/null)
 
 mkdir -p "$STATUS_DIR" 2>/dev/null
 
+# PostToolUse is the one event on a hot path: it fires after *every* tool call,
+# while the rest fire a handful of times per turn. Its only job here is to end a
+# permission wait the moment the approved tool actually runs — before this, the
+# orange indicator stayed on until the whole turn ended, because `permission` is
+# by design only cleared by a later hook. So it exits before spawning jq unless
+# there is a permission wait to clear, using only shell built-ins: no fork, no
+# subprocess, nothing read from disk beyond one small state file.
+#
+# The payload is cut to its head first. `session_id` is the first key in every
+# payload observed, and a PostToolUse body carries the whole tool response —
+# megabytes for a large file read — which is not something to run a regex over.
+case "$payload" in
+*'"hook_event_name": "PostToolUse"'* | *'"hook_event_name":"PostToolUse"'*)
+	head=${payload:0:400}
+	if [[ $head =~ \"session_id\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+		probe="$STATUS_DIR/${BASH_REMATCH[1]}.json"
+		[ -s "$probe" ] || exit 0
+		current=""
+		read -r -d '' current <"$probe" 2>/dev/null
+		case "$current" in
+		*'"state": "permission"'* | *'"state":"permission"'* | \
+			*'"state": "question"'* | *'"state":"question"'*) ;;
+		*) exit 0 ;;
+		esac
+	fi
+	;;
+esac
+
+# After the early exit, not before it: with debugging on, dumping every payload
+# would append the whole tool response of every tool call in every session, and
+# a PostToolUse body is megabytes for a large file read. The events that survive
+# to here are the ones that change the state, which is what the dump is for.
 if [ "${VSCODE_SWITCHER_DEBUG:-0}" = "1" ]; then
 	printf '%s\n' "$payload" >>"$STATUS_DIR/_debug.jsonl" 2>/dev/null
 fi
@@ -51,12 +83,13 @@ fields=$(printf '%s' "$payload" | "$JQ" -r '
 		((.type // .notification_type // .notificationType // .subtype // "") | s),
 		((.message // .notification // .title // "") | s),
 		((.reason // .stop_reason // "") | s),
-		((.transcript_path // .transcriptPath // "") | s)
+		((.transcript_path // .transcriptPath // "") | s),
+		((.tool_name // .toolName // "") | s)
 	] | join([31] | implode)
 ' 2>/dev/null)
 [ -z "$fields" ] && exit 0
 
-IFS=$'\037' read -r session_id cwd event notif_type message reason transcript <<EOF
+IFS=$'\037' read -r session_id cwd event notif_type message reason transcript tool_name <<EOF
 $fields
 EOF
 
@@ -110,6 +143,29 @@ UserPromptSubmit)
 Stop)
 	state="waiting"
 	;;
+PermissionRequest)
+	# The dialog going up, confirmed empirically on CLI 2.1.227: it lands
+	# within ~100 ms of `PreToolUse`, whereas the `Notification` for the same
+	# dialog arrives six seconds later — and only when the user has stepped
+	# away. This is the reliable source; Notification stays as a second one
+	# because it also covers elicitation dialogs.
+	#
+	# AskUserQuestion and ExitPlanMode come through here too, and they are
+	# not a permission at all: the agent is asking the user something and has
+	# stopped until it is answered. Nothing else marks that — `Stop` does not
+	# fire for them (verified), so without this the two are the same orange
+	# hand.
+	case "$tool_name" in
+	AskUserQuestion | ExitPlanMode) state="question" ;;
+	*) state="permission" ;;
+	esac
+	;;
+PostToolUse)
+	# Only ever reached with a permission or question wait on disk (see the
+	# early exit above): the tool the user approved — or the question they
+	# answered — has now run, so the wait is over.
+	state="working"
+	;;
 Notification)
 	state=$(classify_notification)
 	[ -z "$state" ] && exit 0
@@ -133,16 +189,38 @@ if [ -s "$target" ]; then
 fi
 prev_state=$(printf '%s' "$prev" | "$JQ" -r '.state // ""' 2>/dev/null)
 
-# A Notification never clears a permission wait. `idle_prompt` only says the
-# user has not typed for a while — which is exactly what happens while a
+# PostToolUse ends a wait and nothing else. The fast path above already exits
+# for any other case, but that path matches a literal string in the payload, and
+# correctness must not hang off the CLI's JSON spacing: with the match missed,
+# every tool call would land here, and an async PostToolUse delivered after the
+# `Stop` it preceded would turn an answered chat back into a working one.
+if [ "$event" = "PostToolUse" ]; then
+	case "$prev_state" in
+	permission | question) ;;
+	*) exit 0 ;;
+	esac
+fi
+
+# A Notification never clears a permission or question wait. `idle_prompt` only
+# says the user has not typed for a while — which is exactly what happens while a
 # permission dialog sits on screen — and the guard must not depend on the type
 # being present: a payload without `notification_type` falls through to the
 # text heuristic, `"Claude is waiting for your input"` classifies as `waiting`,
 # and the orange indicator went green with the dialog still open.
 # `notification_type` was confirmed empirically for exactly one value on one CLI
-# version, so it is evidence, not a precondition. Only `Stop` and
-# `UserPromptSubmit` take `permission` off.
-if [ "$event" = "Notification" ] && [ "$state" = "waiting" ] && [ "$prev_state" = "permission" ]; then
+# version, so it is evidence, not a precondition. Only `Stop`, `UserPromptSubmit`
+# and `PostToolUse` take `permission` off.
+if [ "$event" = "Notification" ] && [ "$state" = "waiting" ]; then
+	case "$prev_state" in
+	permission | question) exit 0 ;;
+	esac
+fi
+
+# Nor does the Notification that trails a PermissionRequest by six seconds get
+# to turn a question back into a plain permission: it says only
+# "Claude needs your permission" and carries no tool name, so it cannot tell the
+# two apart, while the PermissionRequest that preceded it could.
+if [ "$event" = "Notification" ] && [ "$state" = "permission" ] && [ "$prev_state" = "question" ]; then
 	exit 0
 fi
 

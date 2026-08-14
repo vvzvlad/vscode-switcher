@@ -103,6 +103,8 @@ ADDITIONS=$(jq -n \
 	def entry($cmd): {hooks: [{type: "command", command: $cmd, async: true, timeout: 5}]};
 	{
 		UserPromptSubmit: [entry($state)],
+		PermissionRequest: [entry($state)],
+		PostToolUse: [entry($state)],
 		Stop: [entry($state)],
 		Notification: [entry($state)],
 		SessionEnd: [entry($state)]
@@ -159,7 +161,7 @@ fi
 mv -f "$TMP" "$SETTINGS"
 
 if [ "$MODE" = "install" ]; then
-	echo "installed hooks: UserPromptSubmit, Stop, Notification, SessionEnd -> $STATE_HOOK"
+	echo "installed hooks: UserPromptSubmit, PermissionRequest, PostToolUse, Stop, Notification, SessionEnd -> $STATE_HOOK"
 	echo "installed statusLine -> $STATUSLINE_HOOK"
 else
 	echo "removed VSCode Switcher hooks and statusLine from $SETTINGS"
