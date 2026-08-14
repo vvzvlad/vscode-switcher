@@ -149,46 +149,41 @@ final class DataSource: @unchecked Sendable {
             for session in pool { claimedSessionIDs.insert(session.sessionId) }
             projectRows.append(Self.makeProjectRow(project: project, sessions: pool))
         }
-        projectRows = Self.ranked(projectRows, activity: activity)
 
         // Sessions whose cwd is outside every scan root belong to no project and
         // therefore to no window. They are grouped by working directory and
         // aggregated exactly like the sessions that did land in a project:
         // six agents in one directory are one place to look, not six identical
-        // rows. Most recent group first, then by path so the order is stable.
+        // rows. Built in path order; `rankedOrphans` decides the order shown.
         let orphansByCwd = Dictionary(grouping: sessions.filter { !claimedSessionIDs.contains($0.sessionId) },
                                       by: \.cwd)
-        let orphanCwds = orphansByCwd.keys.sorted { left, right in
-            let leftActivity = orphansByCwd[left]?.compactMap(\.lastActivity).max() ?? .distantPast
-            let rightActivity = orphansByCwd[right]?.compactMap(\.lastActivity).max() ?? .distantPast
-            if leftActivity != rightActivity { return leftActivity > rightActivity }
-            return left < right
-        }
-        for cwd in orphanCwds {
+        var orphanRows: [SwitcherRow] = []
+        for cwd in orphansByCwd.keys.sorted() {
             let group = orphansByCwd[cwd] ?? []
             let name = (cwd as NSString).lastPathComponent
             let active = group.first
             let aggregate = Self.aggregate(group)
-            projectRows.append(SwitcherRow(id: "cwd:\(cwd)",
-                                           kind: .project,
-                                           displayName: name,
-                                           colorHex: WorkspaceIndex.fallbackColor(for: name),
-                                           project: nil,
-                                           window: nil,
-                                           sessions: group,
-                                           state: aggregate.state,
-                                           stateCount: aggregate.stateCount,
-                                           activeSubagents: aggregate.activeSubagents,
-                                           subagentDescriptions: aggregate.subagentDescriptions,
-                                           chatTopic: active?.topic,
-                                           model: active?.model,
-                                           contextUsedTokens: active?.contextUsedTokens,
-                                           contextLimitTokens: active?.contextLimitTokens,
-                                           lastActivity: group.compactMap(\.lastActivity).max()))
+            orphanRows.append(SwitcherRow(id: "cwd:\(cwd)",
+                                          kind: .project,
+                                          displayName: name,
+                                          colorHex: WorkspaceIndex.fallbackColor(for: name),
+                                          project: nil,
+                                          window: nil,
+                                          sessions: group,
+                                          state: aggregate.state,
+                                          stateCount: aggregate.stateCount,
+                                          activeSubagents: aggregate.activeSubagents,
+                                          subagentDescriptions: aggregate.subagentDescriptions,
+                                          chatTopic: active?.topic,
+                                          model: active?.model,
+                                          contextUsedTokens: active?.contextUsedTokens,
+                                          contextLimitTokens: active?.contextLimitTokens,
+                                          lastActivity: group.compactMap(\.lastActivity).max()))
         }
 
         return SwitcherSnapshot(openWindows: openWindows,
-                                projects: projectRows,
+                                projects: Self.rankedOrphans(orphanRows)
+                                    + Self.ranked(projectRows, activity: activity),
                                 accessibilityTrusted: accessibilityTrusted,
                                 generatedAt: generatedAt)
     }
@@ -256,6 +251,38 @@ final class DataSource: @unchecked Sendable {
     }
 
     // MARK: - Ranking
+
+    /// Orders the orphan `cwd:` rows, which are put ahead of every project row.
+    ///
+    /// An orphan row exists only because an agent is running in that directory:
+    /// take the sessions away and the row is gone, which is not true of a
+    /// project row. So the rows that are made of live agents come first, and the
+    /// two orderings — agent state here, sessions-per-month there — never have
+    /// to be compared against each other.
+    ///
+    /// They used to be appended at the very end. The thirty-row cap hid
+    /// everything below it and so dragged them up to roughly position 31 by
+    /// accident; once the cap went, a live agent in a scratch directory landed
+    /// at position 93 of 93 — four screens down, at the moment it was wanted
+    /// most.
+    ///
+    /// Among themselves: the most urgent state first (`permission` over
+    /// `waiting` over `working` over `idle`), then the most recent activity,
+    /// then the path. Paths are unique, so the order is fully determined and
+    /// does not depend on the sort being stable.
+    static func rankedOrphans(_ rows: [SwitcherRow]) -> [SwitcherRow] {
+        rows.sorted { left, right in
+            // An orphan group is never empty, so `state` is never `nil` here;
+            // the default only keeps the comparison a total order.
+            let leftState = left.state ?? .idle
+            let rightState = right.state ?? .idle
+            if leftState != rightState { return leftState > rightState }
+            let leftActivity = left.lastActivity ?? .distantPast
+            let rightActivity = right.lastActivity ?? .distantPast
+            if leftActivity != rightActivity { return leftActivity > rightActivity }
+            return left.id < right.id
+        }
+    }
 
     /// Orders the projects that have no window by how much Claude Code work has
     /// happened in them lately.

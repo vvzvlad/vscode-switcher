@@ -879,9 +879,11 @@ final class SnapshotAssemblyTests: XCTestCase {
         XCTAssertEqual(snapshot.rows.flatMap(\.sessions).count, 1)
     }
 
-    /// The projects are ranked by activity, and the orphan `cwd:` rows stay
-    /// where they are put — at the very end, ordered among themselves.
-    func testProjectRowsComeOutRankedWithTheOrphansLast() {
+    /// An orphan `cwd:` row is a live agent running outside every scan root, so
+    /// it goes ahead of the projects rather than after them — appended last it
+    /// sat at position 93 of 93, four screens down. The ranking of the projects
+    /// themselves is untouched.
+    func testOrphanRowsComeAheadOfTheRankedProjects() {
         let projects = ["quiet", "busy"].map { makeProject(path: "/p/\($0)", rootName: $0) }
         let orphan = makeSession(id: "s1", cwd: "/somewhere/else", state: .working)
 
@@ -893,7 +895,53 @@ final class SnapshotAssemblyTests: XCTestCase {
                                            accessibilityTrusted: true)
 
         XCTAssertEqual(snapshot.projects.map(\.id),
-                       ["project:/p/busy", "project:/p/quiet", "cwd:/somewhere/else"])
+                       ["cwd:/somewhere/else", "project:/p/busy", "project:/p/quiet"])
+    }
+
+    /// Removing the orphans must not disturb the projects: the same call without
+    /// the outside session produces the project order the previous test saw
+    /// below the orphan.
+    func testTheProjectOrderIsTheSameWithAndWithoutOrphans() {
+        let projects = ["quiet", "busy"].map { makeProject(path: "/p/\($0)", rootName: $0) }
+        let activity = ["/p/busy": ProjectActivity(recentSessions: 9, lastSession: Date())]
+
+        let withOrphan = DataSource.assemble(projects: projects,
+                                             windows: [],
+                                             sessions: [makeSession(id: "s1",
+                                                                    cwd: "/somewhere/else",
+                                                                    state: .working)],
+                                             activity: activity,
+                                             accessibilityTrusted: true)
+        let without = DataSource.assemble(projects: projects,
+                                          windows: [],
+                                          sessions: [],
+                                          activity: activity,
+                                          accessibilityTrusted: true)
+
+        XCTAssertEqual(withOrphan.projects.filter { $0.project != nil }.map(\.id),
+                       without.projects.map(\.id))
+    }
+
+    /// Among themselves the orphans are ordered by how much they need looking
+    /// at: the state first, the freshest activity next.
+    func testOrphansAreOrderedByStateThenFreshness() {
+        let old = Date(timeIntervalSince1970: 1_700_000_000)
+        let sessions = [
+            TestFixtures.session(id: "s1", cwd: "/out/idle", state: .idle,
+                                 lastActivity: old.addingTimeInterval(500)),
+            TestFixtures.session(id: "s2", cwd: "/out/stale-work", state: .working, lastActivity: old),
+            TestFixtures.session(id: "s3", cwd: "/out/blocked", state: .permission, lastActivity: old),
+            TestFixtures.session(id: "s4", cwd: "/out/fresh-work", state: .working,
+                                 lastActivity: old.addingTimeInterval(100))
+        ]
+
+        let snapshot = DataSource.assemble(projects: [],
+                                           windows: [],
+                                           sessions: sessions,
+                                           accessibilityTrusted: true)
+
+        XCTAssertEqual(snapshot.projects.map(\.id),
+                       ["cwd:/out/blocked", "cwd:/out/fresh-work", "cwd:/out/stale-work", "cwd:/out/idle"])
     }
 
     // MARK: - Fixtures
