@@ -561,6 +561,10 @@ enum ClaudeSessions {
         var needsTitle = true
         var needsPrompt = true
         var needsAssistant = true
+        // Every `tool_use_id` answered below the point the scan has reached.
+        // Filled going backwards, so by the time the assistant record that
+        // asked is read, its answer — which is written after it — has been seen.
+        var answered: Set<String> = []
 
         for line in lines.reversed() {
             if !needsTitle, !needsPrompt, !needsAssistant { break }
@@ -604,10 +608,14 @@ enum ClaudeSessions {
                     // otherwise "asked a question" is indistinguishable from
                     // "busy", which is the state the user is least likely to
                     // interrupt.
-                    summary.fallbackState = asksTheUser(message: message) ? .question : .working
+                    let asked = unansweredQuestion(message: message, answered: answered)
+                    summary.fallbackState = asked ? .question : .working
                 default: break
                 }
                 needsAssistant = false
+            case "user":
+                collectAnswers(record: record, into: &answered)
+                continue
             default:
                 continue
             }
@@ -621,15 +629,46 @@ enum ClaudeSessions {
     /// plan is finished and the agent waits for a human to approve it.
     static let userFacingTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
 
-    /// True when an assistant message's tool calls include one of those.
+    /// True when an assistant message asks the user something and the answer has
+    /// not arrived yet.
     ///
     /// Unlike the permission dialog, this leaves a trace in the transcript, so
-    /// it is a signal that works without any hook at all.
-    static func asksTheUser(message: [String: Any]) -> Bool {
+    /// it is a signal that works without any hook at all — but the trace stays
+    /// there after the question is answered, and the record that answered it is
+    /// the *next* one, which the scan has already passed. So `answered` carries
+    /// the `tool_use_id`s seen below this point, and a question whose id is
+    /// among them is finished business.
+    ///
+    /// Matching by id and not by "did any tool result follow": with several
+    /// tools in flight, an unrelated result arriving after the question would
+    /// otherwise close it, and the yellow chip would go out with the question
+    /// still on screen.
+    static func unansweredQuestion(message: [String: Any], answered: Set<String>) -> Bool {
         guard let content = message["content"] as? [[String: Any]] else { return false }
         return content.contains { block in
-            (block["type"] as? String) == "tool_use"
-                && userFacingTools.contains((block["name"] as? String) ?? "")
+            guard (block["type"] as? String) == "tool_use",
+                  userFacingTools.contains((block["name"] as? String) ?? "")
+            else { return false }
+            guard let id = block["id"] as? String else {
+                // No id to match on. Treating it as unanswered keeps the signal
+                // that the agent stopped for a human; a stale question fades on
+                // its own once the next assistant record lands.
+                return true
+            }
+            return !answered.contains(id)
+        }
+    }
+
+    /// Adds the `tool_use_id` of every tool result in a user record to `answered`.
+    ///
+    /// Sidechain records are collected too: ids are unique per tool call, so a
+    /// subagent result can never match a question asked on the main chain.
+    static func collectAnswers(record: [String: Any], into answered: inout Set<String>) {
+        guard let message = record["message"] as? [String: Any],
+              let content = message["content"] as? [[String: Any]]
+        else { return }
+        for block in content where (block["type"] as? String) == "tool_result" {
+            if let id = block["tool_use_id"] as? String { answered.insert(id) }
         }
     }
 

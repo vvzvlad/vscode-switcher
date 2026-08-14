@@ -205,46 +205,99 @@ final class QuestionDetectionTests: XCTestCase {
     private func message(toolNames: [String], stopReason: String = "tool_use") -> [String: Any] {
         ["stop_reason": stopReason,
          "content": [["type": "text", "text": "hi"]]
-             + toolNames.map { ["type": "tool_use", "name": $0] }]
+             + toolNames.enumerated().map { ["type": "tool_use", "name": $1, "id": "toolu_\($0)"] }]
+    }
+
+    private func asks(_ message: [String: Any], answered: Set<String> = []) -> Bool {
+        ClaudeSessions.unansweredQuestion(message: message, answered: answered)
     }
 
     func testAskUserQuestionIsAQuestion() {
-        XCTAssertTrue(ClaudeSessions.asksTheUser(message: message(toolNames: ["AskUserQuestion"])))
+        XCTAssertTrue(asks(message(toolNames: ["AskUserQuestion"])))
     }
 
     /// A finished plan waiting for approval is the same thing: the agent has
     /// stopped and only a human moves it on.
     func testExitPlanModeIsAQuestionToo() {
-        XCTAssertTrue(ClaudeSessions.asksTheUser(message: message(toolNames: ["ExitPlanMode"])))
+        XCTAssertTrue(asks(message(toolNames: ["ExitPlanMode"])))
     }
 
     func testAnOrdinaryToolCallIsNot() {
-        XCTAssertFalse(ClaudeSessions.asksTheUser(message: message(toolNames: ["Bash", "Read"])))
+        XCTAssertFalse(asks(message(toolNames: ["Bash", "Read"])))
     }
 
     func testTheQuestionCountsEvenNextToOtherCalls() {
-        XCTAssertTrue(ClaudeSessions.asksTheUser(message: message(toolNames: ["Read", "AskUserQuestion"])))
+        XCTAssertTrue(asks(message(toolNames: ["Read", "AskUserQuestion"])))
     }
 
     func testAMessageWithoutContentIsNot() {
-        XCTAssertFalse(ClaudeSessions.asksTheUser(message: ["stop_reason": "tool_use"]))
-        XCTAssertFalse(ClaudeSessions.asksTheUser(message: ["content": "not an array"]))
+        XCTAssertFalse(asks(["stop_reason": "tool_use"]))
+        XCTAssertFalse(asks(["content": "not an array"]))
     }
 
     /// A text block that merely mentions the name is not a call.
     func testTheNameHasToBeOnAToolUseBlock() {
         let message: [String: Any] = ["content": [["type": "text", "name": "AskUserQuestion"]]]
-        XCTAssertFalse(ClaudeSessions.asksTheUser(message: message))
+        XCTAssertFalse(asks(message))
+    }
+
+    /// The answer arrives as a `tool_result` carrying the question's own id.
+    func testAnAnsweredQuestionIsNotAQuestionAnyMore() {
+        XCTAssertFalse(asks(message(toolNames: ["AskUserQuestion"]), answered: ["toolu_0"]))
+    }
+
+    /// Someone else's result must not close it: with two tools in flight, the
+    /// unrelated one finishing first would put the chat back to `working` while
+    /// the dialog is still on screen.
+    func testAnUnrelatedResultLeavesTheQuestionOpen() {
+        XCTAssertTrue(asks(message(toolNames: ["AskUserQuestion"]), answered: ["toolu_other"]))
+    }
+
+    /// Two questions in one message, one answered: the other still waits.
+    func testOnlyTheAnsweredOneIsClosed() {
+        let both = message(toolNames: ["AskUserQuestion", "ExitPlanMode"])
+        XCTAssertTrue(asks(both, answered: ["toolu_0"]))
+        XCTAssertTrue(asks(both, answered: ["toolu_1"]))
+        XCTAssertFalse(asks(both, answered: ["toolu_0", "toolu_1"]))
+    }
+
+    /// Nothing to match on means the state is kept, not dropped.
+    func testAQuestionWithoutAnIdStaysAQuestion() {
+        let message: [String: Any] = ["content": [["type": "tool_use", "name": "AskUserQuestion"]]]
+        XCTAssertTrue(asks(message, answered: ["toolu_1"]))
+    }
+
+    func testResultsAreCollectedFromUserRecords() {
+        var answered: Set<String> = []
+        let record: [String: Any] = ["type": "user", "message": ["content": [
+            ["type": "tool_result", "tool_use_id": "toolu_1"],
+            ["type": "text", "text": "hi"],
+            ["type": "tool_result", "tool_use_id": "toolu_2"],
+        ]]]
+        ClaudeSessions.collectAnswers(record: record, into: &answered)
+        XCTAssertEqual(answered, ["toolu_1", "toolu_2"])
+
+        // A record with nothing usable in it must not throw anything off.
+        ClaudeSessions.collectAnswers(record: ["type": "user"], into: &answered)
+        ClaudeSessions.collectAnswers(record: ["type": "user", "message": ["content": "text"]], into: &answered)
+        XCTAssertEqual(answered, ["toolu_1", "toolu_2"])
     }
 }
 
 /// The same signal read off a real transcript tail.
 final class TranscriptQuestionTests: XCTestCase {
-    private func record(toolName: String, isSidechain: Bool = false) -> String {
-        let content = "[{\"type\":\"tool_use\",\"name\":\"\(toolName)\"}]"
+    private func record(toolName: String, isSidechain: Bool = false, id: String = "toolu_1") -> String {
+        let content = "[{\"type\":\"tool_use\",\"name\":\"\(toolName)\",\"id\":\"\(id)\"}]"
         return "{\"type\":\"assistant\",\"isSidechain\":\(isSidechain),"
             + "\"message\":{\"model\":\"claude-opus-5\",\"stop_reason\":\"tool_use\","
             + "\"content\":\(content)}}"
+    }
+
+    /// What the answer looks like on disk: the user record that follows the
+    /// question and quotes its id.
+    private func answer(to id: String) -> String {
+        "{\"type\":\"user\",\"isSidechain\":false,\"message\":{\"role\":\"user\","
+            + "\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"\(id)\"}]}}"
     }
 
     func testAQuestionInTheTailBecomesTheQuestionState() throws {
@@ -270,6 +323,28 @@ final class TranscriptQuestionTests: XCTestCase {
         try text.write(to: url, atomically: true, encoding: .utf8)
         XCTAssertEqual(ClaudeSessions.transcriptSummary(atPath: url.path, tailBytes: 64 * 1024).fallbackState,
                        .working)
+    }
+
+    /// The shape caught on a real transcript: `AskUserQuestion` on one line, the
+    /// `tool_result` that answered it on the next, and the chat carried on. The
+    /// question is over, but the panel kept showing the yellow "asked a
+    /// question" chip because the scan stopped at the assistant record and never
+    /// looked at what came after it.
+    func testAnAnsweredQuestionIsBackToWorking() throws {
+        let url = try temporaryFile()
+        let text = record(toolName: "AskUserQuestion") + "\n" + answer(to: "toolu_1") + "\n"
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(ClaudeSessions.transcriptSummary(atPath: url.path, tailBytes: 64 * 1024).fallbackState,
+                       .working)
+    }
+
+    /// The result of some other tool running in parallel is not an answer.
+    func testSomebodyElsesResultDoesNotCloseTheQuestion() throws {
+        let url = try temporaryFile()
+        let text = record(toolName: "AskUserQuestion", id: "toolu_ask") + "\n" + answer(to: "toolu_bash") + "\n"
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(ClaudeSessions.transcriptSummary(atPath: url.path, tailBytes: 64 * 1024).fallbackState,
+                       .question)
     }
 
     private func temporaryFile() throws -> URL {
