@@ -164,6 +164,60 @@ enum ClaudeSessions {
                                  lastActivity: lastActivity)
     }
 
+    // MARK: - Project activity
+
+    private static let sessionTimesCache = FileDerivedCache<[Date]>()
+
+    /// When each session ever recorded for a working directory was last written.
+    ///
+    /// `~/.claude/projects/<slug>/` holds one `*.jsonl` per session started in
+    /// that directory, and its mtime is when that session was last active.
+    /// Subagent transcripts sit one level down, in `<sessionId>/subagents/`, so
+    /// a flat listing sees sessions and nothing else. An empty answer is the
+    /// ordinary case, not a failure: most projects have no directory here at
+    /// all, and some directories hold no transcript (worktree snapshots,
+    /// sessions since deleted).
+    ///
+    /// Cached against the directory's own mtime, which moves exactly when a
+    /// session is added or removed — the events this is counting. Appending to
+    /// an existing transcript does not move it, so one session's timestamp can
+    /// lag until the next session is started; against a window measured in
+    /// weeks that changes no order.
+    static func sessionTimes(forPath path: String,
+                             projectsDirectory: URL = ClaudeSessions.projectsDirectory) -> [Date] {
+        let directory = projectsDirectory.appendingPathComponent(slug(forPath: path))
+        // Most projects have never hosted a session and so have no directory
+        // here — 63 of the 93 on this machine. `FileDerivedCache` never caches a
+        // path that does not exist, so without this guard every one of them ran
+        // a `contentsOfDirectory` that could only fail, once per project per
+        // snapshot; building those `NSError`s cost more than every other part of
+        // the ranking together.
+        guard fileStamp(atPath: directory.path) != nil else { return [] }
+        return sessionTimesCache.value(atPath: directory.path) {
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
+            return names.filter { $0.hasSuffix(".jsonl") }.compactMap {
+                fileStamp(atPath: directory.appendingPathComponent($0).path)?.modificationDate
+            }
+        }
+    }
+
+    /// How much Claude Code work a project has seen: how many of its sessions
+    /// fall inside the window, and when the newest one of any age was written.
+    ///
+    /// A count inside a fixed window rather than a decayed total over all
+    /// history: the question the list answers is "what have I been doing
+    /// lately", and a project with a large enough past keeps floating to the top
+    /// under any weighting that never forgets it.
+    static func activity(forPath path: String,
+                         windowDays: Int,
+                         now: Date = Date(),
+                         projectsDirectory: URL = ClaudeSessions.projectsDirectory) -> ProjectActivity {
+        let times = sessionTimes(forPath: path, projectsDirectory: projectsDirectory)
+        let cutoff = now.addingTimeInterval(-Double(windowDays) * 86_400)
+        return ProjectActivity(recentSessions: times.filter { $0 >= cutoff }.count,
+                               lastSession: times.max())
+    }
+
     // MARK: - State
 
     /// A transcript newer than the hook state by more than this proves the hook

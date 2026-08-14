@@ -107,7 +107,6 @@ enum ConsoleDump {
         }
         print("")
 
-        let unopened = snapshot.projects.filter { $0.sessions.isEmpty }
         let strayed = snapshot.projects.filter { !$0.sessions.isEmpty }
         if !strayed.isEmpty {
             print("Live sessions without a window: \(strayed.count)")
@@ -117,11 +116,23 @@ enum ConsoleDump {
             print("")
         }
 
-        print("Projects without an open window: \(unopened.count) (showing 15 most recent)")
-        for row in unopened.prefix(15) {
+        // In the order the panel shows them, which is what the ranking is for.
+        print("Projects section: \(snapshot.projects.count) (showing 15, most active first)")
+        for row in snapshot.projects.prefix(15) {
             let workspace = row.project?.workspaceFile == nil ? "git" : "workspace"
-            print("  - \(row.displayName.padding(toLength: 34, withPad: " ", startingAt: 0)) \(row.colorHex)  \(workspace)")
+            print("  - \(row.displayName.padding(toLength: 34, withPad: " ", startingAt: 0)) \(row.colorHex)"
+                + "  \(workspace.padding(toLength: 9, withPad: " ", startingAt: 0))  \(activity(row, config: config))")
         }
+    }
+
+    /// Sessions inside the activity window and the age of the newest one — the
+    /// two numbers `DataSource.ranked` sorts this section by.
+    private static func activity(_ row: SwitcherRow, config: Config) -> String {
+        guard let path = row.project?.path else { return "outside the scan roots" }
+        let activity = ClaudeSessions.activity(forPath: path, windowDays: config.activityWindowDays)
+        guard let last = activity.lastSession else { return "no sessions" }
+        let days = Int(Date().timeIntervalSince(last) / 86_400)
+        return "\(activity.recentSessions) in \(config.activityWindowDays)d, last \(days)d ago"
     }
 
     private static func formatContext(_ row: SwitcherRow) -> String {

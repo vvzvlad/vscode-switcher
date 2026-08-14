@@ -70,9 +70,16 @@ final class DataSource: @unchecked Sendable {
         // 40–180 ms, and a snapshot that claims to be from the moment it
         // finished is younger than its own data.
         let readAt = Date()
-        return Self.assemble(projects: index.projects(config: config),
+        let projects = index.projects(config: config)
+        let activity = Dictionary(projects.map {
+            ($0.path, ClaudeSessions.activity(forPath: $0.path,
+                                              windowDays: config.activityWindowDays,
+                                              now: readAt))
+        }, uniquingKeysWith: { first, _ in first })
+        return Self.assemble(projects: projects,
                              windows: VSCodeWindows.listWindows(bundleID: config.editorBundleID),
                              sessions: ClaudeSessions.liveSessions(config: config),
+                             activity: activity,
                              accessibilityTrusted: VSCodeWindows.isAccessibilityTrusted(),
                              generatedAt: readAt)
     }
@@ -82,6 +89,7 @@ final class DataSource: @unchecked Sendable {
     static func assemble(projects: [ProjectInfo],
                          windows: [VSCodeWindowInfo],
                          sessions: [ClaudeSessionInfo],
+                         activity: [String: ProjectActivity] = [:],
                          accessibilityTrusted: Bool,
                          generatedAt: Date = Date()) -> SwitcherSnapshot {
         let projectsByRootName = Dictionary(grouping: projects, by: \.rootName)
@@ -141,6 +149,7 @@ final class DataSource: @unchecked Sendable {
             for session in pool { claimedSessionIDs.insert(session.sessionId) }
             projectRows.append(Self.makeProjectRow(project: project, sessions: pool))
         }
+        projectRows = Self.ranked(projectRows, activity: activity)
 
         // Sessions whose cwd is outside every scan root belong to no project and
         // therefore to no window. They are grouped by working directory and
@@ -244,6 +253,37 @@ final class DataSource: @unchecked Sendable {
                 stateCount: state.map { value in sessions.filter { $0.state == value }.count } ?? 0,
                 activeSubagents: sessions.reduce(0) { $0 + $1.activeSubagents },
                 subagentDescriptions: sessions.flatMap { $0.subagents.filter(\.isActive).compactMap(\.description) })
+    }
+
+    // MARK: - Ranking
+
+    /// Orders the projects that have no window by how much Claude Code work has
+    /// happened in them lately.
+    ///
+    /// Directory mtime, which is what this used to be, answers almost nothing:
+    /// it does not move when a file inside the project is edited, so the order
+    /// looked arbitrary — a project worked in all week could sit below one last
+    /// touched in spring. The number of sessions started in the last few weeks
+    /// does answer it, and a hard window rather than a decayed sum is what keeps
+    /// a project with a big enough past from floating at the top forever.
+    ///
+    /// Three groups, in this order: worked in during the window, ranked by how
+    /// many sessions; worked in before it, ranked by the newest of them; never
+    /// worked in at all, left in the directory-mtime order they arrived in.
+    /// Rows keep that arrival order whenever the activity cannot separate them,
+    /// so the sort is stable in effect even though `sorted` is not.
+    static func ranked(_ rows: [SwitcherRow], activity: [String: ProjectActivity]) -> [SwitcherRow] {
+        rows.enumerated().sorted { left, right in
+            let leftActivity = left.element.project.flatMap { activity[$0.path] } ?? ProjectActivity()
+            let rightActivity = right.element.project.flatMap { activity[$0.path] } ?? ProjectActivity()
+            if leftActivity.recentSessions != rightActivity.recentSessions {
+                return leftActivity.recentSessions > rightActivity.recentSessions
+            }
+            if leftActivity.lastSession != rightActivity.lastSession {
+                return (leftActivity.lastSession ?? .distantPast) > (rightActivity.lastSession ?? .distantPast)
+            }
+            return left.offset < right.offset
+        }.map(\.element)
     }
 
     // MARK: - Matching

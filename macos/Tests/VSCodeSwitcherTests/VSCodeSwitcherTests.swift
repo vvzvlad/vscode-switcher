@@ -879,6 +879,23 @@ final class SnapshotAssemblyTests: XCTestCase {
         XCTAssertEqual(snapshot.rows.flatMap(\.sessions).count, 1)
     }
 
+    /// The projects are ranked by activity, and the orphan `cwd:` rows stay
+    /// where they are put — at the very end, ordered among themselves.
+    func testProjectRowsComeOutRankedWithTheOrphansLast() {
+        let projects = ["quiet", "busy"].map { makeProject(path: "/p/\($0)", rootName: $0) }
+        let orphan = makeSession(id: "s1", cwd: "/somewhere/else", state: .working)
+
+        let snapshot = DataSource.assemble(projects: projects,
+                                           windows: [],
+                                           sessions: [orphan],
+                                           activity: ["/p/busy": ProjectActivity(recentSessions: 9,
+                                                                                 lastSession: Date())],
+                                           accessibilityTrusted: true)
+
+        XCTAssertEqual(snapshot.projects.map(\.id),
+                       ["project:/p/busy", "project:/p/quiet", "cwd:/somewhere/else"])
+    }
+
     // MARK: - Fixtures
 
     private func makeProject(path: String, rootName: String) -> ProjectInfo {
@@ -944,6 +961,164 @@ enum TestFixtures {
                           activeSubagents: 0,
                           subagents: [],
                           lastActivity: lastActivity)
+    }
+}
+
+/// The order of the "projects" section: how much Claude Code work happened in
+/// each project inside the activity window. Directory mtime, which this used to
+/// be, does not move when a file inside the project is edited, so the order it
+/// produced looked arbitrary.
+final class ProjectRankingTests: XCTestCase {
+
+    private func daysAgo(_ days: Double) -> Date {
+        Date().addingTimeInterval(-days * 86_400)
+    }
+
+    private func ranked(_ names: [String], _ activity: [String: ProjectActivity]) -> [String] {
+        var byPath: [String: ProjectActivity] = [:]
+        for (name, value) in activity { byPath["/p/\(name)"] = value }
+        let rows = names.map { name -> SwitcherRow in
+            let project = TestFixtures.project(path: "/p/\(name)", rootName: name)
+            return SwitcherRow(id: "project:\(project.path)",
+                               kind: .project,
+                               displayName: name,
+                               colorHex: project.colorHex,
+                               project: project,
+                               window: nil,
+                               sessions: [],
+                               state: nil,
+                               stateCount: 0,
+                               activeSubagents: 0,
+                               subagentDescriptions: [],
+                               chatTopic: nil,
+                               model: nil,
+                               contextUsedTokens: nil,
+                               contextLimitTokens: nil,
+                               lastActivity: nil)
+        }
+        return DataSource.ranked(rows, activity: byPath).map(\.displayName)
+    }
+
+    /// The reason the window is hard rather than a decayed sum: a project with
+    /// a big enough past would otherwise sit near the top forever. The whole of
+    /// this user's session history currently fits inside one month, so this case
+    /// cannot be observed on live data and only a test pins it.
+    func testAFewRecentSessionsBeatALargeOldPile() {
+        XCTAssertEqual(ranked(["ancient", "fresh"],
+                              ["ancient": ProjectActivity(recentSessions: 0, lastSession: daysAgo(200)),
+                               "fresh": ProjectActivity(recentSessions: 3, lastSession: daysAgo(1))]),
+                       ["fresh", "ancient"])
+    }
+
+    func testMoreSessionsInTheWindowWins() {
+        XCTAssertEqual(ranked(["small", "big", "middle"],
+                              ["small": ProjectActivity(recentSessions: 7, lastSession: daysAgo(3)),
+                               "big": ProjectActivity(recentSessions: 64, lastSession: daysAgo(0)),
+                               "middle": ProjectActivity(recentSessions: 31, lastSession: daysAgo(3))]),
+                       ["big", "middle", "small"])
+    }
+
+    func testAnEqualCountGoesToTheFreshestSession() {
+        XCTAssertEqual(ranked(["stale", "recent"],
+                              ["stale": ProjectActivity(recentSessions: 3, lastSession: daysAgo(6)),
+                               "recent": ProjectActivity(recentSessions: 3, lastSession: daysAgo(1))]),
+                       ["recent", "stale"])
+    }
+
+    /// Nothing inside the window sinks below everything that has something, and
+    /// the sunk rows are ordered by the newest session they ever had. A project
+    /// that never hosted one at all goes below those, in the directory-mtime
+    /// order the index handed over.
+    func testProjectsWithNothingInTheWindowSink() {
+        XCTAssertEqual(ranked(["never-a", "old", "never-b", "older", "live"],
+                              ["old": ProjectActivity(recentSessions: 0, lastSession: daysAgo(40)),
+                               "older": ProjectActivity(recentSessions: 0, lastSession: daysAgo(90)),
+                               "live": ProjectActivity(recentSessions: 1, lastSession: daysAgo(2))]),
+                       ["live", "old", "older", "never-a", "never-b"])
+    }
+
+    /// With no activity known at all — the default the pure `assemble` is called
+    /// with in tests — the rows come back exactly as they arrived.
+    func testNoActivityLeavesTheOrderAlone() {
+        XCTAssertEqual(ranked(["a", "b", "c"], [:]), ["a", "b", "c"])
+    }
+}
+
+/// Counting a project's sessions on disk: one `*.jsonl` per session in
+/// `~/.claude/projects/<slug>/`, the mtime of each being its last activity.
+final class ProjectActivityTests: XCTestCase {
+
+    func testCountsOnlyTheSessionsInsideTheWindow() throws {
+        let root = try makeTemporaryDirectory()
+        let path = "/Users/x/Data/Projects/ukuetis_panel_fw"
+        let now = Date()
+        try makeSessions(in: root, forPath: path,
+                         mtimes: [0.5, 3, 12, 45, 400].map { now.addingTimeInterval(-$0 * 86_400) })
+
+        let activity = ClaudeSessions.activity(forPath: path, windowDays: 30, now: now,
+                                               projectsDirectory: root)
+        XCTAssertEqual(activity.recentSessions, 3)
+        // `lastSession` is the newest of *any* age, which is what orders the
+        // projects that have nothing inside the window.
+        XCTAssertEqual(activity.lastSession?.timeIntervalSince(now) ?? 0, -0.5 * 86_400, accuracy: 1)
+    }
+
+    /// The count is cached against the directory's mtime, and starting a session
+    /// writes a new file into it — which is exactly what moves that mtime.
+    func testANewSessionInvalidatesTheCachedCount() throws {
+        let root = try makeTemporaryDirectory()
+        let path = "/Users/x/Data/Projects/glazy_solver"
+        let now = Date()
+        try makeSessions(in: root, forPath: path, mtimes: [now.addingTimeInterval(-3600)])
+        XCTAssertEqual(ClaudeSessions.activity(forPath: path, windowDays: 30, now: now,
+                                               projectsDirectory: root).recentSessions, 1)
+
+        try makeSessions(in: root, forPath: path, mtimes: [now])
+        XCTAssertEqual(ClaudeSessions.activity(forPath: path, windowDays: 30, now: now,
+                                               projectsDirectory: root).recentSessions, 2)
+    }
+
+    /// A project that never hosted a session has no directory here at all, and
+    /// some directories that do exist hold no transcript — worktree snapshots,
+    /// sessions since deleted. Both are ordinary.
+    func testAMissingOrEmptyDirectoryIsNotAnError() throws {
+        let root = try makeTemporaryDirectory()
+        XCTAssertEqual(ClaudeSessions.activity(forPath: "/Users/x/never", windowDays: 30,
+                                               projectsDirectory: root),
+                       ProjectActivity())
+
+        let path = "/Users/x/empty"
+        let directory = root.appendingPathComponent(ClaudeSessions.slug(forPath: path))
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("sub"),
+                                                withIntermediateDirectories: true)
+        XCTAssertEqual(ClaudeSessions.activity(forPath: path, windowDays: 30,
+                                               projectsDirectory: root),
+                       ProjectActivity())
+    }
+
+    private func makeSessions(in projectsDirectory: URL, forPath path: String, mtimes: [Date]) throws {
+        let fileManager = FileManager.default
+        let directory = projectsDirectory.appendingPathComponent(ClaudeSessions.slug(forPath: path))
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        for mtime in mtimes {
+            let file = directory.appendingPathComponent("\(UUID().uuidString).jsonl")
+            try Data().write(to: file)
+            try fileManager.setAttributes([.modificationDate: mtime], ofItemAtPath: file.path)
+        }
+        // The mtime a fresh write leaves on the directory can land inside the
+        // same instant as the previous read, and then the cache key has not
+        // moved. Pushing it forward makes the invalidation the test's subject
+        // rather than the clock's.
+        try fileManager.setAttributes([.modificationDate: Date().addingTimeInterval(5)],
+                                      ofItemAtPath: directory.path)
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vscode-switcher-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
     }
 }
 
@@ -1075,6 +1250,18 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.panelWidth, 420)
         XCTAssertEqual(config.editorBundleID, Config.default.editorBundleID)
         XCTAssertEqual(config.projectRoots, Config.default.projectRoots)
+    }
+
+    func testTheActivityWindowIsTunableAndRejectsNonsense() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vscode-switcher-config-\(UUID().uuidString).json")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+
+        try #"{"activityWindowDays": 7}"#.write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(Config.load(from: url).activityWindowDays, 7)
+
+        try #"{"activityWindowDays": 0}"#.write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(Config.load(from: url).activityWindowDays, Config.default.activityWindowDays)
     }
 
     func testTildeExpansion() {

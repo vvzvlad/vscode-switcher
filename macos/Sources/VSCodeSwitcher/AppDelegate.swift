@@ -160,6 +160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let contents: [String: Any] = [
                 "projectRoots": config.projectRoots,
                 "scanDepth": config.scanDepth,
+                "activityWindowDays": config.activityWindowDays,
                 "dwellMilliseconds": config.dwellMilliseconds,
                 "panelWidth": config.panelWidth,
                 "panelHeightFraction": config.panelHeightFraction,

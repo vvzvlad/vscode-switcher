@@ -102,6 +102,16 @@ struct ProjectInfo: Sendable, Codable, Identifiable, Hashable {
     var mtime: Date
 }
 
+/// How much Claude Code work a project has seen, which is what orders the
+/// projects that have no window of their own.
+struct ProjectActivity: Sendable, Equatable {
+    /// Sessions whose transcript was last written inside the activity window.
+    var recentSessions: Int = 0
+    /// When the newest session of this project was last written, of any age.
+    /// Breaks ties, and orders the projects with nothing inside the window.
+    var lastSession: Date?
+}
+
 /// A VSCode window as reported by the Accessibility API.
 ///
 /// Deliberately free of `AXUIElement` so the model stays `Sendable`: the element

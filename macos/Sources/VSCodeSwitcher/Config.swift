@@ -11,6 +11,9 @@ struct Config: Sendable, Equatable {
     var projectRoots: [String]
     /// How deep below each root a project directory may sit. 1 = direct children.
     var scanDepth: Int
+    /// How far back the "projects" section counts Claude Code sessions when it
+    /// ranks projects by how much work has happened in them lately.
+    var activityWindowDays: Int
     /// How long the pointer has to rest against the screen edge before the panel opens.
     var dwellMilliseconds: Int
     /// Panel width in points.
@@ -31,6 +34,7 @@ struct Config: Sendable, Equatable {
     static let `default` = Config(
         projectRoots: ["~/Data/Projects"],
         scanDepth: 2,
+        activityWindowDays: 30,
         dwellMilliseconds: 150,
         panelWidth: 380,
         panelHeightFraction: 0.7,
@@ -74,6 +78,9 @@ struct Config: Sendable, Equatable {
         }
         if let value = dict["scanDepth"] as? Int, value > 0 {
             config.scanDepth = value
+        }
+        if let value = dict["activityWindowDays"] as? Int, value > 0 {
+            config.activityWindowDays = value
         }
         if let value = dict["dwellMilliseconds"] as? Int, value >= 0 {
             config.dwellMilliseconds = value
