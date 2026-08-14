@@ -84,12 +84,13 @@ fields=$(printf '%s' "$payload" | "$JQ" -r '
 		((.message // .notification // .title // "") | s),
 		((.reason // .stop_reason // "") | s),
 		((.transcript_path // .transcriptPath // "") | s),
-		((.tool_name // .toolName // "") | s)
+		((.tool_name // .toolName // "") | s),
+		((.agent_id // .agentId // "") | s)
 	] | join([31] | implode)
 ' 2>/dev/null)
 [ -z "$fields" ] && exit 0
 
-IFS=$'\037' read -r session_id cwd event notif_type message reason transcript tool_name <<EOF
+IFS=$'\037' read -r session_id cwd event notif_type message reason transcript tool_name agent_id <<EOF
 $fields
 EOF
 
@@ -187,18 +188,41 @@ if [ -s "$target" ]; then
 	prev=$("$JQ" -c 'if type == "object" then . else null end' "$target" 2>/dev/null)
 	[ -z "$prev" ] && prev="null"
 fi
-prev_state=$(printf '%s' "$prev" | "$JQ" -r '.state // ""' 2>/dev/null)
+IFS=$'\037' read -r prev_state prev_wait_tool prev_wait_agent <<EOF
+$(printf '%s' "$prev" | "$JQ" -r '[(.state // ""), (.waitTool // ""), (.waitAgent // "")] | join([31] | implode)' 2>/dev/null)
+EOF
 
 # PostToolUse ends a wait and nothing else. The fast path above already exits
 # for any other case, but that path matches a literal string in the payload, and
 # correctness must not hang off the CLI's JSON spacing: with the match missed,
 # every tool call would land here, and an async PostToolUse delivered after the
 # `Stop` it preceded would turn an answered chat back into a working one.
+#
+# And it ends *its own* wait. A session is one `session_id` but many agents:
+# every background subagent's tool call arrives here under the parent's
+# `session_id`, with its own `agent_id`. Caught in the wild: the main agent had
+# an `AskUserQuestion` dialog on screen and a subagent's `Bash` finished, which
+# cleared it — the yellow chip vanished while the question was still waiting for
+# an answer. `question` would come back from the transcript ninety seconds
+# later, but `permission` is invisible to the transcript, so a wait cleared by
+# mistake never comes back at all.
+#
+# `PermissionRequest` carries no `tool_use_id`, so the wait is keyed on the pair
+# that it does carry: which agent asked and which tool it asked for. An absent
+# `agent_id` is not "unknown" — it is how the session's own top-level agent
+# looks, in every payload captured — so both sides being empty is a match, and
+# only then. A wait with no tool recorded (one raised by `Notification`, or by
+# an older version of this script) is never cleared here: `Stop` and
+# `UserPromptSubmit` still clear it, and holding an orange indicator too long
+# beats dropping it while the dialog is up.
 if [ "$event" = "PostToolUse" ]; then
 	case "$prev_state" in
 	permission | question) ;;
 	*) exit 0 ;;
 	esac
+	[ -z "$prev_wait_tool" ] && exit 0
+	[ "$prev_wait_tool" = "$tool_name" ] || exit 0
+	[ "$prev_wait_agent" = "$agent_id" ] || exit 0
 fi
 
 # A Notification never clears a permission or question wait. `idle_prompt` only
@@ -235,6 +259,8 @@ tmp="$STATUS_DIR/.tmp.$session_id.$$"
 	--arg message "$message" \
 	--arg reason "$reason" \
 	--arg transcript "$transcript" \
+	--arg toolName "$tool_name" \
+	--arg agentId "$agent_id" \
 	--argjson ts "$(date +%s)" \
 	'
 	# A record older than the one already on disk is dropped: a delayed
@@ -256,6 +282,19 @@ tmp="$STATUS_DIR/.tmp.$session_id.$$"
 	   state: $state,
 	   event: $event,
 	   ts: $ts}
+	  # Who is waiting and for what, so that PostToolUse can tell its own tool
+	  # from one belonging to a background subagent. A PermissionRequest opens
+	  # a new wait and names it; any later event that keeps the state a wait
+	  # (the Notification trailing six seconds behind, for one) has to carry
+	  # the name along, or the wait left behind could never be cleared by the
+	  # tool it belongs to. Anything that ends the wait drops both fields.
+	  + (if $event == "PermissionRequest"
+	     then (if $toolName == "" then {} else {waitTool: $toolName} end)
+	          + (if $agentId == "" then {} else {waitAgent: $agentId} end)
+	     elif $state == "permission" or $state == "question"
+	     then (if ($prev.waitTool // "") == "" then {} else {waitTool: $prev.waitTool} end)
+	          + (if ($prev.waitAgent // "") == "" then {} else {waitAgent: $prev.waitAgent} end)
+	     else {} end)
 	  + (if $message == "" then {} else {message: $message} end)
 	  + (if $notificationType == "" then {} else {notificationType: $notificationType} end)
 	  + (if $reason == "" then {} else {reason: $reason} end)
