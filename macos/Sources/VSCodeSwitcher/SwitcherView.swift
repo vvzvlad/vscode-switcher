@@ -657,15 +657,20 @@ struct RowMetrics: View {
 
     var body: some View {
         HStack(spacing: Self.spacing) {
-            // `lineLimit` and `fixedSize` together are what make a count too big
-            // for the slot draw *in full*, spilling left into the gap: without
-            // them the number wrapped inside the 15 pt frame instead, so a
-            // hypothetical 123 came out as "12" over "3". Measured, not
-            // eyeballed — see `RowMetricsLayoutTests`.
+            // `fixedSize` is the one modifier that makes a count too big for the
+            // slot draw *in full*, spilling left into the gap: it proposes the
+            // text its ideal width, and the 15 pt frame then only places it.
+            // Drop it and the text takes the frame's width instead — a
+            // hypothetical 123 comes out as a bare ellipsis, the number gone
+            // altogether; drop a line limit along with it and the text wraps,
+            // "12" over "3", and the block grows from 13 pt tall to 26.
+            // A `lineLimit(1)` next to `fixedSize` cannot change any of that —
+            // ideal width is one line by construction, measured to the same ink
+            // either way — so there is none. Measured, not eyeballed:
+            // `RowMetricsLayoutTests`.
             Text(count > 0 ? "\(count)" : "")
                 .font(.system(size: 10, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
                 .frame(width: Self.countWidth, alignment: .trailing)
             // The badge draws itself in a box of its own — empty box included,

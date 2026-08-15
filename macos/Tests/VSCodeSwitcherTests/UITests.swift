@@ -852,9 +852,16 @@ final class RowMetricsLayoutTests: XCTestCase {
     }
 
     /// A count too wide for its slot draws in full and spills left into the gap,
-    /// rather than wrapping onto a second line. Without `fixedSize` the `Text`
-    /// wrapped instead: `123` came out as `12` over `3`, and the block grew from
-    /// one line to two.
+    /// rather than being cut short or wrapped onto a second line. In full it is
+    /// ink 16.0…33.75, four points past the left edge of its own slot.
+    ///
+    /// Both ways of losing it were measured on `123` in the 15 pt slot, and it
+    /// takes both assertions below to catch them. Drop `fixedSize` and the text
+    /// wraps to `12` over `3` — ink 22.0…33.75, block 26 pt tall instead of 13:
+    /// the height catches that one. Put a `lineLimit(1)` back on top of that and
+    /// it is truncated to a bare ellipsis instead — ink 26.5…33.75 on a block
+    /// still 13 pt tall, so the height says nothing and only the left edge does.
+    /// That second shape is why the height assertion is not the whole test.
     func testACountTooWideForItsSlotSpillsLeftInsteadOfWrapping() throws {
         let twoDigits = try render(status: .done, count: 12)
         let threeDigits = try render(status: .done, count: 123)
