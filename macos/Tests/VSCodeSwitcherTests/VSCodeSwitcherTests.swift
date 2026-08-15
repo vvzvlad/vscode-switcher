@@ -499,8 +499,15 @@ final class RowStatusTests: XCTestCase {
     func testEveryAssembledRowTakesItsSubagentsFromItsOwnChats() throws {
         var busy = TestFixtures.session(id: "s1", cwd: "/p/open", state: .working)
         busy.activeSubagents = 3
+        // Two chats in one row, carrying different numbers, so that their sum is
+        // neither the larger of them nor the first: 2 + 5 = 7 tells all three
+        // apart. With one chat per row it told none of them apart — measured by
+        // mutation, replacing the sum inside `aggregate` with a maximum passed
+        // the entire suite.
         var headless = TestFixtures.session(id: "s2", cwd: "/p/headless", state: .idle)
         headless.activeSubagents = 2
+        var headlessTwin = TestFixtures.session(id: "s4", cwd: "/p/headless", state: .idle)
+        headlessTwin.activeSubagents = 5
         var orphan = TestFixtures.session(id: "s3", cwd: "/elsewhere/thing", state: .working)
         orphan.activeSubagents = 1
 
@@ -513,10 +520,12 @@ final class RowStatusTests: XCTestCase {
             // row this invariant is really about.
             windows: [TestFixtures.window(index: 0, title: "\u{0438}\u{043d}\u{0430}\u{044f} \u{0442}\u{0435}\u{043c}\u{0430} \u{2014} open (Workspace)"),
                       TestFixtures.window(index: 1, title: "topic s1 \u{2014} open (Workspace)")],
-            sessions: [busy, headless, orphan],
+            sessions: [busy, headless, headlessTwin, orphan],
             accessibilityTrusted: true)
 
-        let rows = snapshot.openWindows + snapshot.projects
+        // `rows` rather than the two lists by hand: a third list would then be
+        // covered too instead of quietly skipped.
+        let rows = snapshot.rows
         for row in rows {
             XCTAssertEqual(row.activeSubagents,
                            DataSource.aggregate(row.sessions).activeSubagents,
@@ -536,6 +545,15 @@ final class RowStatusTests: XCTestCase {
         XCTAssertTrue(snapshot.projects.contains { $0.sessions.isEmpty }, "no chat-less project row")
         XCTAssertTrue(snapshot.projects.contains { $0.id.hasPrefix("cwd:") }, "no orphan row")
         XCTAssertTrue(rows.contains { $0.activeSubagents > 0 }, "no subagents in the snapshot")
+        // And the row with two chats says 7, which is the sum and nothing else.
+        // The loop above compares the row against `aggregate`, so it holds just
+        // as well if both become a maximum; only a literal pins the addition —
+        // and with the number now in the title line, next to the name, it is the
+        // most visible thing on the row.
+        let twoChats = try XCTUnwrap(snapshot.projects.first { $0.displayName == "headless" })
+        XCTAssertEqual(twoChats.sessions.count, 2)
+        XCTAssertEqual(twoChats.activeSubagents, 7)
+        XCTAssertEqual(twoChats.activeCount, 7)
     }
 
     /// But a single idle chat is something to report, and it reports "asleep" —
