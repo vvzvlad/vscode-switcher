@@ -370,6 +370,19 @@ printf '{"sessionId":"%s","state":"work' "$SESSION" >"$(STATE_FILE)"
 send "$(payload Stop)"
 check "state" "$(state)" "waiting"
 
+start "a whole record with junk after it does not block the write"
+# The nastiest of the damaged shapes, because it half-parses: jq prints the
+# object *and* exits non-zero, while `--slurpfile` on the same file is fatal. A
+# hook that went by the printed object alone would write nothing — and, the file
+# being unchanged and still half-parsing, would write nothing on every later
+# event either, freezing the record until SessionEnd with an orange indicator
+# that no Stop could take off.
+printf '{"sessionId":"%s","cwd":"/tmp/project","state":"permission","event":"PermissionRequest","waits":[{"tool":"Bash","agent":"","state":"permission"}],"ts":1} JUNK' \
+	"$SESSION" >"$(STATE_FILE)"
+send "$(payload Stop)"
+check "state" "$(state)" "waiting"
+check "and the stale wait is gone with it" "$(has_waits)" "false"
+
 start "empty stdin is a no-op"
 printf '' | bash "$HOOK"
 check "exit code" "$?" "0"

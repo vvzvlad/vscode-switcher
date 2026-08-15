@@ -222,7 +222,18 @@ if [ -s "$target" ]; then
 	# `null.cwd` is valid jq and yields null, while `[1,2].cwd` is a fatal
 	# error that would take the whole program — and with it the new state —
 	# down with it.
-	prev=$("$JQ" -c 'if type == "object" then . else null end' "$target" 2>/dev/null)
+	#
+	# The exit status is checked and not just the output, because one shape
+	# separates the two: a whole object followed by trailing junk makes jq
+	# print the object *and* fail, while the same file is fatal to the
+	# `--slurpfile` below. Keeping the printed object would pick the slurpfile
+	# branch, the writer would produce nothing, and — since the file is still
+	# there and still parses this far next time — nothing would ever be
+	# written again: a record frozen for the rest of the session, holding an
+	# orange indicator no `Stop` can take off. Treating it as no previous
+	# record at all sends it down the empty-stream branch, which heals the
+	# file on the first write.
+	prev=$("$JQ" -c 'if type == "object" then . else null end' "$target" 2>/dev/null) || prev="null"
 	[ -z "$prev" ] && prev="null"
 fi
 # One session can have several waits open at once, so the record carries a
