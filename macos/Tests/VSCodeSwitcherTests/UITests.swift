@@ -814,6 +814,16 @@ final class RowMetricsLayoutTests: XCTestCase {
     /// The containment half is a canary rather than the requirement: `frame`
     /// does not clip, so a glyph that outgrew the box would spill into the gap
     /// without moving the slot. Worth hearing about all the same.
+    ///
+    /// And it is a canary with very little room: measured in the 40…54 slot,
+    /// `hand.raised.fill` 42.75…51.5, `checkmark.circle.fill` and
+    /// `moon.zzz.fill` 41.5…52.5, `arrow.triangle.2.circlepath` 40.25…53.5 —
+    /// a quarter of a point from the left edge of the box. Half a point of
+    /// glyph drift in an SF Symbols or macOS update breaks this line with
+    /// nothing changed in the repository. If it fails on the containment
+    /// assertions alone while the midpoints still agree, that is the OS having
+    /// moved, not the layout: widen the box (and `RowMetrics.totalWidth` with
+    /// it) rather than hunting for a regression that is not there.
     func testEveryGlyphSitsInTheSameSlot() throws {
         var midpoints: [Double] = []
         for status in RowStatus.allCases {
@@ -844,11 +854,26 @@ final class RowMetricsLayoutTests: XCTestCase {
     /// the real panel width, with the list's padding around it. The indicator
     /// lands in the last 14 pt before the row's trailing padding — 353…367 in a
     /// 380 pt panel — for every status and every count.
+    ///
+    /// Containment alone does not say "the same place": the four glyphs are
+    /// right-aligned against one edge, so all of them fit inside 353…367 even
+    /// with the fixed box gone and the block's own width wandering by 4 pt —
+    /// this test passed in that state, which is what the midpoint check below
+    /// is for. Measured 359.875 / 360.0 / 360.125 against a slot midpoint of
+    /// 360, so 0.375 of the tolerance is spare.
+    ///
+    /// It is not the net for the box either, and is not meant to be: without it
+    /// the midpoints only drift to 360.25…360.5, which ±0.5 still admits. Three
+    /// tests above fail on that, and the tolerance stays where the isolated test
+    /// put it — loose enough not to call an SF Symbols update a regression, and
+    /// still tight enough for what it is here for: a 1 pt nudge of the slot
+    /// fails it for the narrow moon, whose ink goes on fitting the bounds.
     func testTheIndicatorIsInTheSamePlaceInAWholeRowAtPanelWidth() throws {
         let panelWidth = Config.default.panelWidth
         // `LazyVStack` pads the list by 6 and the row pads itself by 7.
         let slotEnd = panelWidth - 6 - 7
         let slot = (slotEnd - Double(StatusBadge.boxWidth))...slotEnd
+        let slotMidpoint = (slot.lowerBound + slot.upperBound) / 2
 
         for status in RowStatus.allCases {
             // A sleeping row cannot have a subagent running under it — that is
@@ -860,6 +885,8 @@ final class RowMetricsLayoutTests: XCTestCase {
                                           "\(status) subagents=\(subagents)")
                 XCTAssertGreaterThanOrEqual(badge.lowerBound, slot.lowerBound, "\(status) subagents=\(subagents)")
                 XCTAssertLessThanOrEqual(badge.upperBound, slot.upperBound, "\(status) subagents=\(subagents)")
+                XCTAssertEqual((badge.lowerBound + badge.upperBound) / 2, slotMidpoint, accuracy: 0.5,
+                               "\(status) subagents=\(subagents)")
             }
         }
     }
