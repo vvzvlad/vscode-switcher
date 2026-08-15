@@ -53,6 +53,13 @@ case $head in
 		[ -s "$probe" ] || exit 0
 		current=""
 		read -r -d '' current <"$probe" 2>/dev/null
+		# The match runs over the whole file, and `"state": "permission"` also
+		# occurs inside every element of `waits`. It cannot fire falsely on
+		# those: the top-level `state` is the maximum over the list and the key
+		# is left out while the list is empty, so a nested occurrence only ever
+		# exists in a record whose top-level state already matches. Nothing
+		# rests on that invariant anyway — a false positive costs the slow path,
+		# which then exits on the `prev_state` guard below.
 		case "$current" in
 		*'"state": "permission"'* | *'"state":"permission"'* | \
 			*'"state": "question"'* | *'"state":"question"'*) ;;

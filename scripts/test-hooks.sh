@@ -311,6 +311,22 @@ send "$(payload PermissionRequest '"tool_name":"Bash"')"
 printf '{"session_id": "%s", "cwd": "/tmp/project", "hook_event_name": "PostToolUse", "tool_name": "Bash"}' "$SESSION" | bash "$HOOK"
 check "state" "$(state)" "working"
 
+start "a waits list does not confuse the fast path"
+# The early exit matches `"state": "permission"` over the whole file, and that
+# string sits inside every element of `waits` too. The top-level state is the
+# maximum over the list and the key is left out while the list is empty, so a
+# nested hit only ever occurs in a record whose top-level state already matches
+# — but the record has to survive either way, and a real wait must still pass.
+printf '{"sessionId":"%s","cwd":"/tmp/project","state":"working","event":"UserPromptSubmit","waits":[{"tool":"Bash","agent":"","state":"permission"}],"ts":1}' \
+	"$SESSION" >"$(STATE_FILE)"
+send "$(payload PostToolUse '"tool_name":"Bash"')"
+check "a nested permission does not revive a finished turn" "$(state)" "working"
+check "and nothing is rewritten" "$(field event)" "UserPromptSubmit"
+printf '{"sessionId":"%s","cwd":"/tmp/project","state":"permission","event":"PermissionRequest","waits":[{"tool":"Bash","agent":"","state":"permission"}],"ts":1}' \
+	"$SESSION" >"$(STATE_FILE)"
+send "$(payload PostToolUse '"tool_name":"Bash"')"
+check "a real wait still goes through" "$(state)" "working"
+
 start "an event name past the head window still takes the slow path"
 # The fast path only looks at the first 2048 bytes; a payload that hides the
 # event name behind a longer prefix has to stay correct, just slower.
