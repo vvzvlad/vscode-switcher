@@ -97,8 +97,8 @@ enum ConsoleDump {
                 print("      sessions:  \(row.sessions.count)")
                 for session in row.sessions {
                     let context = session.contextUsedTokens.map { "\($0 / 1000)k" } ?? "-"
-                    print("        - \(session.state.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))"
-                        + " src=\(session.stateSource.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))"
+                    print("        - \(column(session.state.rawValue, 10))"
+                        + " src=\(column(session.stateSource.rawValue, 10))"
                         + " pid=\(session.pid) ctx=\(context) sub=\(session.activeSubagents)"
                         + " \(shorten(session.topic, 46))")
                 }
@@ -122,10 +122,21 @@ enum ConsoleDump {
             // The indicator is printed here too, because this is where the rule
             // "no chat, no subagent, no icon" is worth seeing: most of this
             // section is projects nobody has run an agent in.
-            print("  - \(row.displayName.padding(toLength: 34, withPad: " ", startingAt: 0)) \(row.colorHex)"
-                + "  \(indicator(row).padding(toLength: 12, withPad: " ", startingAt: 0))"
-                + "  \(workspace.padding(toLength: 9, withPad: " ", startingAt: 0))  \(activity(row, config: config))")
+            print("  - \(column(shorten(row.displayName, 34), 34)) \(row.colorHex)"
+                + "  \(column(indicator(row), 12))"
+                + "  \(column(workspace, 9))  \(activity(row, config: config))")
         }
+    }
+
+    /// Pads a cell to the column width, and never cuts it short.
+    ///
+    /// `String.padding(toLength:)` truncates whatever is longer than the length
+    /// it is given, silently: `attention 100` used to print as `attention 10`,
+    /// which is a diagnostic dump lying about the number it exists to report.
+    /// Anything that genuinely has to be cut is cut visibly, by `shorten`.
+    private static func column(_ text: String, _ width: Int) -> String {
+        guard text.count < width else { return text }
+        return text + String(repeating: " ", count: width - text.count)
     }
 
     /// Sessions inside the activity window and the age of the newest one — the

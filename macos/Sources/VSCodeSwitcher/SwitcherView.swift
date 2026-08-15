@@ -496,35 +496,8 @@ struct SwitcherRowView: View {
 
     private var subtitle: String? { Self.rowSubtitle(row) }
 
-    /// Two fixed columns on the right: how much is running, then the one
-    /// indicator saying what the window wants.
-    ///
-    /// Both slots keep their width whether or not they have anything in them,
-    /// so the indicator sits at the same x in every row of the list. Chips
-    /// packed side by side moved it left and right from row to row depending on
-    /// what each row happened to hold, and a column that will not hold still
-    /// cannot be scanned.
-    ///
-    /// The per-state breakdown that used to be here is gone on purpose: what is
-    /// wanted from a window is one answer, not a census of its chats. The
-    /// census is in the tooltip, and so are the context percentage and the model
-    /// — those belong to *one* chat, and standing next to numbers that count
-    /// them all was exactly what confused the block.
     private var metrics: some View {
-        HStack(spacing: 5) {
-            // Two digits wide. The busiest window on this machine runs five or
-            // six subagents, so a third digit would widen every row in the list
-            // for a case that does not happen; a count that outgrows the slot
-            // still draws in full, it only eats into the gap.
-            Text(row.activeCount > 0 ? "\(row.activeCount)" : "")
-                .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .frame(width: 15, alignment: .trailing)
-            // The badge draws itself in a box of its own — empty box included,
-            // for a row with nothing to report — so this slot needs no width of
-            // its own: one place decides it, and the two cannot drift apart.
-            StatusBadge(status: row.status, panelVisible: panelVisible)
-        }
+        RowMetrics(status: row.status, count: row.activeCount, panelVisible: panelVisible)
     }
 
     /// Hover deepens the frontmost highlight instead of replacing it: swapping
@@ -633,6 +606,60 @@ struct SwitcherRowView: View {
     }
 }
 
+// MARK: - Right-hand columns
+
+/// Two fixed columns on the right of every row: how much is running, then the
+/// one indicator saying what the window wants.
+///
+/// Both slots keep their width whether or not they have anything in them, so the
+/// indicator sits at the same x in every row of the list. Chips packed side by
+/// side moved it left and right from row to row depending on what each row
+/// happened to hold, and a column that will not hold still cannot be scanned.
+///
+/// The per-state breakdown that used to be here is gone on purpose: what is
+/// wanted from a window is one answer, not a census of its chats. The census is
+/// in the tooltip, and so are the context percentage and the model — those
+/// belong to *one* chat, and standing next to numbers that count them all was
+/// exactly what confused the block.
+///
+/// Split out of `SwitcherRowView` so the layout test can render the block the
+/// panel actually draws rather than a copy of it: the fixed columns are the
+/// whole point of this round, and a test of a replica proves nothing about the
+/// original.
+struct RowMetrics: View {
+    let status: RowStatus?
+    let count: Int
+    var panelVisible: Bool = true
+
+    /// Two digits wide. The busiest window on this machine runs five or six
+    /// subagents, so a third digit would widen every row in the list for a case
+    /// that does not happen.
+    static let countWidth: CGFloat = 15
+    static let spacing: CGFloat = 5
+    /// What the block measures, whatever is in it. Pinned by a test.
+    static var totalWidth: CGFloat { countWidth + spacing + StatusBadge.boxWidth }
+
+    var body: some View {
+        HStack(spacing: Self.spacing) {
+            // `lineLimit` and `fixedSize` together are what make a count too big
+            // for the slot draw *in full*, spilling left into the gap: without
+            // them the number wrapped inside the 15 pt frame instead, so a
+            // hypothetical 123 came out as "12" over "3". Measured, not
+            // eyeballed — see `RowMetricsLayoutTests`.
+            Text(count > 0 ? "\(count)" : "")
+                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(width: Self.countWidth, alignment: .trailing)
+            // The badge draws itself in a box of its own — empty box included,
+            // for a row with nothing to report — so this slot needs no width of
+            // its own: one place decides it, and the two cannot drift apart.
+            StatusBadge(status: status, panelVisible: panelVisible)
+        }
+    }
+}
+
 // MARK: - Status badge
 
 /// The row's single indicator: what the window wants, folded from every chat and
@@ -647,6 +674,11 @@ struct StatusBadge: View {
     let status: RowStatus?
     /// The badge is on screen. See `pulseState`.
     var panelVisible: Bool = true
+
+    /// The slot every glyph is centred in, and the empty case holds. Pinned by
+    /// a test, and quoted by `RowMetrics.totalWidth`.
+    static let boxWidth: CGFloat = 14
+    static let boxHeight: CGFloat = 12
 
     @State private var pulsing = false
 
@@ -676,11 +708,13 @@ struct StatusBadge: View {
                 Color.clear
             }
         }
-        // A fixed box, because the three glyphs are not the same width — the
-        // sleeping moon is wider than the tick — and because the empty case has
-        // to hold the same ground. Without it the indicator would sit at a
-        // different x in every row, which is the whole complaint this answers.
-        .frame(width: 14, height: 12)
+        // A fixed box, because the four glyphs are not the same size — measured
+        // at 11 pt semibold, the moon is the narrowest of them and also three
+        // points taller than the box, which it simply overhangs — and because
+        // the empty case has to hold the same ground. Without it the indicator
+        // would sit at a different x in every row, which is the whole complaint
+        // this answers.
+        .frame(width: Self.boxWidth, height: Self.boxHeight)
         .opacity(pulsing ? 0.35 : 1)
         .scaleEffect(pulsing ? 0.86 : 1)
         // The one thing that actually *stops* a `repeatForever`. Writing

@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import VSCodeSwitcher
 
@@ -626,6 +627,245 @@ final class StatusBadgeTests: XCTestCase {
         XCTAssertTrue(model.panelVisible)
         model.panelDidHide()
         XCTAssertFalse(model.panelVisible)
+    }
+}
+
+/// The requirement this whole round exists for, measured rather than eyeballed:
+/// the indicator keeps the same place in every row, whatever else the row holds.
+///
+/// `RowMetrics` is rendered for real — the block the panel draws, not a copy —
+/// and the ink is read back off the bitmap. Everything is checked in points at
+/// scale 4, so a quarter of a point is visible.
+@MainActor
+final class RowMetricsLayoutTests: XCTestCase {
+
+    /// Room to the left of the block, so a number too wide for its slot spills
+    /// into the canvas instead of being clipped by the render bounds.
+    private static let leftPad: CGFloat = 20
+    /// Where the number's slot ends and the badge's begins, measured from the
+    /// left edge of the canvas.
+    private static var badgeSlot: ClosedRange<Double> {
+        let start = Double(leftPad + RowMetrics.countWidth + RowMetrics.spacing)
+        return start...(start + Double(StatusBadge.boxWidth))
+    }
+    /// Middle of the gap between the two slots. The number is trailing-aligned
+    /// and can only ever spill left, so nothing of it reaches this far right and
+    /// nothing of the badge reaches this far left.
+    private static var split: Double { badgeSlot.lowerBound - Double(RowMetrics.spacing) / 2 }
+
+    private struct Rendered {
+        var size: CGSize
+        /// Columns carrying ink, in points from the left edge of the canvas.
+        var ink: [Double]
+
+        var span: ClosedRange<Double>? { ink.isEmpty ? nil : ink.min()!...ink.max()! }
+        func span(rightOf x: Double) -> ClosedRange<Double>? {
+            let columns = ink.filter { $0 >= x }
+            return columns.isEmpty ? nil : columns.min()!...columns.max()!
+        }
+        func span(leftOf x: Double) -> ClosedRange<Double>? {
+            let columns = ink.filter { $0 < x }
+            return columns.isEmpty ? nil : columns.min()!...columns.max()!
+        }
+    }
+
+    private func render(status: RowStatus?, count: Int) throws -> Rendered {
+        // `panelVisible: false` keeps the pulse out of it: `.task` never runs
+        // under `ImageRenderer`, but an animated opacity would be one more thing
+        // deciding what counts as ink.
+        try measure(RowMetrics(status: status, count: count, panelVisible: false)
+            .padding(.leading, Self.leftPad))
+    }
+
+    private func measure(_ view: some View) throws -> Rendered {
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 4
+        let image = try XCTUnwrap(renderer.nsImage, "ImageRenderer produced nothing")
+        let bitmap = try XCTUnwrap(renderer.cgImage)
+
+        let pixelWidth = bitmap.width, pixelHeight = bitmap.height
+        var pixels = [UInt8](repeating: 0, count: pixelWidth * pixelHeight * 4)
+        let context = try XCTUnwrap(CGContext(data: &pixels,
+                                              width: pixelWidth,
+                                              height: pixelHeight,
+                                              bitsPerComponent: 8,
+                                              bytesPerRow: pixelWidth * 4,
+                                              space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(bitmap, in: CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+
+        let scale = Double(pixelWidth) / Double(image.size.width)
+        var columns: [Double] = []
+        for x in 0..<pixelWidth {
+            var drawn = false
+            for y in 0..<pixelHeight {
+                let offset: Int = (y * pixelWidth + x) * 4 + 3
+                // Anything above the antialiasing floor counts as drawn.
+                if pixels[offset] > 8 {
+                    drawn = true
+                    break
+                }
+            }
+            if drawn { columns.append(Double(x) / scale) }
+        }
+        return Rendered(size: image.size, ink: columns)
+    }
+
+    /// A whole row at a given width, laid out the way the list lays it out, and
+    /// built the way the data layer builds one — the status comes out of a real
+    /// chat state, the number out of real subagents. Both names are long enough
+    /// to push against the right-hand columns, which is the case that used to
+    /// move them.
+    private func renderRow(status: RowStatus, subagents: Int, width: Double) throws -> Rendered {
+        let state: AgentState = switch status {
+        case .blocked: .question
+        case .done: .waiting
+        case .active: .working
+        case .asleep: .idle
+        }
+        var session = TestFixtures.session(id: "s", cwd: "/tmp/p", state: state)
+        session.activeSubagents = subagents
+        let aggregate = DataSource.aggregate([session])
+        let row = SwitcherRow(id: "window:1:w1",
+                              kind: .window,
+                              displayName: "проект с длинным именем, которое не влезает",
+                              colorHex: "#1857a4",
+                              project: nil,
+                              window: nil,
+                              sessions: [session],
+                              state: aggregate.state,
+                              activeSubagents: aggregate.activeSubagents,
+                              subagentDescriptions: aggregate.subagentDescriptions,
+                              chatTopic: "тема чата, тоже подлиннее строки",
+                              model: nil,
+                              contextUsedTokens: nil,
+                              contextLimitTokens: nil,
+                              lastActivity: nil)
+        XCTAssertEqual(row.status, status)
+
+        return try measure(SwitcherRowView(row: row, isFrontmost: false, panelVisible: false)
+            .padding(.horizontal, 6)
+            .frame(width: width))
+    }
+
+    private let counts = [0, 1, 12, 123]
+
+    /// The numbers themselves, in one place, so a change to any of them has to
+    /// be deliberate. 15 + 5 + 14 is what the whole block measures.
+    func testTheColumnWidthsAreWhatTheSpecSays() {
+        XCTAssertEqual(RowMetrics.countWidth, 15)
+        XCTAssertEqual(RowMetrics.spacing, 5)
+        XCTAssertEqual(StatusBadge.boxWidth, 14)
+        XCTAssertEqual(StatusBadge.boxHeight, 12)
+        XCTAssertEqual(RowMetrics.totalWidth, 34)
+    }
+
+    /// Nothing a row can hold changes the width of the block, so the badge slot
+    /// starts at the same distance from the right edge of every row.
+    func testTheBlockIsTheSameWidthWhateverIsInIt() throws {
+        for status in RowStatus.allCases.map(Optional.some) + [nil] {
+            for count in counts {
+                let rendered = try render(status: status, count: count)
+                XCTAssertEqual(rendered.size.width,
+                               Self.leftPad + RowMetrics.totalWidth,
+                               accuracy: 0.01,
+                               "status=\(status as Any) count=\(count)")
+            }
+        }
+    }
+
+    /// The point of the round: for a given indicator, the number beside it —
+    /// absent, one digit, two, or a third that does not fit — never moves it by
+    /// so much as a subpixel.
+    func testTheNumberNeverMovesTheIndicator() throws {
+        for status in RowStatus.allCases {
+            var seen: ClosedRange<Double>?
+            for count in counts {
+                let rendered = try render(status: status, count: count)
+                let badge = try XCTUnwrap(rendered.span(rightOf: Self.split),
+                                          "no indicator drawn for \(status) count=\(count)")
+                if let seen {
+                    XCTAssertEqual(badge.lowerBound, seen.lowerBound, accuracy: 0.01, "\(status) count=\(count)")
+                    XCTAssertEqual(badge.upperBound, seen.upperBound, accuracy: 0.01, "\(status) count=\(count)")
+                } else {
+                    seen = badge
+                }
+            }
+        }
+    }
+
+    /// And the four glyphs sit in the same slot as each other: each is centred
+    /// in the same 14 pt box, so their ink is inside it and shares a midpoint.
+    /// They are not the same width — that is exactly why the box is fixed.
+    ///
+    /// The containment half is a canary rather than the requirement: `frame`
+    /// does not clip, so a glyph that outgrew the box would spill into the gap
+    /// without moving the slot. Worth hearing about all the same.
+    func testEveryGlyphSitsInTheSameSlot() throws {
+        var midpoints: [Double] = []
+        for status in RowStatus.allCases {
+            let rendered = try render(status: status, count: 0)
+            let badge = try XCTUnwrap(rendered.span(rightOf: Self.split), "\(status)")
+            XCTAssertGreaterThanOrEqual(badge.lowerBound, Self.badgeSlot.lowerBound, "\(status) overflows left")
+            XCTAssertLessThanOrEqual(badge.upperBound, Self.badgeSlot.upperBound, "\(status) overflows right")
+            midpoints.append((badge.lowerBound + badge.upperBound) / 2)
+        }
+        let slotMidpoint = (Self.badgeSlot.lowerBound + Self.badgeSlot.upperBound) / 2
+        for midpoint in midpoints {
+            XCTAssertEqual(midpoint, slotMidpoint, accuracy: 0.5)
+        }
+    }
+
+    /// A row with nothing to report draws nothing in the slot, and the slot is
+    /// still there — that is what makes the empty case hold the column.
+    func testAnEmptySlotDrawsNothingAndStillHoldsItsGround() throws {
+        let empty = try render(status: nil, count: 0)
+        XCTAssertNil(empty.span, "an empty row drew something")
+        XCTAssertEqual(empty.size.width, Self.leftPad + RowMetrics.totalWidth, accuracy: 0.01)
+
+        let numberOnly = try render(status: nil, count: 3)
+        XCTAssertNil(numberOnly.span(rightOf: Self.split), "an empty slot drew something")
+    }
+
+    /// The same thing measured where the user sees it: a whole row, laid out at
+    /// the real panel width, with the list's padding around it. The indicator
+    /// lands in the last 14 pt before the row's trailing padding — 353…367 in a
+    /// 380 pt panel — for every status and every count.
+    func testTheIndicatorIsInTheSamePlaceInAWholeRowAtPanelWidth() throws {
+        let panelWidth = Config.default.panelWidth
+        // `LazyVStack` pads the list by 6 and the row pads itself by 7.
+        let slotEnd = panelWidth - 6 - 7
+        let slot = (slotEnd - Double(StatusBadge.boxWidth))...slotEnd
+
+        for status in RowStatus.allCases {
+            // A sleeping row cannot have a subagent running under it — that is
+            // the fold's own rule (§3.1), and the helper asserts it holds. Every
+            // count against every status is covered on `RowMetrics` above.
+            for subagents in (status == .asleep ? [0] : counts) {
+                let rendered = try renderRow(status: status, subagents: subagents, width: panelWidth)
+                let badge = try XCTUnwrap(rendered.span(rightOf: slot.lowerBound - Double(RowMetrics.spacing) / 2),
+                                          "\(status) subagents=\(subagents)")
+                XCTAssertGreaterThanOrEqual(badge.lowerBound, slot.lowerBound, "\(status) subagents=\(subagents)")
+                XCTAssertLessThanOrEqual(badge.upperBound, slot.upperBound, "\(status) subagents=\(subagents)")
+            }
+        }
+    }
+
+    /// A count too wide for its slot draws in full and spills left into the gap,
+    /// rather than wrapping onto a second line. Without `fixedSize` the `Text`
+    /// wrapped instead: `123` came out as `12` over `3`, and the block grew from
+    /// one line to two.
+    func testACountTooWideForItsSlotSpillsLeftInsteadOfWrapping() throws {
+        let twoDigits = try render(status: .done, count: 12)
+        let threeDigits = try render(status: .done, count: 123)
+
+        XCTAssertEqual(threeDigits.size.height, twoDigits.size.height, accuracy: 0.01, "the number wrapped")
+        let wide = try XCTUnwrap(threeDigits.span(leftOf: Self.split))
+        let narrow = try XCTUnwrap(twoDigits.span(leftOf: Self.split))
+        // Same right edge — it is right-aligned — and it grows leftwards, past
+        // the left edge of its own slot.
+        XCTAssertEqual(wide.upperBound, narrow.upperBound, accuracy: 0.01)
+        XCTAssertLessThan(wide.lowerBound, Double(Self.leftPad))
     }
 }
 
