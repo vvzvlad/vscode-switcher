@@ -122,11 +122,16 @@ enum ConsoleDump {
             // The indicator is printed here too, because this is where the rule
             // "no chat, no subagent, no icon" is worth seeing: most of this
             // section is projects nobody has run an agent in.
-            // The name is what gives way when it is too long, exactly as in the
-            // panel: the count in brackets stays whole and pushes the columns
-            // after it to the right rather than being cut off.
-            let name = shorten(row.displayName, 34)
-                + (SwitcherRowView.countLabel(for: row).map { " " + $0 } ?? "")
+            // The name is what gives way when it is too long, as in the panel:
+            // the count in brackets stays whole and the name is cut to what is
+            // left of the cell. Cutting the name to the full 34 first and adding
+            // the brackets after made this cell 48 wide on exactly the rows that
+            // have a count — the orphan `cwd:` rows `rankedOrphans` puts at the
+            // top — and `column` pads without cutting, so every column after it
+            // shifted right on those rows and nowhere else.
+            let label = SwitcherRowView.countLabel(for: row)
+            let budget = label.map { max(1, 34 - ($0.count + 1)) } ?? 34
+            let name = shorten(row.displayName, budget) + (label.map { " " + $0 } ?? "")
             print("  - \(column(name, 34)) \(row.colorHex)"
                 + "  \(column(indicator(row), 12))"
                 + "  \(column(workspace, 9))  \(activity(row, config: config))")
