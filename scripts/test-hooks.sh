@@ -76,6 +76,13 @@ field() { # key [session]
 
 state() { field state "${1:-}"; }
 
+# The open waits as `tool/agent/state`, in order, so a case can say which ones
+# survived an event without pulling the JSON apart itself.
+waits() { # [session]
+	jq -r '[(.waits // [])[] | "\(.tool)/\(.agent)/\(.state)"] | join(",")' \
+		"$(STATE_FILE "${1:-}")" 2>/dev/null
+}
+
 # --- the six events -----------------------------------------------------------
 
 start "UserPromptSubmit sets working"
@@ -87,10 +94,10 @@ start "Stop sets waiting"
 send "$(payload Stop)"
 check "state" "$(state)" "waiting"
 
-start "PermissionRequest sets permission and records the tool"
+start "PermissionRequest sets permission and records the wait"
 send "$(payload PermissionRequest '"tool_name":"Bash"')"
 check "state" "$(state)" "permission"
-check "waitTool" "$(field waitTool)" "Bash"
+check "waits" "$(waits)" "Bash//permission"
 
 start "PermissionRequest for AskUserQuestion sets question"
 send "$(payload PermissionRequest '"tool_name":"AskUserQuestion"')"
@@ -146,11 +153,11 @@ send "$(payload PermissionRequest '"tool_name":"AskUserQuestion"')"
 send "$(payload Notification '"notification_type":"permission_prompt"' '"message":"Claude needs your permission"')"
 check "state" "$(state)" "question"
 
-start "a Notification that keeps the wait carries the tool along"
+start "a Notification that keeps the wait carries it along"
 send "$(payload PermissionRequest '"tool_name":"Bash"')"
 send "$(payload Notification '"notification_type":"permission_prompt"' '"message":"Claude needs your permission"')"
 check "state" "$(state)" "permission"
-check "waitTool survives" "$(field waitTool)" "Bash"
+check "the wait survives" "$(waits)" "Bash//permission"
 send "$(payload PostToolUse '"tool_name":"Bash"')"
 check "and the tool can still clear it" "$(state)" "working"
 
@@ -204,6 +211,82 @@ send "$(payload PermissionRequest '"tool_name":"Bash"')"
 send "$(payload PostToolUse '"tool_name":"Read"')"
 check "state" "$(state)" "permission"
 
+# --- several waits at once ----------------------------------------------------
+
+start "answering a subagent dialog leaves the main agent question standing"
+# The whole point of keeping a list. The main agent asks a question, a subagent
+# then raises a permission dialog of its own, and the subagent's dialog is
+# answered first: the question is still on the user's screen and must still be
+# the state of the row.
+send "$(payload PermissionRequest '"tool_name":"AskUserQuestion"')"
+send "$(payload PermissionRequest '"tool_name":"Bash"' '"agent_id":"AAA"')"
+check "the question outranks the newer permission" "$(state)" "question"
+check "both waits are open" "$(waits)" "AskUserQuestion//question,Bash/AAA/permission"
+send "$(payload PostToolUse '"tool_name":"Bash"' '"agent_id":"AAA"')"
+check "state" "$(state)" "question"
+check "only the question is left" "$(waits)" "AskUserQuestion//question"
+send "$(payload PostToolUse '"tool_name":"AskUserQuestion"')"
+check "answering it finally frees the row" "$(state)" "working"
+check "no waits left" "$(waits)" ""
+
+start "clearing a question falls back to the permission still open"
+# The same in the other order: the state is the most urgent wait remaining, not
+# the one that moved last.
+send "$(payload PermissionRequest '"tool_name":"Bash"' '"agent_id":"AAA"')"
+send "$(payload PermissionRequest '"tool_name":"AskUserQuestion"')"
+check "state" "$(state)" "question"
+send "$(payload PostToolUse '"tool_name":"AskUserQuestion"')"
+check "state" "$(state)" "permission"
+check "waits" "$(waits)" "Bash/AAA/permission"
+send "$(payload PostToolUse '"tool_name":"Bash"' '"agent_id":"AAA"')"
+check "and then it is done" "$(state)" "working"
+
+start "asking twice for the same tool is one wait"
+send "$(payload PermissionRequest '"tool_name":"Bash"')"
+send "$(payload PermissionRequest '"tool_name":"Bash"')"
+check "waits" "$(waits)" "Bash//permission"
+send "$(payload PostToolUse '"tool_name":"Bash"')"
+check "one PostToolUse clears it" "$(state)" "working"
+
+start "Stop drops every open wait"
+send "$(payload PermissionRequest '"tool_name":"AskUserQuestion"')"
+send "$(payload PermissionRequest '"tool_name":"Bash"' '"agent_id":"AAA"')"
+send "$(payload Stop)"
+check "state" "$(state)" "waiting"
+check "waits" "$(waits)" ""
+
+start "a wait raised by Notification does not hide the ones with names"
+# Notification carries no tool name, so it can only keep the list it found.
+send "$(payload PermissionRequest '"tool_name":"Bash"' '"agent_id":"AAA"')"
+send "$(payload Notification '"notification_type":"permission_prompt"' '"message":"Claude needs your permission"')"
+check "waits" "$(waits)" "Bash/AAA/permission"
+send "$(payload PostToolUse '"tool_name":"Bash"' '"agent_id":"AAA"')"
+check "state" "$(state)" "working"
+
+# --- records written by older versions of the hook ----------------------------
+
+start "a waitTool/waitAgent record from an older version still clears"
+printf '{"sessionId":"%s","cwd":"/tmp/project","state":"permission","event":"PermissionRequest","waitTool":"Bash","waitAgent":"aaaa1111","ts":1}' \
+	"$SESSION" >"$(STATE_FILE)"
+send "$(payload PostToolUse '"tool_name":"Bash"' '"agent_id":"bbbb2222"')"
+check "another agent leaves it alone" "$(state)" "permission"
+send "$(payload PostToolUse '"tool_name":"Bash"' '"agent_id":"aaaa1111"')"
+check "its own agent clears it" "$(state)" "working"
+
+start "a damaged waits list does not stick forever"
+printf '{"sessionId":"%s","cwd":"/tmp/project","state":"permission","event":"PermissionRequest","waits":"nonsense","ts":1}' \
+	"$SESSION" >"$(STATE_FILE)"
+send "$(payload PostToolUse '"tool_name":"Bash"')"
+check "nothing to clear, so it holds" "$(state)" "permission"
+send "$(payload Stop)"
+check "Stop still takes it off" "$(state)" "waiting"
+
+start "junk entries in the waits list are skipped, real ones are not"
+printf '{"sessionId":"%s","cwd":"/tmp/project","state":"permission","event":"PermissionRequest","waits":[null,7,{"agent":"x"},{"tool":"Bash","agent":"aaaa1111","state":"permission"}],"ts":1}' \
+	"$SESSION" >"$(STATE_FILE)"
+send "$(payload PostToolUse '"tool_name":"Bash"' '"agent_id":"aaaa1111"')"
+check "state" "$(state)" "working"
+
 start "a wait with no tool recorded is never cleared by PostToolUse"
 # Raised by Notification, which carries no tool name; only Stop and
 # UserPromptSubmit take it off.
@@ -219,6 +302,8 @@ printf '{"sessionId":"%s","cwd":"/tmp/project","state":"permission","event":"Per
 	"$SESSION" >"$(STATE_FILE)"
 send "$(payload PostToolUse '"tool_name":"Bash"')"
 check "state" "$(state)" "permission"
+send "$(payload Stop)"
+check "but it does not stick forever" "$(state)" "waiting"
 
 start "PostToolUse works whatever the payload spacing"
 send "$(payload PermissionRequest '"tool_name":"Bash"')"
