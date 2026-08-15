@@ -467,6 +467,56 @@ final class RowStatusTests: XCTestCase {
         XCTAssertNil(DataSource.aggregate([]).state)
     }
 
+    /// Half the invariant lives in `aggregate`, the other half in the promise
+    /// that every row's number comes *from* `aggregate` over that row's own
+    /// sessions — and that half used to hold only because all three row
+    /// constructors happen to be written that way. Nothing checked it, and with
+    /// the `guard` gone nothing would notice a fourth constructor filling the
+    /// field from somewhere else. So check it on the assembled snapshot, over
+    /// every row of every kind at once: window rows, project rows and the
+    /// orphan `cwd:` rows.
+    func testEveryAssembledRowTakesItsSubagentsFromItsOwnChats() throws {
+        var busy = TestFixtures.session(id: "s1", cwd: "/p/open", state: .working)
+        busy.activeSubagents = 3
+        var headless = TestFixtures.session(id: "s2", cwd: "/p/headless", state: .idle)
+        headless.activeSubagents = 2
+        var orphan = TestFixtures.session(id: "s3", cwd: "/elsewhere/thing", state: .working)
+        orphan.activeSubagents = 1
+
+        let snapshot = DataSource.assemble(
+            projects: [TestFixtures.project(path: "/p/open", rootName: "open"),
+                       TestFixtures.project(path: "/p/quiet", rootName: "quiet"),
+                       TestFixtures.project(path: "/p/headless", rootName: "headless")],
+            // Two windows of one project, and only the second one's title names
+            // the chat: the twin is left with no sessions at all, which is the
+            // row this invariant is really about.
+            windows: [TestFixtures.window(index: 0, title: "\u{0438}\u{043d}\u{0430}\u{044f} \u{0442}\u{0435}\u{043c}\u{0430} \u{2014} open (Workspace)"),
+                      TestFixtures.window(index: 1, title: "topic s1 \u{2014} open (Workspace)")],
+            sessions: [busy, headless, orphan],
+            accessibilityTrusted: true)
+
+        let rows = snapshot.openWindows + snapshot.projects
+        for row in rows {
+            XCTAssertEqual(row.activeSubagents,
+                           DataSource.aggregate(row.sessions).activeSubagents,
+                           "\(row.id)")
+        }
+        // Which for a row with no chats means zero, the case the dead `guard`
+        // was reaching for.
+        for row in rows where row.sessions.isEmpty {
+            XCTAssertEqual(row.activeSubagents, 0, "\(row.id)")
+            XCTAssertNil(row.status, "\(row.id)")
+        }
+        // And the fixture has to hold every row the loops above are for, or they
+        // agree about nothing. The chat-less *window* is the fragile one: it
+        // exists only because `distribute` leaves the twin empty, so if that
+        // ever changes this should say so rather than quietly stop testing it.
+        XCTAssertTrue(snapshot.openWindows.contains { $0.sessions.isEmpty }, "no chat-less window row")
+        XCTAssertTrue(snapshot.projects.contains { $0.sessions.isEmpty }, "no chat-less project row")
+        XCTAssertTrue(snapshot.projects.contains { $0.id.hasPrefix("cwd:") }, "no orphan row")
+        XCTAssertTrue(rows.contains { $0.activeSubagents > 0 }, "no subagents in the snapshot")
+    }
+
     /// But a single idle chat is something to report, and it reports "asleep" —
     /// the criterion is "is there anything to say", not "which section is this".
     func testASingleIdleChatStillReportsAsleep() {
