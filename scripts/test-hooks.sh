@@ -274,6 +274,34 @@ check "waits" "$(waits)" "Bash/AAA/permission"
 send "$(payload PostToolUse '"tool_name":"Bash"' '"agent_id":"AAA"')"
 check "state" "$(state)" "working"
 
+start "the new list is computed from the file as it is at write time"
+# Two PostToolUse from different subagents finish within milliseconds of each
+# other routinely, and if both computed their new list from the copy each read on
+# the way in, the second to write would resurrect the wait the first had cleared
+# (SPEC §2.6.3). So the writer re-reads the file instead of reusing that copy.
+#
+# Checked without depending on timing: `date` is called while the writer's
+# arguments are being built, which is exactly the window between the two reads,
+# so a `date` on PATH that rewrites the state file stands in for the other hook
+# finishing first. The wait it adds meanwhile has to survive; on the old scheme
+# the writer would never see it and the row would end up plain `working`.
+printf '{"sessionId":"%s","cwd":"/tmp/project","state":"permission","event":"PermissionRequest","waits":[{"tool":"Bash","agent":"","state":"permission"}],"ts":1}' \
+	"$SESSION" >"$(STATE_FILE)"
+printf '{"sessionId":"%s","cwd":"/tmp/project","state":"question","event":"PermissionRequest","waits":[{"tool":"Bash","agent":"","state":"permission"},{"tool":"AskUserQuestion","agent":"","state":"question"}],"ts":1}' \
+	"$SESSION" >"$WORK/meanwhile.json"
+fakebin="$WORK/fakebin"
+mkdir -p "$fakebin"
+{
+	printf '#!/bin/bash\n'
+	printf 'cp %s %s\n' "$WORK/meanwhile.json" "$(STATE_FILE)"
+	printf 'exec %s "$@"\n' "$(command -v date)"
+} >"$fakebin/date"
+chmod +x "$fakebin/date"
+printf '%s' "$(payload PostToolUse '"tool_name":"Bash"')" | PATH="$fakebin:$PATH" bash "$HOOK"
+rm -rf "$fakebin"
+check "the wait raised meanwhile survives" "$(waits)" "AskUserQuestion//question"
+check "and it is the state of the row" "$(state)" "question"
+
 # --- records written by older versions of the hook ----------------------------
 
 start "a waitTool/waitAgent record from an older version still clears"
