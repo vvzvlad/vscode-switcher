@@ -180,11 +180,12 @@ PermissionRequest)
 	# away. This is the reliable source; Notification stays as a second one
 	# because it also covers elicitation dialogs.
 	#
-	# AskUserQuestion and ExitPlanMode come through here too, and they are
-	# not a permission at all: the agent is asking the user something and has
-	# stopped until it is answered. Nothing else marks that — `Stop` does not
-	# fire for them (verified), so without this the two are the same orange
-	# hand.
+	# AskUserQuestion comes through here too, and it is not a permission at
+	# all: the agent is asking the user something and has stopped until it is
+	# answered. Nothing else marks that — `Stop` does not fire for it
+	# (verified), so without this the two are the same orange hand.
+	# ExitPlanMode is assumed to arrive the same way; it has never been seen
+	# in a captured payload (SPEC §2.6.2).
 	case "$tool_name" in
 	AskUserQuestion | ExitPlanMode) state="question" ;;
 	*) state="permission" ;;

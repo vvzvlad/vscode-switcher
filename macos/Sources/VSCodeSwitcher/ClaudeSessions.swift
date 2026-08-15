@@ -626,7 +626,10 @@ enum ClaudeSessions {
     /// Tools whose call is a question to the user rather than work being done.
     ///
     /// `ExitPlanMode` is in here for the same reason as `AskUserQuestion`: the
-    /// plan is finished and the agent waits for a human to approve it.
+    /// plan is finished and the agent waits for a human to approve it. Unlike
+    /// `AskUserQuestion` it has never been caught in a payload, so treat it as
+    /// an assumption (SPEC §2.6.2) — here it costs nothing either way, because
+    /// this path reads the transcript, where the tool call is plainly visible.
     static let userFacingTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
 
     /// True when an assistant message asks the user something and the answer has
