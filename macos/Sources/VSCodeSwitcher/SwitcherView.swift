@@ -520,9 +520,9 @@ struct SwitcherRowView: View {
                 .font(.system(size: 10, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 15, alignment: .trailing)
-            // The badge draws itself in a box of its own, so this slot needs no
-            // width of its own — one place decides it, and the two cannot drift
-            // apart.
+            // The badge draws itself in a box of its own — empty box included,
+            // for a row with nothing to report — so this slot needs no width of
+            // its own: one place decides it, and the two cannot drift apart.
             StatusBadge(status: row.status, panelVisible: panelVisible)
         }
     }
@@ -637,8 +637,14 @@ struct SwitcherRowView: View {
 
 /// The row's single indicator: what the window wants, folded from every chat and
 /// subagent in it (`SwitcherRow.status`).
+///
+/// A `nil` status draws an empty box of the same size. The slot is what has to
+/// be fixed, not the icon: a row with no chat and no subagent has nothing to
+/// report, and an icon there would say "asleep" about a project that simply has
+/// no agent — the same mark on ninety-odd rows of the "projects" section,
+/// distinguishing nothing.
 struct StatusBadge: View {
-    let status: RowStatus
+    let status: RowStatus?
     /// The badge is on screen. See `pulseState`.
     var panelVisible: Bool = true
 
@@ -652,59 +658,64 @@ struct StatusBadge: View {
     /// are needed: the task decides when to start a pulse, the identity is what
     /// ends one.
     var pulseState: RowStatus? {
-        guard panelVisible, Self.animates(status) else { return nil }
+        guard panelVisible, let status, Self.animates(status) else { return nil }
         return status
     }
 
     var body: some View {
-        // An icon rather than a coloured dot: the dot told the user there was
-        // *a* state and left the meaning to be memorised. Each of the three
-        // shapes is different enough to be read without the colour, and the
-        // tooltip spells the chats out in words.
-        Image(systemName: Self.symbol(for: status))
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(Self.color(for: status))
-            // A fixed box, because the three glyphs are not the same width: the
-            // sleeping moon is wider than the tick, and without a box of its own
-            // the indicator would sit at a different x in every row — which is
-            // the whole complaint the fold was made to answer.
-            .frame(width: 14, height: 12)
-            .opacity(pulsing ? 0.35 : 1)
-            .scaleEffect(pulsing ? 0.86 : 1)
-                // The one thing that actually *stops* a `repeatForever`. Writing
-                // `pulsing = false` below only moves the value the animation
-                // drives at; the cycle goes on running against a target it
-                // already sits at — invisible, and every bit as expensive, since
-                // SwiftUI keeps laying the list out and rendering its display
-                // list once per display cycle. Probed: a single `working` row,
-                // panel closed, nothing pulsing on screen, 13.6% of a core. It
-                // dropped to 2.0% with this line, and to nothing more with the
-                // window's content view hidden as well, which was the other
-                // candidate. A new identity throws the animated attribute away
-                // and the animation attached to it with it.
-            .id(pulseState)
-            // Keyed on `pulseState`, not on appearance. The badge sits in a
-            // stable spot in the hierarchy, so when a row changes status
-            // SwiftUI reuses the view and `onAppear` never runs again: an
-            // `active` row that received `Stop` turned green and kept the
-            // endless pulse of the blue icon it replaced, and a row first drawn
-            // asleep never started pulsing when the agent began its turn. With
-            // updates once a second that is the normal case, not an edge one.
-            .task(id: pulseState) {
-                pulsing = false
-                guard pulseState != nil else { return }
-                // Let the reset land in its own transaction. Both mutations in
-                // one pass would cancel out for a change that keeps the
-                // animation on, leaving the previous rhythm running.
-                try? await Task.sleep(for: .milliseconds(50))
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                    pulsing = true
-                }
+        Group {
+            // An icon rather than a coloured dot: the dot told the user there
+            // was *a* state and left the meaning to be memorised. Each of the
+            // three shapes is different enough to be read without the colour,
+            // and the tooltip spells the chats out in words.
+            if let status {
+                Image(systemName: Self.symbol(for: status))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Self.color(for: status))
+            } else {
+                Color.clear
             }
-            // No `.help` here on purpose. The row carries one tooltip for the
-            // whole line; a second one on the badge made the text the user got
-            // depend on which pixel the pointer happened to be over.
+        }
+        // A fixed box, because the three glyphs are not the same width — the
+        // sleeping moon is wider than the tick — and because the empty case has
+        // to hold the same ground. Without it the indicator would sit at a
+        // different x in every row, which is the whole complaint this answers.
+        .frame(width: 14, height: 12)
+        .opacity(pulsing ? 0.35 : 1)
+        .scaleEffect(pulsing ? 0.86 : 1)
+        // The one thing that actually *stops* a `repeatForever`. Writing
+        // `pulsing = false` below only moves the value the animation drives at;
+        // the cycle goes on running against a target it already sits at —
+        // invisible, and every bit as expensive, since SwiftUI keeps laying the
+        // list out and rendering its display list once per display cycle.
+        // Probed: a single working row, panel closed, nothing pulsing on
+        // screen, 13.6% of a core. It dropped to 2.0% with this line, and to
+        // nothing more with the window's content view hidden as well, which was
+        // the other candidate. A new identity throws the animated attribute
+        // away and the animation attached to it with it.
+        .id(pulseState)
+        // Keyed on `pulseState`, not on appearance. The badge sits in a stable
+        // spot in the hierarchy, so when a row changes status SwiftUI reuses
+        // the view and `onAppear` never runs again: an `active` row that
+        // received `Stop` turned green and kept the endless pulse of the blue
+        // icon it replaced, and a row first drawn asleep never started pulsing
+        // when the agent began its turn. With updates once a second that is the
+        // normal case, not an edge one.
+        .task(id: pulseState) {
+            pulsing = false
+            guard pulseState != nil else { return }
+            // Let the reset land in its own transaction. Both mutations in one
+            // pass would cancel out for a change that keeps the animation on,
+            // leaving the previous rhythm running.
+            try? await Task.sleep(for: .milliseconds(50))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                pulsing = true
+            }
+        }
+        // No `.help` here on purpose. The row carries one tooltip for the whole
+        // line; a second one on the badge made the text the user got depend on
+        // which pixel the pointer happened to be over.
     }
 
     /// SF Symbols, one shape per status. The shapes are the ones the states

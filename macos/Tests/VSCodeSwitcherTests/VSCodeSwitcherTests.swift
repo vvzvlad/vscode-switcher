@@ -424,14 +424,58 @@ final class RowStatusTests: XCTestCase {
         XCTAssertEqual(row.activeCount, 3)
     }
 
-    /// Everything else, including a project row that has no chat at all: there
-    /// is nothing to do in it and nothing happening, which is one answer.
+    /// Everything else is asleep — and "asleep" is a real outcome of three,
+    /// reported about chats that exist and are doing nothing.
     func testEverythingElseIsAsleep() {
         XCTAssertEqual(row([.idle]).status, .asleep)
         XCTAssertEqual(row([.idle, .idle]).status, .asleep)
-        XCTAssertEqual(row([]).status, .asleep)
-        XCTAssertEqual(row([]).activeCount, 0)
         XCTAssertEqual(row([.idle]).activeCount, 0)
+    }
+
+    /// A row with no chat and no subagent draws no indicator at all. Its slot
+    /// stays empty: there is nothing there to be asleep, and an icon saying so
+    /// would be the same mark on ninety-odd project rows that have never seen
+    /// an agent — noise along the longest stretch of the list. The fixed slot
+    /// is what the user asked for, not a mandatory icon.
+    func testARowWithNothingToReportDrawsNoIndicator() {
+        XCTAssertNil(row([]).status)
+        XCTAssertEqual(row([]).activeCount, 0)
+    }
+
+    /// But a single idle chat is something to report, and it reports "asleep" —
+    /// the criterion is "is there anything to say", not "which section is this".
+    func testASingleIdleChatStillReportsAsleep() {
+        XCTAssertEqual(row([.idle]).status, .asleep)
+    }
+
+    /// The second half of the criterion: a subagent with no chat of its own to
+    /// hang off would still be something happening. Sessions are where
+    /// subagents come from, so this cannot arise from the assembly — the row is
+    /// built by hand here to pin the rule as written.
+    func testASubagentAloneIsAlsoSomethingToReport() {
+        var bare = row([])
+        bare.activeSubagents = 1
+        XCTAssertEqual(bare.status, .active)
+        XCTAssertEqual(bare.activeCount, 1)
+    }
+
+    /// The rule as the panel meets it: an open window has chats and shows an
+    /// indicator, a project nobody has worked in shows none, and a project with
+    /// an agent but no window shows one.
+    func testTheAssembledSnapshotDrawsIndicatorsOnlyWhereThereIsSomethingToSay() throws {
+        let projects = [TestFixtures.project(path: "/p/open", rootName: "open"),
+                        TestFixtures.project(path: "/p/quiet", rootName: "quiet"),
+                        TestFixtures.project(path: "/p/headless", rootName: "headless")]
+        let snapshot = DataSource.assemble(
+            projects: projects,
+            windows: [TestFixtures.window(index: 0, title: "topic \u{2014} open (Workspace)")],
+            sessions: [TestFixtures.session(id: "s1", cwd: "/p/open", state: .idle),
+                       TestFixtures.session(id: "s2", cwd: "/p/headless", state: .working)],
+            accessibilityTrusted: true)
+
+        XCTAssertEqual(try XCTUnwrap(snapshot.openWindows.first).status, .asleep)
+        XCTAssertEqual(snapshot.projects.first { $0.displayName == "headless" }?.status, .active)
+        XCTAssertNil(try XCTUnwrap(snapshot.projects.first { $0.displayName == "quiet" }).status)
     }
 
     /// The whole fold in one table, so no combination of the five states is

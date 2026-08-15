@@ -202,7 +202,8 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
         return Double(used) / Double(limit)
     }
 
-    /// The one indicator the row draws.
+    /// The one indicator the row draws, or `nil` when the row has nothing to
+    /// say and the slot stays empty.
     ///
     /// `state` is already the highest state among the row's chats, and the
     /// priority order puts every state that waits on the user above `working`,
@@ -211,9 +212,20 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     /// Subagents are the second half of "something is moving" — they run while
     /// every chat of the row sits in `idle`.
     ///
-    /// A row with no chat at all is asleep like a row whose chats are: there is
-    /// nothing to do in it and nothing happening, which is the same answer.
-    var status: RowStatus {
+    /// `nil` is not a fourth answer, it is the absence of a subject: a project
+    /// with no agent in it is not "asleep", there is simply nothing there to be
+    /// asleep. The distinction earns its keep in the "projects" section, which
+    /// is ninety-odd rows most of which have never seen an agent — an icon
+    /// identical on all of them would distinguish nothing and be pure noise
+    /// along the longest stretch of the list. `asleep` stays for the rows where
+    /// it is a real outcome of three: a window whose chats are alive but idle,
+    /// or a project running an agent without a window.
+    ///
+    /// The user asked for the indicator to have a fixed *place*, not to be
+    /// present on every row, and an empty slot of fixed width answers that in
+    /// full: whenever there is an icon, it is at the same x.
+    var status: RowStatus? {
+        guard !sessions.isEmpty || activeSubagents > 0 else { return nil }
         switch state {
         case .question, .permission, .waiting: return .attention
         case .working: return .active

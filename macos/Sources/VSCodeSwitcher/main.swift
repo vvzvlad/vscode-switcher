@@ -119,7 +119,11 @@ enum ConsoleDump {
         print("Projects section: \(snapshot.projects.count) (showing 15, most active first)")
         for row in snapshot.projects.prefix(15) {
             let workspace = row.project?.workspaceFile == nil ? "git" : "workspace"
+            // The indicator is printed here too, because this is where the rule
+            // "no chat, no subagent, no icon" is worth seeing: most of this
+            // section is projects nobody has run an agent in.
             print("  - \(row.displayName.padding(toLength: 34, withPad: " ", startingAt: 0)) \(row.colorHex)"
+                + "  \(indicator(row).padding(toLength: 12, withPad: " ", startingAt: 0))"
                 + "  \(workspace.padding(toLength: 9, withPad: " ", startingAt: 0))  \(activity(row, config: config))")
         }
     }
@@ -135,10 +139,12 @@ enum ConsoleDump {
     }
 
     /// What the row actually draws: the folded indicator and, when it is not
-    /// zero, the count beside it.
+    /// zero, the count beside it. A row with no chat and no subagent draws
+    /// neither, and prints as `-` here.
     private static func indicator(_ row: SwitcherRow) -> String {
+        guard let status = row.status else { return "-" }
         let count = row.activeCount
-        return count > 0 ? "\(row.status.rawValue) \(count)" : row.status.rawValue
+        return count > 0 ? "\(status.rawValue) \(count)" : status.rawValue
     }
 
     /// Every state the row's chats are in, most urgent first. The row itself

@@ -603,6 +603,8 @@ final class StatusBadgeTests: XCTestCase {
         XCTAssertEqual(StatusBadge(status: .active, panelVisible: true).pulseState, .active)
         XCTAssertNil(StatusBadge(status: .active, panelVisible: false).pulseState)
         XCTAssertNil(StatusBadge(status: .attention, panelVisible: true).pulseState)
+        // An empty slot has nothing to pulse either.
+        XCTAssertNil(StatusBadge(status: nil, panelVisible: true).pulseState)
     }
 
     /// And the flag itself follows the panel.
