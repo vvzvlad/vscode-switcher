@@ -257,18 +257,29 @@ final class DataSource: @unchecked Sendable {
     /// The z-order the Accessibility API reports is the stack of what was
     /// clicked, not of what is happening: a window untouched since morning sits
     /// on top merely because it was focused last. The panel is opened to find
-    /// the window something is going on in, so the key is the newest activity
-    /// among the row's chats — the mtime of a transcript, which is the moment
-    /// its last message was written.
+    /// the window something is going on in, so the key is the newest
+    /// `ClaudeSessionInfo.lastActivity` among the row's chats — and that is not
+    /// the transcript mtime alone but the newest of the three stamps a session
+    /// has (`ClaudeSessions.load`): the hook state file, the metrics file and
+    /// the transcript. The hook writes first and by seconds, which is the point:
+    /// a chat that has just been asked a question freezes its transcript while
+    /// the hook records the block, and the window it sits in has to rise anyway.
     ///
     /// The row's own `lastActivity` is not that key: it belongs to the *shown*
     /// chat, and a window whose visible chat is idle can hold another that
     /// answered a second ago.
     ///
     /// A row with no chat has no activity at all and goes to the end in the
-    /// z-order it arrived in. That is a consequence worth naming: a window
-    /// opened by hand, with no agent in it, sinks below every window that has
-    /// one.
+    /// z-order it arrived in. Two consequences worth naming. A window opened by
+    /// hand, with no agent in it, sinks below every window that has one — that
+    /// is the rule working. And a *second* window of a busy project can sink
+    /// there too: `distribute` hands a session to the window whose title prefix
+    /// matches its topic and gives the leftovers to the first window, so a
+    /// sibling window that matched nothing ends up with no sessions. Deliberate:
+    /// such a row already shows no state, no topic and no indicator, because the
+    /// data layer genuinely does not know which chat it is looking at. Ranking
+    /// it by the project's pool instead would hoist an empty row above windows
+    /// whose activity is known — a guess dressed as an answer.
     static func rankedWindows(_ rows: [SwitcherRow]) -> [SwitcherRow] {
         // Ties fall back to the arrival index rather than to nothing: `sorted`
         // is not stable, so windows the activity cannot separate — every

@@ -70,14 +70,19 @@ final class SwitcherViewModel: ObservableObject {
         // The order frozen at show time came from the cache, which is up to two
         // seconds old and has no watcher behind it — nothing tells the store
         // that a window was opened. A window opened a second before the panel
-        // was summoned was therefore missing from it, counted as "appeared
-        // while the panel was up" and pinned to the *bottom* of the list for as
-        // long as the panel stayed open — and the newest window is usually the
-        // one being looked for. So the freeze is redone once, on the first
-        // snapshot that was actually read after the panel appeared. It also
-        // covers the degenerate case of a panel shown before the very first
-        // snapshot, where the frozen order was empty and every click reshuffled
-        // the list.
+        // was summoned is therefore missing from it, counted as "appeared while
+        // the panel was up" and pinned to the *bottom* of the list for as long
+        // as the panel stays open — whatever the ranking would have said about
+        // it. Sometimes the bottom is the right answer: a window with no chat
+        // in it has no activity and belongs there. Often it is not: a new
+        // window of a project an agent is working in inherits that project's
+        // chats the moment it opens, so its activity is the freshest there is
+        // and its place is the top. The freeze is redone once, on the first
+        // snapshot actually read after the panel appeared, so that the order
+        // frozen is the ranking's answer rather than an artefact of a stale
+        // cache. It also covers the degenerate case of a panel shown before the
+        // very first snapshot, where the frozen order was empty and every click
+        // reshuffled the list.
         //
         // Redone by insertion, not by replacement: the assembly takes 40–180 ms
         // and the slide-in 140 ms, so this lands exactly when the panel has
@@ -224,22 +229,33 @@ final class SwitcherViewModel: ObservableObject {
     /// has just finished sliding in and the pointer is already travelling
     /// towards a row. Taking the fresh order wholesale moved every row that had
     /// moved since the cached snapshot was read — for the sake of the one window
-    /// that genuinely was missing. A new window still lands where the fresh order
-    /// puts it, so the window opened a second before the panel was summoned is
-    /// still at the top; the rows below the insertion point still shift by one,
-    /// which is as little as this can move at all.
+    /// that genuinely was missing. A new window instead lands where the fresh
+    /// order puts it: near the top when an agent has just said something in it,
+    /// at the very bottom when it holds no chat at all, which under an
+    /// activity ranking is exactly where a chat-less window belongs. The rows
+    /// below the insertion point still shift by one, which is as little as this
+    /// can move at all.
     ///
-    /// The insertion point is the frozen slot of the closest window ahead of the
-    /// newcomer, so several new windows keep their relative order, and one that
-    /// leads the fresh order overall goes to the very top.
+    /// The rule is "keep the newcomer on the correct side of a window the frozen
+    /// order already knows". Its slot is just after the closest window it trails
+    /// in the fresh order, so several new windows keep their relative order, and
+    /// one that leads the fresh order overall goes to the very top.
     ///
-    /// Unless that slot is the last one, which would put the newest window at the
-    /// very bottom of the list — the one place it must not be. It happens
-    /// whenever the window ahead of the newcomer is the *last* one in the frozen
-    /// order: open a window, work in an older one, then summon the panel.
-    /// The closest known window *behind* the newcomer is then the anchor instead,
-    /// and the newcomer goes in just above it — the same rule seen from the other
-    /// side. With nothing known behind it either, the end is where it belongs.
+    /// Unless that slot is the last one. Then the same rule is read from the
+    /// other side: the newcomer goes just above the closest known window it
+    /// *leads* in the fresh order — it outranks that window now, so it belongs
+    /// above it. With nothing known behind it either, the end is where it
+    /// belongs, and that is the ordinary "opened while the panel was up, nothing
+    /// in it yet" case.
+    ///
+    /// The two sides can disagree, because the frozen order is a ranking from a
+    /// moment ago and the fresh one is the ranking now: with frozen `[a, b, c]`
+    /// and fresh `[b, c, new, a]` the newcomer trails `c` (last slot) and leads
+    /// `a` (first slot), and going above `a` puts it above `b` and `c`, which
+    /// currently outrank it. Accepted: it costs one layout on one appearance,
+    /// the next show re-freezes from scratch, and the alternative — dropping the
+    /// second side — sends a window with genuinely fresh activity to the bottom
+    /// in the far commoner case above.
     static func merged(_ order: [String], with fresh: [String]) -> [String] {
         var result = order
         var anchor: Int?
