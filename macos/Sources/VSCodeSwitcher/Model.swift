@@ -40,19 +40,22 @@ enum AgentState: String, Codable, Sendable, CaseIterable, Comparable {
 /// standing in its way, has it left something for me to read, is anything
 /// moving, or is it all asleep. The per-chat breakdown lives in the tooltip.
 ///
-/// Listed least urgent first, the way `AgentState` is, though nothing derives
-/// an order from it: the fold's priority is written out in `SwitcherRow.status`.
+/// Listed least urgent first. Nothing derives an order from the case list — the
+/// fold's priority is written out, step by step, in `SwitcherRow.status` — but
+/// the two are kept in the same order so reading one does not mislead about the
+/// other. That order is *not* `AgentState`'s: there `waiting` outranks
+/// `working`, here `active` outranks `done`.
 ///
 /// Not `Codable`: the fold is derived from `sessions`, never stored and never
 /// decoded, and a conformance nothing uses is a conformance that can rot.
 enum RowStatus: String, Sendable, CaseIterable {
     /// Nothing running and nothing to answer.
     case asleep
-    /// A chat is taking a turn, or a background subagent is running under one.
-    case active
     /// A chat finished its turn and nobody has read it. Nothing is blocked; the
     /// user reads it whenever it suits them.
     case done
+    /// A chat is taking a turn, or a background subagent is running under one.
+    case active
     /// A chat stopped *mid-task* and cannot go on until the user presses
     /// something: a question, or a permission dialog. The bottleneck is the
     /// human, and every second of it is idle time.
@@ -215,15 +218,24 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     /// The one indicator the row draws, or `nil` when the row has nothing to
     /// say and the slot stays empty.
     ///
-    /// `state` is already the highest state among the row's chats, and the
-    /// priority order runs `question` > `permission` > `waiting` > `working` >
-    /// `idle`, so the fold needs nothing else from them: the top state alone
-    /// decides. Subagents are the second half of "something is moving" — they
-    /// run while every chat of the row sits in `idle`.
+    /// The priority is `blocked` > `active` > `done` > `asleep`, and it is spelled
+    /// out here rather than taken from `state`: it deliberately differs from
+    /// `AgentState`'s own order, where `waiting` outranks `working`.
     ///
-    /// `blocked` and `done` are told apart because the cost of ignoring them
-    /// differs: a blocked chat stopped *mid-task* and burns idle time until a
-    /// key is pressed, a finished one is a message that keeps.
+    /// "Done" is a claim about the *past* — a turn that finished. "Active" is a
+    /// claim about the *present*. While anything in the window is still running
+    /// the window is not finished, and the honest answer is "busy, come back
+    /// later", not "ready, go read it". The green tick has to mean the window
+    /// really has gone quiet and only the reading is left. This was caught live:
+    /// the main chat had answered while a subagent went on working, and the row
+    /// declared itself done over a window that was visibly working.
+    ///
+    /// `blocked` still outranks everything: that chat needs a human and the wait
+    /// is pure idle time, which does not keep. `done` is a message that does.
+    ///
+    /// Subagents are the second half of "something is moving": they go on
+    /// running under a chat that has already answered, and under one sitting in
+    /// `idle`.
     ///
     /// `nil` is not a fifth answer, it is the absence of a subject: a project
     /// with no agent in it is not "asleep", there is simply nothing there to be
@@ -243,16 +255,15 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     /// full: whenever there is an icon, it is at the same x.
     var status: RowStatus? {
         guard !sessions.isEmpty else { return nil }
-        switch state {
-        case .question, .permission: return .blocked
-        case .waiting: return .done
-        case .working: return .active
-        case .idle, .none: return activeSubagents > 0 ? .active : .asleep
-        }
+        if sessions.contains(where: { $0.state == .question || $0.state == .permission }) { return .blocked }
+        if sessions.contains(where: { $0.state == .working }) || activeSubagents > 0 { return .active }
+        if sessions.contains(where: { $0.state == .waiting }) { return .done }
+        return .asleep
     }
 
-    /// The one number beside the indicator: chats taking a turn plus the
-    /// background subagents running under them.
+    /// The one number the row shows, in the title line after the name
+    /// (`vscode-switcher (agents: 5)`): chats taking a turn plus the background
+    /// subagents running under them.
     ///
     /// Orthogonal to `status` on purpose — a row can want an answer from the
     /// user *and* have subagents grinding away, and both facts are worth

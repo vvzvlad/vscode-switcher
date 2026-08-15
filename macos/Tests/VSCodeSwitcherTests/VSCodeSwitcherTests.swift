@@ -408,15 +408,34 @@ final class RowStatusTests: XCTestCase {
         XCTAssertEqual(row([.waiting, .permission, .idle]).status, .blocked)
     }
 
-    /// The mixed window, which is the case the fold exists for: one chat
-    /// answered, another still working. The user is wanted, so that is what the
-    /// row says — and the working chat is not lost, it is in the number.
-    func testAnAnsweredChatBesideAWorkingOneStillWantsTheUser() {
-        let mixed = row([.waiting, .working])
-        XCTAssertEqual(mixed.status, .done)
-        XCTAssertEqual(mixed.activeCount, 1)
+    /// And it outranks activity too: a chat waiting on a human is the one thing
+    /// that does not keep, however much is running around it.
+    func testBeingStuckOutranksActivity() {
+        XCTAssertEqual(row([.working, .permission]).status, .blocked)
         XCTAssertEqual(row([.working, .question]).status, .blocked)
         XCTAssertEqual(row([.working, .permission, .idle]).status, .blocked)
+        XCTAssertEqual(row([.idle, .question], subagents: 4).status, .blocked)
+    }
+
+    /// The mixed window, which is the case the fold exists for: one chat
+    /// answered, another still working. "Done" is a claim about a turn that
+    /// finished, "active" one about right now — and right now something is
+    /// running, so the row says so. Saying "done" over a working window is the
+    /// defect this replaced: the answer to "can I read this yet" was yes while
+    /// the window went on typing.
+    func testAWorkingChatOutranksAnAnsweredOne() {
+        let mixed = row([.waiting, .working])
+        XCTAssertEqual(mixed.status, .active)
+        XCTAssertEqual(mixed.activeCount, 1)
+    }
+
+    /// Caught live, on this very project: the main chat had answered, a
+    /// subagent went on working, and the row showed the green tick over a window
+    /// that was visibly busy. A subagent is running work like any other.
+    func testASubagentUnderAnAnsweredChatKeepsTheRowActive() {
+        let row = row([.waiting], subagents: 1)
+        XCTAssertEqual(row.status, .active)
+        XCTAssertEqual(row.activeCount, 1)
     }
 
     func testAWorkingChatIsActivity() {
@@ -432,10 +451,12 @@ final class RowStatusTests: XCTestCase {
         XCTAssertEqual(row.activeCount, 2)
     }
 
-    /// But it does not outrank a human being waited on.
-    func testASubagentDoesNotOutrankAWaitingUser() {
+    /// A window is "done" only once it has actually gone quiet: the tick means
+    /// nothing is left but the reading. Three subagents grinding away under an
+    /// answered chat is not that.
+    func testTheTickWaitsUntilTheSubagentsAreDoneToo() {
         let row = row([.waiting], subagents: 3)
-        XCTAssertEqual(row.status, .done)
+        XCTAssertEqual(row.status, .active)
         XCTAssertEqual(row.activeCount, 3)
     }
 
@@ -543,18 +564,20 @@ final class RowStatusTests: XCTestCase {
     }
 
     /// The whole fold in one table, so no combination of the five states is
-    /// left to chance.
-    func testEveryTopStateFoldsToItsOwnAnswer() {
-        let expected: [AgentState: RowStatus] = [.question: .blocked,
-                                                 .permission: .blocked,
-                                                 .waiting: .done,
-                                                 .working: .active,
-                                                 .idle: .asleep]
+    /// left to chance. A lone chat folds the same way it always did — there is
+    /// nothing beside it to outrank. The subagent column is where the priority
+    /// shows: anything not blocked reads `active` while work is running under
+    /// it, `waiting` included.
+    func testEveryStateFoldsToItsOwnAnswer() {
+        let alone: [AgentState: RowStatus] = [.question: .blocked,
+                                              .permission: .blocked,
+                                              .waiting: .done,
+                                              .working: .active,
+                                              .idle: .asleep]
         for state in AgentState.allCases {
-            XCTAssertEqual(row([state]).status, expected[state], "\(state)")
-            // A subagent underneath can only ever lift `idle` to `active`.
-            let expectedWithSubagent: RowStatus = state == .idle ? .active : expected[state]!
-            XCTAssertEqual(row([state], subagents: 1).status, expectedWithSubagent, "\(state) + subagent")
+            XCTAssertEqual(row([state]).status, alone[state], "\(state)")
+            let withSubagent: RowStatus = alone[state] == .blocked ? .blocked : .active
+            XCTAssertEqual(row([state], subagents: 1).status, withSubagent, "\(state) + subagent")
         }
     }
 
