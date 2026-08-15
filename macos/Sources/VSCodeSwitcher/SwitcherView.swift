@@ -485,45 +485,7 @@ struct SwitcherRowView: View {
                 .frame(maxHeight: .infinity)
 
             VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 4) {
-                    Text(row.displayName)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    if let countLabel = Self.countLabel(for: row) {
-                        // `.secondary` at the name's own size, in the regular
-                        // weight: it has to read as a separate thing from the
-                        // name it follows, without reading as the same thing as
-                        // the chat topic under it — which is `.secondary` too,
-                        // but at 11 pt. Size and line keep those two apart.
-                        // `.tertiary` was the alternative and is too faint for
-                        // this: at roughly a quarter opacity over a blurred
-                        // material it dims a number that answers "how much is
-                        // running here" into decoration.
-                        //
-                        // The name gives way, the count never does: `fixedSize`
-                        // makes this text inflexible, so the `HStack` takes the
-                        // shortfall out of the name's ellipsis instead. The
-                        // other way round the count would be the first thing to
-                        // vanish on a long name — which is exactly the row it is
-                        // most worth reading on.
-                        //
-                        // At the default 380 pt it changes nothing, and that is
-                        // not an argument for dropping it: `HStack` offers each
-                        // flexible child an equal share and passes on what it
-                        // does not take, so a 63 pt label is well inside its
-                        // ~160 pt share there and the shrink lands on the name
-                        // by itself. `panelWidth` is a setting, though, and at
-                        // 150 pt the label is more than its share — measured
-                        // without this modifier, `(agents: 5)` comes out as
-                        // 25.75 pt of ink instead of 63.25, the same stump as
-                        // `(agents: 123)`. `RowLayoutTests` renders both widths.
-                        Text(countLabel)
-                            .font(.system(size: 13))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                }
+                titleLine
                 if let subtitle {
                     Text(subtitle)
                         .font(.system(size: 11))
@@ -546,6 +508,86 @@ struct SwitcherRowView: View {
     }
 
     private var subtitle: String? { Self.rowSubtitle(row) }
+
+    /// The name, and the count after it when something is running.
+    ///
+    /// Three candidates, most generous first; `ViewThatFits` takes the first
+    /// whose ideal width fits the line it is offered:
+    ///
+    /// 1. both whole — what the 380 pt default draws unless the name is long;
+    /// 2. the count whole, the name squeezed down to `nameFloorWidth` at worst.
+    ///    The name is what gives way, because on the row where the number is
+    ///    worth reading it is the name that is long;
+    /// 3. the name alone. A panel too narrow for both drops the *count*: a row
+    ///    reading `(agents: 124)` and nothing else names no project, and a row
+    ///    that identifies nothing is no better than the one parked at the bottom
+    ///    of a 93-row list (§2.2.1).
+    ///
+    /// The middle candidate is what makes the floor a floor: `frame(idealWidth:)`
+    /// answers the fit question with 40 pt instead of the name's full width, and
+    /// passes the real proposal through afterwards, so the name still takes
+    /// whatever the line actually has.
+    ///
+    /// `panelWidth` is a setting that takes any value above zero, and this is the
+    /// second attempt at that end of its range. `fixedSize` alone — the count
+    /// rigid, the name flexible — holds at 380 and 240 and breaks below: at
+    /// 150 pt the name came out as 2.25 pt of ink beside `(agents: 5)`, and with
+    /// `(agents: 124)` the row overflowed its own frame, colour bar and all,
+    /// 5.5 pt to the left of where it belongs. Giving the name a minimum width
+    /// instead keeps the name but truncates the count, and a truncated count is a
+    /// lie: measured at 150 pt it is the same 25.75 pt stump for 5 as for 124.
+    /// `RowLayoutTests` renders 380, 200 and 150.
+    @ViewBuilder private var titleLine: some View {
+        if let countLabel = Self.countLabel(for: row) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 4) {
+                    nameText
+                    countText(countLabel)
+                }
+                HStack(spacing: 4) {
+                    nameText.frame(idealWidth: Self.nameFloorWidth, alignment: .leading)
+                    countText(countLabel)
+                }
+                nameText
+            }
+        } else {
+            nameText
+        }
+    }
+
+    private var nameText: some View {
+        Text(row.displayName)
+            .font(.system(size: 13, weight: .semibold))
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+
+    /// `.secondary` at the name's own size, in the regular weight: it has to read
+    /// as a separate thing from the name it follows, without reading as the same
+    /// thing as the chat topic under it — which is `.secondary` too, but at
+    /// 11 pt. Size and line keep those two apart. `.tertiary` was the
+    /// alternative and is too faint for this: at roughly a quarter opacity over a
+    /// blurred material it dims a number that answers "how much is running here"
+    /// into decoration.
+    ///
+    /// `fixedSize` keeps the count out of the `HStack`'s division of the line, so
+    /// inside a chosen candidate the shortfall lands on the name's ellipsis.
+    /// Which candidate is chosen is decided above, and that is where the count
+    /// can lose — whole, never cut.
+    private func countText(_ label: String) -> some View {
+        Text(label)
+            .font(.system(size: 13))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// The narrowest the name may be squeezed to while the count is still drawn.
+    /// Measured, not guessed: in the row's own font a 40 pt frame renders four
+    /// characters and the ellipsis (25.75 pt of glyph, 5.75 of ellipsis); 30 pt
+    /// renders two. Four is the least that still says *which* project this is,
+    /// so below this the count is what goes.
+    static let nameFloorWidth: CGFloat = 40
+
 
     /// The count as the title line carries it, or `nil` when there is nothing
     /// running: at zero the brackets go away entirely and the row is just its

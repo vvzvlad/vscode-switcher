@@ -980,53 +980,94 @@ final class RowLayoutTests: XCTestCase {
     /// chat topic for the same reason: the second line would put its own ink in
     /// these columns.
     ///
-    /// Two widths, because only the second one puts `fixedSize` to work.
-    /// `HStack` hands each flexible child an equal share of the line and lets
-    /// what it does not need pass on, so at the 380 pt default the 63 pt label
-    /// is well under its ~160 pt share and survives on its own; the shrink lands
-    /// on the name, the longer text. At 150 pt — `panelWidth` is a setting and
-    /// takes any value above zero — the label is more than its share, and
-    /// without `fixedSize` it is the label that gets cut: measured, its ink comes
-    /// out 25.75 pt instead of 63.25, and the same stump for `123` as for `5`.
-    /// So the assertion below is run there too, and the removal of the modifier
-    /// fails it.
+    /// Several widths, because the narrow ones are where the name has to be
+    /// defended. At the 380 pt default there is room for both and the shrink
+    /// lands on the name by itself. Further down — `panelWidth` is a setting and
+    /// takes any value above zero — the name is at its floor and the count is
+    /// still whole, which is the middle rung of the ladder doing its job: 40 pt
+    /// answers the fit question, the rest of the line is still drawn in, and at
+    /// least 25 pt of ink (four characters) survives.
+    ///
+    /// Where that rung gives out was measured by sweeping the width a point at a
+    /// time against the longest real name: the count is drawn down to 188 pt with
+    /// one digit, 193 with two, 201 with three. Hence the pairs — 200 pt is
+    /// below the three-digit line, and the far side of it is the test after this
+    /// one. (A short name keeps its count further down still, 156 pt for a
+    /// single character: the first rung fits where the second does not.)
     func testALongNameGivesWayBeforeTheCountDoes() throws {
         let longest = "wirenboard/node-red-contrib-wirenboard"
 
-        for width in [Config.default.panelWidth, 150] {
+        for (width, count) in [(Config.default.panelWidth, 5), (Config.default.panelWidth, 123),
+                               (240.0, 5), (240.0, 123), (200.0, 5)] {
             let slot = badgeSlot(inRowOfWidth: width)
-            for count in [5, 123] {
-                let label = try XCTUnwrap(SwitcherRowView.countLabel(for: makeRow(status: .blocked, count: count)))
-                // The same text in the same font the row draws it in.
-                let alone = try measure(Text(label)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .padding(Self.pad))
-                let labelInk = try XCTUnwrap(alone.span)
-                let labelWidth = labelInk.upperBound - labelInk.lowerBound
-
-                let rendered = try renderRow(status: .blocked,
-                                             count: count,
-                                             name: longest,
-                                             topic: nil,
-                                             width: width)
-                let text = try XCTUnwrap(rendered.span(leftOf: slot.lowerBound - 3), "no title drawn")
-                // Half a point of slack: the label starts at a fractional x in
-                // the row and the antialiasing of its first stem can fall either
-                // side of a quarter-point column.
-                let labelStart = text.upperBound - labelWidth - 0.5
-                XCTAssertTrue(rendered.isBlank(from: labelStart - 2.5, to: labelStart - 0.5),
-                              "the name ran into the label — width=\(width) count=\(count)")
-                // And at the width the panel actually opens at, the name is
-                // still there in front of the gap rather than the label having
-                // taken the whole line. (At 150 pt it has: three digits of count
-                // leave the name nothing, which is the honest outcome for a
-                // panel that narrow and not what this checks.)
-                if width == Config.default.panelWidth {
-                    XCTAssertNotNil(rendered.span(leftOf: labelStart - 2.5), "no name drawn — count=\(count)")
-                }
-            }
+            let labelWidth = try inkWidthOfLabel(count: count)
+            let rendered = try renderRow(status: .blocked,
+                                         count: count,
+                                         name: longest,
+                                         topic: nil,
+                                         width: width)
+            let text = try XCTUnwrap(rendered.span(leftOf: slot.lowerBound - 3), "no title drawn")
+            // Half a point of slack: the label starts at a fractional x in the
+            // row and the antialiasing of its first stem can fall either side of
+            // a quarter-point column.
+            let labelStart = text.upperBound - labelWidth - 0.5
+            XCTAssertTrue(rendered.isBlank(from: labelStart - 2.5, to: labelStart - 0.5),
+                          "the name ran into the label — width=\(width) count=\(count)")
+            let name = try XCTUnwrap(rendered.span(leftOf: labelStart - 2.5),
+                                     "no name drawn — width=\(width) count=\(count)")
+            XCTAssertGreaterThanOrEqual(name.upperBound - name.lowerBound, 25,
+                                        "the name is down to a stump — width=\(width) count=\(count)")
         }
+    }
+
+    /// Below that floor the count is what goes, and it goes whole.
+    ///
+    /// A 150 pt panel cannot hold a long name and `(agents: N)` at once, and the
+    /// half that has to survive is the name: a row that reads `(agents: 124)` and
+    /// nothing else identifies no project, the same objection §2.2.1 makes to a
+    /// row parked at the bottom of a 93-row list. So the row is asked to draw
+    /// exactly what the same row without a count draws — not a truncated label,
+    /// which is what a minimum width on the name gives instead (measured: the
+    /// same 25.75 pt stump for 5 as for 124, a count that lies about its number).
+    ///
+    /// The equality is over the whole row, indicator included, so an overflow
+    /// would fail it too: `fixedSize` alone pushed the colour bar 5.5 pt out of
+    /// the row's own frame here.
+    func testANarrowPanelDropsTheCountAndKeepsTheName() throws {
+        let longest = "wirenboard/node-red-contrib-wirenboard"
+        let width = 150.0
+        let bare = try renderRow(status: .blocked, count: 0, name: longest, topic: nil, width: width)
+        let bareSpan = try XCTUnwrap(bare.span)
+        // Not two empty rows being compared: the name has most of the line.
+        XCTAssertGreaterThan(bareSpan.upperBound - bareSpan.lowerBound, 60)
+
+        for count in [5, 123] {
+            let rendered = try renderRow(status: .blocked,
+                                         count: count,
+                                         name: longest,
+                                         topic: nil,
+                                         width: width)
+            XCTAssertEqual(rendered.ink, bare.ink, "count=\(count) still drew something at 150 pt")
+            // And the label is nowhere in the row: its ink would have to end
+            // somewhere, and the title line ends where the name's ellipsis does.
+            let labelWidth = try inkWidthOfLabel(count: count)
+            let slot = badgeSlot(inRowOfWidth: width)
+            let text = try XCTUnwrap(rendered.span(leftOf: slot.lowerBound - 3))
+            XCTAssertFalse(rendered.isBlank(from: text.upperBound - labelWidth - 3,
+                                            to: text.upperBound - labelWidth - 0.5),
+                           "there is a label-shaped gap in the title — count=\(count)")
+        }
+    }
+
+    /// The count's own ink, rendered on its own in the font the row draws it in.
+    private func inkWidthOfLabel(count: Int) throws -> Double {
+        let label = try XCTUnwrap(SwitcherRowView.countLabel(for: makeRow(status: .blocked, count: count)))
+        let alone = try measure(Text(label)
+            .font(.system(size: 13))
+            .foregroundStyle(.secondary)
+            .padding(Self.pad))
+        let ink = try XCTUnwrap(alone.span)
+        return ink.upperBound - ink.lowerBound
     }
 }
 
