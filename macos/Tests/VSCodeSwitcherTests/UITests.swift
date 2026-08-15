@@ -273,6 +273,19 @@ final class WindowOrderTests: XCTestCase {
                        ["new", "a", "b", "c"])
     }
 
+    /// The two sides can disagree, and this is the price that was accepted for
+    /// keeping the second one: the newcomer trails `c` (whose slot is the last)
+    /// and leads `a` (whose slot is the first), so it goes above `a` — and thus
+    /// above `b` and `c`, which currently outrank it. One layout on one
+    /// appearance, and the next show re-freezes from scratch. Pinned so that a
+    /// later repair of one side cannot quietly change the bargain: dropping the
+    /// second side sends a genuinely fresh window to the bottom in the commoner
+    /// case above, which is the trade this row buys.
+    func testTheTwoSidesDisagreeAndTheFrontOneWins() {
+        XCTAssertEqual(SwitcherViewModel.merged(["a", "b", "c"], with: ["b", "c", "new", "a"]),
+                       ["new", "a", "b", "c"])
+    }
+
     /// With nothing known behind it, the end is where the newcomer belongs —
     /// that is the plain "opened while the panel was up" case.
     func testANewWindowBehindEverythingKnownStillGoesToTheEnd() {
