@@ -135,7 +135,6 @@ final class ProjectSectionTests: XCTestCase {
                            window: nil,
                            sessions: Array(repeating: session, count: sessions),
                            state: sessions > 0 ? .permission : nil,
-                           stateCounts: sessions > 0 ? [StateCount(state: .permission, count: sessions)] : [],
                            activeSubagents: 0,
                            subagentDescriptions: [],
                            chatTopic: nil,
@@ -195,7 +194,6 @@ final class WindowOrderTests: XCTestCase {
                         window: nil,
                         sessions: [],
                         state: nil,
-                        stateCounts: [],
                         activeSubagents: 0,
                         subagentDescriptions: [],
                         chatTopic: nil,
@@ -493,7 +491,6 @@ final class SyntheticProjectTests: XCTestCase {
                            window: nil,
                            sessions: [session],
                            state: .working,
-                           stateCounts: [StateCount(state: .working, count: 1)],
                            activeSubagents: 0,
                            subagentDescriptions: [],
                            chatTopic: nil,
@@ -544,49 +541,42 @@ final class SyntheticProjectTests: XCTestCase {
     }
 }
 
-/// The pulse means "working" (§3), so it has to follow the state rather than the
-/// lifetime of the view that draws it.
-final class StateBadgeTests: XCTestCase {
-    func testOnlyWorkAndPermissionAnimate() {
-        XCTAssertTrue(StateBadge.animates(.working))
-        XCTAssertTrue(StateBadge.animates(.permission))
-        XCTAssertFalse(StateBadge.animates(.waiting))
-        XCTAssertFalse(StateBadge.animates(.idle))
+/// The pulse means "something is moving" (§3), so it has to follow the status
+/// rather than the lifetime of the view that draws it.
+final class StatusBadgeTests: XCTestCase {
+    /// Only movement pulses. `attention` holds for as long as the user takes to
+    /// come back, and a list where half the rows blink is a list nothing stands
+    /// out in.
+    func testOnlyActivityAnimates() {
+        XCTAssertTrue(StatusBadge.animates(.active))
+        XCTAssertFalse(StatusBadge.animates(.attention))
+        XCTAssertFalse(StatusBadge.animates(.asleep))
     }
 
-    func testEveryStateHasItsOwnColourAndLabel() {
-        let labels = Set(AgentState.allCases.map { StateBadge.label(for: $0) })
-        XCTAssertEqual(labels.count, AgentState.allCases.count)
-    }
-
-    /// The dot was replaced by an icon because a coloured dot names nothing:
-    /// the user had to remember what the colour meant, and the number beside it
-    /// looked like a count of something unnamed. Two states sharing a shape
-    /// would put that back.
-    func testEveryStateHasItsOwnSymbol() {
-        let symbols = AgentState.allCases.map { StateBadge.symbol(for: $0) }
-        XCTAssertEqual(Set(symbols).count, AgentState.allCases.count)
+    /// Each of the three has to be told apart by shape alone: the colour is a
+    /// second channel, not the only one.
+    func testEveryStatusHasItsOwnSymbol() {
+        let symbols = RowStatus.allCases.map { StatusBadge.symbol(for: $0) }
+        XCTAssertEqual(Set(symbols).count, RowStatus.allCases.count)
         XCTAssertFalse(symbols.contains(where: \.isEmpty))
     }
 
-    /// A name SF Symbols does not know draws nothing at all — the chip would be
-    /// an empty box with a number next to it, which is worse than the dot it
-    /// replaced. There is no compiler check for these strings.
+    /// A name SF Symbols does not know draws nothing at all — an empty slot
+    /// where the one indicator of the row should be. There is no compiler check
+    /// for these strings.
     func testEverySymbolNameActuallyResolves() {
-        for state in AgentState.allCases {
-            let name = StateBadge.symbol(for: state)
+        for status in RowStatus.allCases {
+            let name = StatusBadge.symbol(for: status)
             XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
                             "\(name) is not an SF Symbol")
         }
-        XCTAssertNotNil(NSImage(systemSymbolName: "gearshape.2.fill", accessibilityDescription: nil))
     }
 
-    /// The pulse marks "somebody has to do something, now" — plus the agent
-    /// actually moving. An answered chat is neither.
-    func testAQuestionPulsesAndAnAnsweredChatDoesNot() {
-        XCTAssertTrue(StateBadge.animates(.question))
-        XCTAssertFalse(StateBadge.animates(.waiting))
-        XCTAssertFalse(StateBadge.animates(.idle))
+    /// Every chat state still has its own word, because the tooltip is where
+    /// the fold is undone.
+    func testEveryStateHasItsOwnWord() {
+        let labels = Set(AgentState.allCases.map { SwitcherRowView.stateLabel(for: $0) })
+        XCTAssertEqual(labels.count, AgentState.allCases.count)
     }
 
     /// `repeatForever` does not stop when the panel is ordered out, so SwiftUI
@@ -595,10 +585,9 @@ final class StateBadgeTests: XCTestCase {
     /// is what ends the pulse, and the panel's visibility is half of that key.
     @MainActor
     func testThePulseOnlyRunsWhileThePanelIsOnScreen() {
-        XCTAssertEqual(StateBadge(state: .working, count: 1, panelVisible: true).pulseState,
-                       .working)
-        XCTAssertNil(StateBadge(state: .working, count: 1, panelVisible: false).pulseState)
-        XCTAssertNil(StateBadge(state: .waiting, count: 1, panelVisible: true).pulseState)
+        XCTAssertEqual(StatusBadge(status: .active, panelVisible: true).pulseState, .active)
+        XCTAssertNil(StatusBadge(status: .active, panelVisible: false).pulseState)
+        XCTAssertNil(StatusBadge(status: .attention, panelVisible: true).pulseState)
     }
 
     /// And the flag itself follows the panel.
@@ -653,7 +642,6 @@ final class RowTooltipTests: XCTestCase {
                            window: nil,
                            sessions: sessions,
                            state: aggregate.state,
-                           stateCounts: aggregate.stateCounts,
                            activeSubagents: subagents.count,
                            subagentDescriptions: subagents,
                            chatTopic: sessions.first?.topic,
@@ -682,7 +670,7 @@ final class RowTooltipTests: XCTestCase {
         }
         let text = SwitcherRowView.tooltipText(for: row(sessions))
         for state in AgentState.allCases {
-            XCTAssertTrue(text.contains(StateBadge.label(for: state)), "missing \(state)")
+            XCTAssertTrue(text.contains(SwitcherRowView.stateLabel(for: state)), "missing \(state)")
         }
     }
 

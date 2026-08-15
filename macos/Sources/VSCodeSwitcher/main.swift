@@ -86,7 +86,7 @@ enum ConsoleDump {
 
         print("Open windows (z-order, front first): \(snapshot.openWindows.count)")
         for (position, row) in snapshot.openWindows.enumerated() {
-            print("  \(position + 1). \(row.displayName)  \(row.colorHex)  [\(stateBreakdown(row))]")
+            print("  \(position + 1). \(row.displayName)  \(row.colorHex)  \(indicator(row))  [\(stateBreakdown(row))]")
             print("      title:     \(shorten(row.window?.title, 90))")
             print("      topic:     \(shorten(row.chatTopic, 90))")
             print("      model:     \(row.model ?? "-")   context: \(formatContext(row))   subagents: \(row.activeSubagents)")
@@ -110,7 +110,7 @@ enum ConsoleDump {
         if !strayed.isEmpty {
             print("Live sessions without a window: \(strayed.count)")
             for row in strayed {
-                print("  - \(row.displayName)  [\(stateBreakdown(row))]  \(shorten(row.chatTopic, 60))")
+                print("  - \(row.displayName)  \(indicator(row))  [\(stateBreakdown(row))]  \(shorten(row.chatTopic, 60))")
             }
             print("")
         }
@@ -134,13 +134,24 @@ enum ConsoleDump {
         return "\(activity.recentSessions) in \(config.activityWindowDays)d, last \(days)d ago"
     }
 
-    /// Every state the row's sessions are in, most urgent first — the same
-    /// breakdown the panel draws as chips, so the console can be used to check
-    /// what the row should look like.
+    /// What the row actually draws: the folded indicator and, when it is not
+    /// zero, the count beside it.
+    private static func indicator(_ row: SwitcherRow) -> String {
+        let count = row.activeCount
+        return count > 0 ? "\(row.status.rawValue) \(count)" : row.status.rawValue
+    }
+
+    /// Every state the row's chats are in, most urgent first. The row itself
+    /// stopped showing this breakdown — the tooltip and this dump are where it
+    /// lives now, which is why it is counted here rather than carried on the
+    /// row: `sessions` already holds every state, and a second copy of the same
+    /// facts is a second thing that can be wrong.
     private static func stateBreakdown(_ row: SwitcherRow) -> String {
-        guard !row.stateCounts.isEmpty else { return "-" }
-        return row.stateCounts
-            .map { "\($0.state.rawValue)\($0.count > 1 ? " x\($0.count)" : "")" }
+        guard !row.sessions.isEmpty else { return "-" }
+        return AgentState.allCases.reversed()
+            .map { state in (state, row.sessions.filter { $0.state == state }.count) }
+            .filter { $0.1 > 0 }
+            .map { "\($0.0.rawValue)\($0.1 > 1 ? " x\($0.1)" : "")" }
             .joined(separator: " ")
     }
 

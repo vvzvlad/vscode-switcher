@@ -33,15 +33,20 @@ enum AgentState: String, Codable, Sendable, CaseIterable, Comparable {
     }
 }
 
-/// How many of a row's sessions sit in one state.
+/// What a row's single indicator says, folded from every chat and background
+/// subagent it holds.
 ///
-/// A `[AgentState: Int]` would say the same thing, but `SwitcherRow` is
-/// `Codable` and Swift encodes dictionaries with non-`String` keys as a flat
-/// array of alternating keys and values, which is neither readable in `--dump
-/// --json` nor stable to read back. The pair is spelled out instead.
-struct StateCount: Sendable, Codable, Equatable {
-    var state: AgentState
-    var count: Int
+/// The row answers a question about the *window*, not about its chats: is
+/// something wanted from me, is anything moving, or is it all asleep. The
+/// per-chat breakdown lives in the tooltip.
+enum RowStatus: String, Sendable, Codable, CaseIterable {
+    /// Nothing running and nothing to answer.
+    case asleep
+    /// A chat is taking a turn, or a background subagent is running under one.
+    case active
+    /// A chat is waiting on the user: a question, a permission dialog, or a
+    /// finished turn nobody has read yet.
+    case attention
 }
 
 /// Where a session's state came from. Useful for diagnostics: the hook value is
@@ -181,10 +186,6 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     var sessions: [ClaudeSessionInfo]
     /// Highest state among `sessions`; `nil` when the row has none.
     var state: AgentState?
-    /// Every state present among `sessions` with its own count, most urgent
-    /// first. This is what the row draws: showing only the top state hid the
-    /// other chats entirely.
-    var stateCounts: [StateCount] = []
     /// Total active background subagents across `sessions`.
     var activeSubagents: Int
     var subagentDescriptions: [String]
@@ -199,6 +200,35 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     var contextFraction: Double? {
         guard let used = contextUsedTokens, let limit = contextLimitTokens, limit > 0 else { return nil }
         return Double(used) / Double(limit)
+    }
+
+    /// The one indicator the row draws.
+    ///
+    /// `state` is already the highest state among the row's chats, and the
+    /// priority order puts every state that waits on the user above `working`,
+    /// so the fold needs nothing else from them: a window where one chat
+    /// answered and another is still working wants the user either way.
+    /// Subagents are the second half of "something is moving" — they run while
+    /// every chat of the row sits in `idle`.
+    ///
+    /// A row with no chat at all is asleep like a row whose chats are: there is
+    /// nothing to do in it and nothing happening, which is the same answer.
+    var status: RowStatus {
+        switch state {
+        case .question, .permission, .waiting: return .attention
+        case .working: return .active
+        case .idle, .none: return activeSubagents > 0 ? .active : .asleep
+        }
+    }
+
+    /// The one number beside the indicator: chats taking a turn plus the
+    /// background subagents running under them.
+    ///
+    /// Orthogonal to `status` on purpose — a row can want an answer from the
+    /// user *and* have subagents grinding away, and both facts are worth
+    /// seeing at once.
+    var activeCount: Int {
+        sessions.filter { $0.state == .working }.count + activeSubagents
     }
 }
 

@@ -171,7 +171,6 @@ final class DataSource: @unchecked Sendable {
                                           window: nil,
                                           sessions: group,
                                           state: aggregate.state,
-                           stateCounts: aggregate.stateCounts,
                                           activeSubagents: aggregate.activeSubagents,
                                           subagentDescriptions: aggregate.subagentDescriptions,
                                           chatTopic: active?.topic,
@@ -204,7 +203,6 @@ final class DataSource: @unchecked Sendable {
                            window: window,
                            sessions: sessions,
                            state: aggregate.state,
-                           stateCounts: aggregate.stateCounts,
                            activeSubagents: aggregate.activeSubagents,
                            subagentDescriptions: aggregate.subagentDescriptions,
                            chatTopic: active?.topic ?? window.chatTopicPrefix,
@@ -229,7 +227,6 @@ final class DataSource: @unchecked Sendable {
                            window: nil,
                            sessions: sessions,
                            state: aggregate.state,
-                           stateCounts: aggregate.stateCounts,
                            activeSubagents: aggregate.activeSubagents,
                            subagentDescriptions: aggregate.subagentDescriptions,
                            chatTopic: active?.topic,
@@ -239,25 +236,17 @@ final class DataSource: @unchecked Sendable {
                            lastActivity: active?.lastActivity ?? project.mtime)
     }
 
-    /// What a row shows for a group of sessions: every state present with its
-    /// own count, the highest of them, and the running subagents underneath.
+    /// What a row shows for a group of sessions: the highest state among them
+    /// and the subagents running underneath.
     ///
-    /// The breakdown exists because the single top state hid the rest: a window
-    /// with six chats — four answered, two still working — showed `4`, and the
-    /// other two were nowhere. `stateCounts` runs from the most urgent state
-    /// down, which is the order the row draws them in.
+    /// The row folds this into one indicator (`SwitcherRow.status`); the
+    /// per-chat detail it does not draw is read straight off `sessions`, by the
+    /// tooltip and by `--dump`.
     static func aggregate(_ sessions: [ClaudeSessionInfo])
-        -> (state: AgentState?, stateCounts: [StateCount],
-            activeSubagents: Int, subagentDescriptions: [String]) {
-        let state = sessions.map(\.state).max()
-        let counts = AgentState.allCases
-            .map { value in StateCount(state: value, count: sessions.filter { $0.state == value }.count) }
-            .filter { $0.count > 0 }
-            .sorted { $0.state > $1.state }
-        return (state: state,
-                stateCounts: counts,
-                activeSubagents: sessions.reduce(0) { $0 + $1.activeSubagents },
-                subagentDescriptions: sessions.flatMap { $0.subagents.filter(\.isActive).compactMap(\.description) })
+        -> (state: AgentState?, activeSubagents: Int, subagentDescriptions: [String]) {
+        (state: sessions.map(\.state).max(),
+         activeSubagents: sessions.reduce(0) { $0 + $1.activeSubagents },
+         subagentDescriptions: sessions.flatMap { $0.subagents.filter(\.isActive).compactMap(\.description) })
     }
 
     // MARK: - Ranking

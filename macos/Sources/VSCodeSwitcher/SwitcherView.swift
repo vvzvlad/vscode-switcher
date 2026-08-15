@@ -496,32 +496,35 @@ struct SwitcherRowView: View {
 
     private var subtitle: String? { Self.rowSubtitle(row) }
 
-    /// One chip per state actually present in the row, plus the subagent count.
+    /// Two fixed columns on the right: how much is running, then the one
+    /// indicator saying what the window wants.
     ///
-    /// Two things used to sit here and no longer do. The row showed only the
-    /// highest state, so a window with six chats — four answered, two working —
-    /// read `4` and said nothing about the other two. And the context percentage
-    /// and the model belonged to *one* of those six chats while the numbers
-    /// beside them counted all six: two scales in one block with nothing marking
-    /// the boundary. Both moved into the tooltip, which has room to name the
-    /// chat each number belongs to.
-    @ViewBuilder
+    /// Both slots keep their width whether or not they have anything in them,
+    /// so the indicator sits at the same x in every row of the list. Chips
+    /// packed side by side moved it left and right from row to row depending on
+    /// what each row happened to hold, and a column that will not hold still
+    /// cannot be scanned.
+    ///
+    /// The per-state breakdown that used to be here is gone on purpose: what is
+    /// wanted from a window is one answer, not a census of its chats. The
+    /// census is in the tooltip, and so are the context percentage and the model
+    /// — those belong to *one* chat, and standing next to numbers that count
+    /// them all was exactly what confused the block.
     private var metrics: some View {
-        HStack(spacing: 7) {
-            if row.activeSubagents > 0 {
-                HStack(spacing: 2) {
-                    Image(systemName: "gearshape.2.fill")
-                        .font(.system(size: 9))
-                    Text("\(row.activeSubagents)")
-                        .font(.system(size: 10, weight: .medium).monospacedDigit())
-                }
+        HStack(spacing: 5) {
+            // Two digits wide. The busiest window on this machine runs five or
+            // six subagents, so a third digit would widen every row in the list
+            // for a case that does not happen; a count that outgrows the slot
+            // still draws in full, it only eats into the gap.
+            Text(row.activeCount > 0 ? "\(row.activeCount)" : "")
+                .font(.system(size: 10, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.secondary)
-            }
-            ForEach(row.stateCounts, id: \.state) { entry in
-                StateBadge(state: entry.state, count: entry.count, panelVisible: panelVisible)
-            }
+                .frame(width: 15, alignment: .trailing)
+            // The badge draws itself in a box of its own, so this slot needs no
+            // width of its own — one place decides it, and the two cannot drift
+            // apart.
+            StatusBadge(status: row.status, panelVisible: panelVisible)
         }
-        .fixedSize(horizontal: true, vertical: false)
     }
 
     /// Hover deepens the frontmost highlight instead of replacing it: swapping
@@ -548,7 +551,7 @@ struct SwitcherRowView: View {
             lines.append("")
             lines.append("Чаты:")
             for session in row.sessions {
-                var parts = [StateBadge.label(for: session.state)]
+                var parts = [Self.stateLabel(for: session.state)]
                 if let topic = shorten(session.topic, 56) { parts.append(topic) }
                 if let context = contextLabel(used: session.contextUsedTokens,
                                               fraction: session.contextFraction) {
@@ -571,6 +574,19 @@ struct SwitcherRowView: View {
             lines.append(path)
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// A chat's state in words. The tooltip is the only place the five states
+    /// are still told apart — the row folds them into three — so this is where
+    /// the vocabulary lives.
+    static func stateLabel(for state: AgentState) -> String {
+        switch state {
+        case .question: return "Задал вопрос"
+        case .permission: return "Ждёт разрешения"
+        case .waiting: return "Ответил, ждёт реакции"
+        case .working: return "Работает"
+        case .idle: return "Простаивает"
+        }
     }
 
     /// The chat topic as the second line of the row shows it: one line, trimmed.
@@ -617,40 +633,44 @@ struct SwitcherRowView: View {
     }
 }
 
-// MARK: - State badge
+// MARK: - Status badge
 
-struct StateBadge: View {
-    let state: AgentState
-    let count: Int
+/// The row's single indicator: what the window wants, folded from every chat and
+/// subagent in it (`SwitcherRow.status`).
+struct StatusBadge: View {
+    let status: RowStatus
     /// The badge is on screen. See `pulseState`.
     var panelVisible: Bool = true
 
     @State private var pulsing = false
 
-    /// The state to pulse for, or `nil` when there must be no pulse at all —
+    /// The status to pulse for, or `nil` when there must be no pulse at all —
     /// including "the panel is not on screen", because `repeatForever` outlives
     /// the window it was started in (see `SwitcherViewModel.panelVisible`).
     ///
-    /// Both the `task` id and the dot's own identity hang off this, and both are
-    /// needed: the task decides when to start a pulse, the identity is what ends
-    /// one.
-    var pulseState: AgentState? {
-        guard panelVisible, Self.animates(state) else { return nil }
-        return state
+    /// Both the `task` id and the icon's own identity hang off this, and both
+    /// are needed: the task decides when to start a pulse, the identity is what
+    /// ends one.
+    var pulseState: RowStatus? {
+        guard panelVisible, Self.animates(status) else { return nil }
+        return status
     }
 
     var body: some View {
-        HStack(spacing: 2) {
-            // An icon rather than a coloured dot: the dot told the user there
-            // was *a* state and left the meaning to be memorised, while the
-            // number beside it looked like a count of something unnamed. The
-            // shape names the state, and the tooltip spells it out in words.
-            Image(systemName: Self.symbol(for: state))
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Self.color(for: state))
-                .frame(width: 13, height: 11)
-                .opacity(pulsing ? 0.35 : 1)
-                .scaleEffect(pulsing ? 0.86 : 1)
+        // An icon rather than a coloured dot: the dot told the user there was
+        // *a* state and left the meaning to be memorised. Each of the three
+        // shapes is different enough to be read without the colour, and the
+        // tooltip spells the chats out in words.
+        Image(systemName: Self.symbol(for: status))
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Self.color(for: status))
+            // A fixed box, because the three glyphs are not the same width: the
+            // sleeping moon is wider than the tick, and without a box of its own
+            // the indicator would sit at a different x in every row — which is
+            // the whole complaint the fold was made to answer.
+            .frame(width: 14, height: 12)
+            .opacity(pulsing ? 0.35 : 1)
+            .scaleEffect(pulsing ? 0.86 : 1)
                 // The one thing that actually *stops* a `repeatForever`. Writing
                 // `pulsing = false` below only moves the value the animation
                 // drives at; the cycle goes on running against a target it
@@ -662,78 +682,55 @@ struct StateBadge: View {
                 // window's content view hidden as well, which was the other
                 // candidate. A new identity throws the animated attribute away
                 // and the animation attached to it with it.
-                .id(pulseState)
-            if count > 1 {
-                Text("\(count)")
-                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Self.color(for: state))
+            .id(pulseState)
+            // Keyed on `pulseState`, not on appearance. The badge sits in a
+            // stable spot in the hierarchy, so when a row changes status
+            // SwiftUI reuses the view and `onAppear` never runs again: an
+            // `active` row that received `Stop` turned green and kept the
+            // endless pulse of the blue icon it replaced, and a row first drawn
+            // asleep never started pulsing when the agent began its turn. With
+            // updates once a second that is the normal case, not an edge one.
+            .task(id: pulseState) {
+                pulsing = false
+                guard pulseState != nil else { return }
+                // Let the reset land in its own transaction. Both mutations in
+                // one pass would cancel out for a change that keeps the
+                // animation on, leaving the previous rhythm running.
+                try? await Task.sleep(for: .milliseconds(50))
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                    pulsing = true
+                }
             }
-        }
-        // Keyed on `pulseState`, not on appearance. The badge sits in a stable
-        // spot in the hierarchy, so when a row changes state SwiftUI reuses the
-        // view and `onAppear` never runs again: a `working` row that received
-        // `Stop` turned green and kept the endless pulse of the blue dot it
-        // replaced, and a row first drawn as `idle` never started pulsing when
-        // the agent began its turn. With updates once a second that is the
-        // normal case, not an edge one — and §3 says the pulse means "working".
-        .task(id: pulseState) {
-            pulsing = false
-            guard pulseState != nil else { return }
-            // Let the reset land in its own transaction. Both mutations in one
-            // pass would cancel out for a state change that keeps the animation
-            // on (working → permission), leaving the previous rhythm running.
-            try? await Task.sleep(for: .milliseconds(50))
-            guard !Task.isCancelled else { return }
-            // `pulseState` is nil unless the state animates, so only the three
-            // animating states reach here: the ones that want the user now
-            // (`question`, `permission`) beat faster than plain `working`.
-            withAnimation(.easeInOut(duration: state == .working ? 0.9 : 0.55)
-                .repeatForever(autoreverses: true)) {
-                pulsing = true
-            }
-        }
-        // No `.help` here on purpose. The row carries one tooltip for the whole
-        // line; a second one on the badge made the text the user got depend on
-        // which pixel the pointer happened to be over.
+            // No `.help` here on purpose. The row carries one tooltip for the
+            // whole line; a second one on the badge made the text the user got
+            // depend on which pixel the pointer happened to be over.
     }
 
-    /// SF Symbols, one shape per state.
-    static func symbol(for state: AgentState) -> String {
-        switch state {
-        case .question: return "questionmark.bubble.fill"
-        case .permission: return "hand.raised.fill"
-        case .waiting: return "checkmark.circle.fill"
-        case .working: return "arrow.triangle.2.circlepath"
-        case .idle: return "moon.zzz.fill"
+    /// SF Symbols, one shape per status. The shapes are the ones the states
+    /// they fold used to wear, so the habit carries over: the green tick of an
+    /// answered chat, the turning arrows of a working one, the sleeping moon.
+    static func symbol(for status: RowStatus) -> String {
+        switch status {
+        case .attention: return "checkmark.circle.fill"
+        case .active: return "arrow.triangle.2.circlepath"
+        case .asleep: return "moon.zzz.fill"
         }
     }
 
     /// Semantic system colours only — they follow light and dark appearance.
-    static func color(for state: AgentState) -> Color {
-        switch state {
-        case .question: return .yellow
-        case .permission: return .orange
-        case .waiting: return .green
-        case .working: return .blue
-        case .idle: return .secondary
+    static func color(for status: RowStatus) -> Color {
+        switch status {
+        case .attention: return .green
+        case .active: return .blue
+        case .asleep: return .secondary
         }
     }
 
-    /// The states that are waiting on the user or moving right now. `waiting`
-    /// is neither: the agent finished its turn and nothing is on fire.
-    static func animates(_ state: AgentState) -> Bool {
-        state == .permission || state == .working || state == .question
-    }
-
-    static func label(for state: AgentState) -> String {
-        switch state {
-        case .question: return "Задал вопрос"
-        case .permission: return "Ждёт разрешения"
-        case .waiting: return "Ответил, ждёт реакции"
-        case .working: return "Работает"
-        case .idle: return "Простаивает"
-        }
-    }
+    /// Only movement pulses. `attention` does not: it is the resting state of a
+    /// window that has said its piece, it holds for as long as the user takes,
+    /// and a list where half the rows blink is a list nothing stands out in.
+    static func animates(_ status: RowStatus) -> Bool { status == .active }
 }
 
 // MARK: - Colour helper
