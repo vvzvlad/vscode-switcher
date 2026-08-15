@@ -1,6 +1,7 @@
 #!/bin/bash
 # Tests for hooks/claude-window-status.sh — the state machine that decides what
-# the panel shows for every chat.
+# the panel shows for every chat — plus the debug-dump cap of hooks/statusline.sh
+# at the very end.
 #
 # The hook is the riskiest artefact here: six events, three guards, and it runs
 # inside every session the user has open, where a wrong answer is either a lost
@@ -414,6 +415,19 @@ unset VSCODE_SWITCHER_DEBUG
 start "without VSCODE_SWITCHER_DEBUG nothing is dumped"
 send "$(payload Stop)"
 check "no dump" "$([ -e "$VSCODE_SWITCHER_STATUS_DIR/_debug.jsonl" ] && echo present || echo absent)" "absent"
+
+start "the statusLine dump is capped too"
+# The same cap on the other hook: it runs on every conversation update, so an
+# uncapped append there grows just as fast.
+export VSCODE_SWITCHER_DEBUG=1
+dump="$VSCODE_SWITCHER_STATUS_DIR/_debug-statusline.jsonl"
+printf '{"session_id":"%s","cwd":"/tmp/project"}' "$SESSION" | bash "$REPO_DIR/hooks/statusline.sh" >/dev/null
+check "dump written" "$([ -s "$dump" ] && echo yes || echo no)" "yes"
+mkfile -n 5m "$dump" 2>/dev/null || dd if=/dev/zero of="$dump" bs=1m count=5 2>/dev/null
+printf '{"session_id":"%s","cwd":"/tmp/project"}' "$SESSION" | bash "$REPO_DIR/hooks/statusline.sh" >/dev/null
+check "rotated" "$([ -s "$dump.1" ] && echo yes || echo no)" "yes"
+check "fresh dump is small" "$([ "$(wc -c <"$dump")" -lt 4194304 ] && echo yes || echo no)" "yes"
+unset VSCODE_SWITCHER_DEBUG
 
 echo
 echo "hook tests: $PASS passed, $FAIL failed"

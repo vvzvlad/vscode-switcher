@@ -18,16 +18,27 @@
 # file would let a stale statusLine invocation overwrite a fresh state.
 #
 # Debugging: VSCODE_SWITCHER_DEBUG=1 appends the raw stdin to
-# $STATUS_DIR/_debug-statusline.jsonl.
+# $STATUS_DIR/_debug-statusline.jsonl. That file holds whole payloads, so it is
+# opt-in and capped, exactly like the one the state hook writes.
 
 STATUS_DIR="${VSCODE_SWITCHER_STATUS_DIR:-$HOME/.claude/window-status}"
+DEBUG_MAX_BYTES=4194304
 
 payload=$(cat 2>/dev/null)
 
 mkdir -p "$STATUS_DIR" 2>/dev/null
 
+# Capped exactly like the dump in claude-window-status.sh, and for the same
+# reason: this runs on every conversation update in every open session, so an
+# unbounded append grows without anyone watching it. One rotation at 4 MiB keeps
+# the recent payloads and bounds the total at twice that.
 if [ "${VSCODE_SWITCHER_DEBUG:-0}" = "1" ]; then
-	printf '%s\n' "$payload" >>"$STATUS_DIR/_debug-statusline.jsonl" 2>/dev/null
+	debug_log="$STATUS_DIR/_debug-statusline.jsonl"
+	debug_size=$(stat -f %z "$debug_log" 2>/dev/null || echo 0)
+	if [ "${debug_size:-0}" -ge "$DEBUG_MAX_BYTES" ]; then
+		mv -f "$debug_log" "$debug_log.1" 2>/dev/null
+	fi
+	printf '%s\n' "$payload" >>"$debug_log" 2>/dev/null
 fi
 
 JQ=$(command -v jq 2>/dev/null)

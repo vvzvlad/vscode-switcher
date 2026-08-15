@@ -148,8 +148,11 @@ Code, а модель и занятый контекст — из `statusLine`. 
 
 ```sh
 make hooks                        # = scripts/install-hooks.sh
-scripts/install-hooks.sh --debug  # плюс дамп сырых payload'ов в ~/.claude/window-status/_debug.jsonl
-                                  # (там целиком промпты и ответы ассистента; ротация на 4 МиБ)
+scripts/install-hooks.sh --debug  # плюс дамп сырых payload'ов в ~/.claude/window-status/:
+                                  #   _debug.jsonl            — хук состояния
+                                  #   _debug-statusline.jsonl — statusLine
+                                  # (там целиком промпты и ответы ассистента; у обоих ротация
+                                  #  на 4 МиБ, то есть не больше 8 МиБ на файл вместе с .1)
 scripts/install-hooks.sh --uninstall
 ```
 
