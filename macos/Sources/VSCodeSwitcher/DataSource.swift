@@ -180,7 +180,7 @@ final class DataSource: @unchecked Sendable {
                                           lastActivity: group.compactMap(\.lastActivity).max()))
         }
 
-        return SwitcherSnapshot(openWindows: openWindows,
+        return SwitcherSnapshot(openWindows: Self.rankedWindows(openWindows),
                                 projects: Self.rankedOrphans(orphanRows)
                                     + Self.ranked(projectRows, activity: activity),
                                 accessibilityTrusted: accessibilityTrusted,
@@ -250,6 +250,42 @@ final class DataSource: @unchecked Sendable {
     }
 
     // MARK: - Ranking
+
+    /// Orders the open windows by the last message written in them, newest
+    /// first.
+    ///
+    /// The z-order the Accessibility API reports is the stack of what was
+    /// clicked, not of what is happening: a window untouched since morning sits
+    /// on top merely because it was focused last. The panel is opened to find
+    /// the window something is going on in, so the key is the newest activity
+    /// among the row's chats — the mtime of a transcript, which is the moment
+    /// its last message was written.
+    ///
+    /// The row's own `lastActivity` is not that key: it belongs to the *shown*
+    /// chat, and a window whose visible chat is idle can hold another that
+    /// answered a second ago.
+    ///
+    /// A row with no chat has no activity at all and goes to the end in the
+    /// z-order it arrived in. That is a consequence worth naming: a window
+    /// opened by hand, with no agent in it, sinks below every window that has
+    /// one.
+    static func rankedWindows(_ rows: [SwitcherRow]) -> [SwitcherRow] {
+        // Ties fall back to the arrival index rather than to nothing: `sorted`
+        // is not stable, so windows the activity cannot separate — every
+        // window without a chat, and any two stamped in the same second — would
+        // otherwise be free to swap places between two snapshots a second
+        // apart, which is the reshuffling this ordering exists to stop.
+        rows.enumerated().sorted { left, right in
+            let leftActivity = left.element.sessions.compactMap(\.lastActivity).max()
+            let rightActivity = right.element.sessions.compactMap(\.lastActivity).max()
+            switch (leftActivity, rightActivity) {
+            case let (leftDate?, rightDate?) where leftDate != rightDate: return leftDate > rightDate
+            case (.some, nil): return true
+            case (nil, .some): return false
+            default: return left.offset < right.offset
+            }
+        }.map(\.element)
+    }
 
     /// Orders the orphan `cwd:` rows, which are put ahead of every project row.
     ///

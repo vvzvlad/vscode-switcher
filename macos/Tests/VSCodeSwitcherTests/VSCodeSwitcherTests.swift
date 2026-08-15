@@ -1342,6 +1342,107 @@ enum TestFixtures {
     }
 }
 
+/// The order of the "open windows" section: the last message written in each
+/// window, newest first. The z-order the Accessibility API reports is the stack
+/// of what was clicked, and a window untouched since morning sits on top of it
+/// merely because it was focused last.
+final class WindowOrderingTests: XCTestCase {
+
+    private func minutesAgo(_ minutes: Double) -> Date {
+        Date(timeIntervalSince1970: 1_800_000_000).addingTimeInterval(-minutes * 60)
+    }
+
+    /// One window row holding a chat per stamp given, in the z-order position it
+    /// is passed in.
+    private func row(_ name: String, _ activity: [Date?], shown: Date? = nil) -> SwitcherRow {
+        let sessions = activity.enumerated().map { offset, stamp -> ClaudeSessionInfo in
+            var session = TestFixtures.session(id: "\(name)-\(offset)", cwd: "/p/\(name)", state: .idle)
+            session.lastActivity = stamp
+            return session
+        }
+        return SwitcherRow(id: "window:1:w-\(name)",
+                           kind: .window,
+                           displayName: name,
+                           colorHex: "#000000",
+                           project: nil,
+                           window: nil,
+                           sessions: sessions,
+                           state: sessions.isEmpty ? nil : .idle,
+                           activeSubagents: 0,
+                           subagentDescriptions: [],
+                           chatTopic: nil,
+                           model: nil,
+                           contextUsedTokens: nil,
+                           contextLimitTokens: nil,
+                           lastActivity: shown)
+    }
+
+    private func ordered(_ rows: [SwitcherRow]) -> [String] {
+        DataSource.rankedWindows(rows).map(\.displayName)
+    }
+
+    func testTheWindowWithTheLastMessageComesFirst() {
+        // Handed over in z-order, which says the opposite.
+        XCTAssertEqual(ordered([row("stale", [minutesAgo(90)]),
+                                row("fresh", [minutesAgo(1)]),
+                                row("middling", [minutesAgo(10)])]),
+                       ["fresh", "middling", "stale"])
+    }
+
+    /// The key is the newest chat of the row, not the one the row happens to
+    /// show: a window whose visible chat has been idle for an hour can hold
+    /// another that answered a second ago.
+    func testTheKeyIsTheNewestChatNotTheShownOne() {
+        let mixed = row("mixed", [minutesAgo(90), minutesAgo(1)], shown: minutesAgo(90))
+        XCTAssertEqual(ordered([row("plain", [minutesAgo(10)]), mixed]), ["mixed", "plain"])
+    }
+
+    /// A window with no chat has no activity at all. It goes below every window
+    /// that has one — the accepted price of ordering by activity: a window
+    /// opened by hand, with no agent in it, sinks to the bottom.
+    func testAWindowWithNoChatSinksBelowEveryWindowThatHasOne() {
+        XCTAssertEqual(ordered([row("empty", []), row("ancient", [minutesAgo(10_000)])]),
+                       ["ancient", "empty"])
+    }
+
+    /// And among themselves those keep the z-order they arrived in. `sorted` is
+    /// not stable, so without the arrival index they were free to swap places
+    /// between two snapshots a second apart.
+    func testWindowsWithNoChatKeepTheirZOrder() {
+        XCTAssertEqual(ordered([row("first", []), row("second", []), row("third", [])]),
+                       ["first", "second", "third"])
+    }
+
+    func testEqualStampsKeepTheZOrder() {
+        let same = minutesAgo(5)
+        XCTAssertEqual(ordered([row("a", [same]), row("b", [same]), row("c", [same])]),
+                       ["a", "b", "c"])
+        // A chat with no stamp of its own does not drag its row down when
+        // another chat in the same window has one.
+        XCTAssertEqual(ordered([row("nostamp", [nil]), row("stamped", [same])]),
+                       ["stamped", "nostamp"])
+    }
+
+    /// And the snapshot comes out ordered, not just the helper.
+    func testTheAssembledSnapshotIsOrderedByActivity() {
+        let projects = [TestFixtures.project(path: "/p/stale", rootName: "stale"),
+                        TestFixtures.project(path: "/p/fresh", rootName: "fresh")]
+        // z-order: the stale window is in front, because it was clicked last.
+        let windows = [TestFixtures.window(index: 0, title: "topic \u{2014} stale (Workspace)", windowNumber: 1),
+                       TestFixtures.window(index: 1, title: "topic \u{2014} fresh (Workspace)", windowNumber: 2)]
+        let sessions = [TestFixtures.session(id: "s1", cwd: "/p/stale", state: .idle,
+                                             lastActivity: minutesAgo(90)),
+                        TestFixtures.session(id: "s2", cwd: "/p/fresh", state: .idle,
+                                             lastActivity: minutesAgo(1))]
+
+        let snapshot = DataSource.assemble(projects: projects,
+                                           windows: windows,
+                                           sessions: sessions,
+                                           accessibilityTrusted: true)
+        XCTAssertEqual(snapshot.openWindows.map(\.displayName), ["fresh", "stale"])
+    }
+}
+
 /// The order of the "projects" section: how much Claude Code work happened in
 /// each project inside the activity window. Directory mtime, which this used to
 /// be, does not move when a file inside the project is edited, so the order it

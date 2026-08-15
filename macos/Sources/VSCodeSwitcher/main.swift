@@ -84,7 +84,7 @@ enum ConsoleDump {
         print("  accessibility:    \(snapshot.accessibilityTrusted ? "granted" : "NOT GRANTED — window list will be empty")")
         print("")
 
-        print("Open windows (z-order, front first): \(snapshot.openWindows.count)")
+        print("Open windows (last message first): \(snapshot.openWindows.count)")
         for (position, row) in snapshot.openWindows.enumerated() {
             print("  \(position + 1). \(row.displayName)  \(row.colorHex)  \(indicator(row))  [\(stateBreakdown(row))]")
             print("      title:     \(shorten(row.window?.title, 90))")

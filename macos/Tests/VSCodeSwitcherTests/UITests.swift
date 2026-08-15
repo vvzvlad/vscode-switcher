@@ -357,6 +357,21 @@ final class WindowOrderTests: XCTestCase {
         XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
     }
 
+    /// The freeze now holds against a second source of movement. The data layer
+    /// orders the windows by the last message written in each, so a row moves
+    /// when an agent says something — no click needed — and that is every bit as
+    /// unwelcome under a pointer already travelling towards a row.
+    func testTheOrderHoldsWhenAnAgentReordersTheWindows() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["a", "b", "c"], generatedAt: Date()))
+        model.panelDidShow()
+        model.update(snapshot: snapshot(["a", "b", "c"], generatedAt: Date()))
+
+        // An agent in "c" answers: the data layer now puts it first.
+        model.update(snapshot: snapshot(["c", "a", "b"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
+    }
+
     /// Clicking raises a window, and the snapshot that follows reports the new
     /// z-order. It must not be mistaken for the fresh order to freeze on.
     func testAClickSettlesTheOrderStraightAway() {
