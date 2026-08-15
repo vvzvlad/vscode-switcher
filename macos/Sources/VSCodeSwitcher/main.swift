@@ -86,7 +86,7 @@ enum ConsoleDump {
 
         print("Open windows (last message first): \(snapshot.openWindows.count)")
         for (position, row) in snapshot.openWindows.enumerated() {
-            print("  \(position + 1). \(row.displayName)  \(row.colorHex)  \(indicator(row))  [\(stateBreakdown(row))]")
+            print("  \(position + 1). \(title(row))  \(row.colorHex)  \(indicator(row))  [\(stateBreakdown(row))]")
             print("      title:     \(shorten(row.window?.title, 90))")
             print("      topic:     \(shorten(row.chatTopic, 90))")
             print("      model:     \(row.model ?? "-")   context: \(formatContext(row))   subagents: \(row.activeSubagents)")
@@ -110,7 +110,7 @@ enum ConsoleDump {
         if !strayed.isEmpty {
             print("Live sessions without a window: \(strayed.count)")
             for row in strayed {
-                print("  - \(row.displayName)  \(indicator(row))  [\(stateBreakdown(row))]  \(shorten(row.chatTopic, 60))")
+                print("  - \(title(row))  \(indicator(row))  [\(stateBreakdown(row))]  \(shorten(row.chatTopic, 60))")
             }
             print("")
         }
@@ -122,7 +122,12 @@ enum ConsoleDump {
             // The indicator is printed here too, because this is where the rule
             // "no chat, no subagent, no icon" is worth seeing: most of this
             // section is projects nobody has run an agent in.
-            print("  - \(column(shorten(row.displayName, 34), 34)) \(row.colorHex)"
+            // The name is what gives way when it is too long, exactly as in the
+            // panel: the count in brackets stays whole and pushes the columns
+            // after it to the right rather than being cut off.
+            let name = shorten(row.displayName, 34)
+                + (SwitcherRowView.countLabel(for: row).map { " " + $0 } ?? "")
+            print("  - \(column(name, 34)) \(row.colorHex)"
                 + "  \(column(indicator(row), 12))"
                 + "  \(column(workspace, 9))  \(activity(row, config: config))")
         }
@@ -149,13 +154,18 @@ enum ConsoleDump {
         return "\(activity.recentSessions) in \(config.activityWindowDays)d, last \(days)d ago"
     }
 
-    /// What the row actually draws: the folded indicator and, when it is not
-    /// zero, the count beside it. A row with no chat and no subagent draws
-    /// neither, and prints as `-` here.
+    /// The folded indicator the row draws on its right. A row with no chat and
+    /// no subagent draws none, and prints as `-` here.
     private static func indicator(_ row: SwitcherRow) -> String {
-        guard let status = row.status else { return "-" }
-        let count = row.activeCount
-        return count > 0 ? "\(status.rawValue) \(count)" : status.rawValue
+        row.status?.rawValue ?? "-"
+    }
+
+    /// The row's title as the panel writes it: the name, then the count in
+    /// brackets when something is running. Same helper the view uses, so the
+    /// dump cannot describe a row the panel does not draw.
+    private static func title(_ row: SwitcherRow) -> String {
+        guard let label = SwitcherRowView.countLabel(for: row) else { return row.displayName }
+        return "\(row.displayName) \(label)"
     }
 
     /// Every state the row's chats are in, most urgent first. The row itself

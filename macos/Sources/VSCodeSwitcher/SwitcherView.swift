@@ -485,10 +485,45 @@ struct SwitcherRowView: View {
                 .frame(maxHeight: .infinity)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(row.displayName)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                HStack(spacing: 4) {
+                    Text(row.displayName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if let countLabel = Self.countLabel(for: row) {
+                        // `.secondary` at the name's own size, in the regular
+                        // weight: it has to read as a separate thing from the
+                        // name it follows, without reading as the same thing as
+                        // the chat topic under it — which is `.secondary` too,
+                        // but at 11 pt. Size and line keep those two apart.
+                        // `.tertiary` was the alternative and is too faint for
+                        // this: at roughly a quarter opacity over a blurred
+                        // material it dims a number that answers "how much is
+                        // running here" into decoration.
+                        //
+                        // The name gives way, the count never does: `fixedSize`
+                        // makes this text inflexible, so the `HStack` takes the
+                        // shortfall out of the name's ellipsis instead. The
+                        // other way round the count would be the first thing to
+                        // vanish on a long name — which is exactly the row it is
+                        // most worth reading on.
+                        //
+                        // At the default 380 pt it changes nothing, and that is
+                        // not an argument for dropping it: `HStack` offers each
+                        // flexible child an equal share and passes on what it
+                        // does not take, so a 63 pt label is well inside its
+                        // ~160 pt share there and the shrink lands on the name
+                        // by itself. `panelWidth` is a setting, though, and at
+                        // 150 pt the label is more than its share — measured
+                        // without this modifier, `(agents: 5)` comes out as
+                        // 25.75 pt of ink instead of 63.25, the same stump as
+                        // `(agents: 123)`. `RowLayoutTests` renders both widths.
+                        Text(countLabel)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
                 if let subtitle {
                     Text(subtitle)
                         .font(.system(size: 11))
@@ -499,7 +534,7 @@ struct SwitcherRowView: View {
             }
 
             Spacer(minLength: 6)
-            metrics
+            StatusBadge(status: row.status, panelVisible: panelVisible)
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 6)
@@ -512,8 +547,17 @@ struct SwitcherRowView: View {
 
     private var subtitle: String? { Self.rowSubtitle(row) }
 
-    private var metrics: some View {
-        RowMetrics(status: row.status, count: row.activeCount, panelVisible: panelVisible)
+    /// The count as the title line carries it, or `nil` when there is nothing
+    /// running: at zero the brackets go away entirely and the row is just its
+    /// name.
+    ///
+    /// The wording and the brackets are the user's, verbatim. Shared with
+    /// `--dump`, so the two cannot drift — and `nonisolated` for exactly that
+    /// reason: `View` infers `@MainActor` for the whole type, and the dump runs
+    /// outside it. A pure function of a `Sendable` value needs no actor.
+    nonisolated static func countLabel(for row: SwitcherRow) -> String? {
+        let count = row.activeCount
+        return count > 0 ? "(agents: \(count))" : nil
     }
 
     /// Hover deepens the frontmost highlight instead of replacing it: swapping
@@ -622,82 +666,29 @@ struct SwitcherRowView: View {
     }
 }
 
-// MARK: - Right-hand columns
-
-/// Two fixed columns on the right of every row: how much is running, then the
-/// one indicator saying what the window wants.
-///
-/// Both slots keep their width whether or not they have anything in them, so the
-/// indicator sits at the same x in every row of the list. Chips packed side by
-/// side moved it left and right from row to row depending on what each row
-/// happened to hold, and a column that will not hold still cannot be scanned.
-///
-/// The per-state breakdown that used to be here is gone on purpose: what is
-/// wanted from a window is one answer, not a census of its chats. The census is
-/// in the tooltip, and so are the context percentage and the model — those
-/// belong to *one* chat, and standing next to numbers that count them all was
-/// exactly what confused the block.
-///
-/// Split out of `SwitcherRowView` so the layout test can render the block the
-/// panel actually draws rather than a copy of it: the fixed columns are the
-/// whole point of this round, and a test of a replica proves nothing about the
-/// original.
-struct RowMetrics: View {
-    let status: RowStatus?
-    let count: Int
-    var panelVisible: Bool = true
-
-    /// Two digits wide. The busiest window on this machine runs five or six
-    /// subagents, so a third digit would widen every row in the list for a case
-    /// that does not happen.
-    static let countWidth: CGFloat = 15
-    static let spacing: CGFloat = 5
-    /// What the block measures, whatever is in it. Pinned by a test.
-    static var totalWidth: CGFloat { countWidth + spacing + StatusBadge.boxWidth }
-
-    var body: some View {
-        HStack(spacing: Self.spacing) {
-            // `fixedSize` is the one modifier that makes a count too big for the
-            // slot draw *in full*, spilling left into the gap: it proposes the
-            // text its ideal width, and the 15 pt frame then only places it.
-            // Drop it and the text takes the frame's width instead — a
-            // hypothetical 123 comes out as a bare ellipsis, the number gone
-            // altogether; drop a line limit along with it and the text wraps,
-            // "12" over "3", and the block grows from 13 pt tall to 26.
-            // A `lineLimit(1)` next to `fixedSize` cannot change any of that —
-            // ideal width is one line by construction, measured to the same ink
-            // either way — so there is none. Measured, not eyeballed:
-            // `RowMetricsLayoutTests`.
-            Text(count > 0 ? "\(count)" : "")
-                .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: true, vertical: false)
-                .frame(width: Self.countWidth, alignment: .trailing)
-            // The badge draws itself in a box of its own — empty box included,
-            // for a row with nothing to report — so this slot needs no width of
-            // its own: one place decides it, and the two cannot drift apart.
-            StatusBadge(status: status, panelVisible: panelVisible)
-        }
-    }
-}
-
 // MARK: - Status badge
 
 /// The row's single indicator: what the window wants, folded from every chat and
-/// subagent in it (`SwitcherRow.status`).
+/// subagent in it (`SwitcherRow.status`). The whole right-hand side of a row,
+/// and the reason it is one slot rather than two: the count moved into the title
+/// line, and the per-state census of chats it once stood beside moved into the
+/// tooltip.
 ///
 /// A `nil` status draws an empty box of the same size. The slot is what has to
 /// be fixed, not the icon: a row with no chat and no subagent has nothing to
 /// report, and an icon there would say "asleep" about a project that simply has
 /// no agent — the same mark on ninety-odd rows of the "projects" section,
-/// distinguishing nothing.
+/// distinguishing nothing. Before the fixed box there were chips packed side by
+/// side, and the icon moved left and right from row to row depending on what
+/// each row happened to hold; a column that will not hold still cannot be
+/// scanned.
 struct StatusBadge: View {
     let status: RowStatus?
     /// The badge is on screen. See `pulseState`.
     var panelVisible: Bool = true
 
-    /// The slot every glyph is centred in, and the empty case holds. Pinned by
-    /// a test, and quoted by `RowMetrics.totalWidth`.
+    /// The slot every glyph is centred in, and the empty case holds. The whole
+    /// width of the row's right-hand side, and pinned by a test.
     static let boxWidth: CGFloat = 14
     static let boxHeight: CGFloat = 12
 

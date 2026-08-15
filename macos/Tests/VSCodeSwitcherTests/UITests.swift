@@ -643,28 +643,66 @@ final class StatusBadgeTests: XCTestCase {
     }
 }
 
+/// The title line carries the count now, in the wording the user asked for.
+@MainActor
+final class RowTitleTests: XCTestCase {
+
+    private func row(working: Int, subagents: Int) -> SwitcherRow {
+        var sessions = (0..<max(working, 1)).map {
+            TestFixtures.session(id: "s\($0)", cwd: "/tmp/p", state: working > 0 ? .working : .idle)
+        }
+        sessions[0].activeSubagents = subagents
+        let aggregate = DataSource.aggregate(sessions)
+        return SwitcherRow(id: "project:/tmp/p",
+                           kind: .project,
+                           displayName: "vscode-switcher",
+                           colorHex: "#000000",
+                           project: nil,
+                           window: nil,
+                           sessions: sessions,
+                           state: aggregate.state,
+                           activeSubagents: aggregate.activeSubagents,
+                           subagentDescriptions: aggregate.subagentDescriptions,
+                           chatTopic: nil,
+                           model: nil,
+                           contextUsedTokens: nil,
+                           contextLimitTokens: nil,
+                           lastActivity: nil)
+    }
+
+    /// Verbatim, brackets and all: `vscode-switcher (agents: 5)`.
+    func testTheCountReadsTheWayItWasAskedFor() {
+        XCTAssertEqual(SwitcherRowView.countLabel(for: row(working: 1, subagents: 4)), "(agents: 5)")
+        XCTAssertEqual(SwitcherRowView.countLabel(for: row(working: 1, subagents: 0)), "(agents: 1)")
+    }
+
+    /// At zero there are no brackets at all — just the name. Ninety-odd rows of
+    /// the "projects" section have never run an agent, and `(agents: 0)` on
+    /// every one of them would be the noise the empty badge slot already avoids.
+    func testNothingRunningMeansNoBracketsAtAll() {
+        XCTAssertNil(SwitcherRowView.countLabel(for: row(working: 0, subagents: 0)))
+    }
+}
+
 /// The requirement this whole round exists for, measured rather than eyeballed:
 /// the indicator keeps the same place in every row, whatever else the row holds.
+/// Now that the count sits in the title line instead of a slot of its own, there
+/// is a second half to it — the count has to survive a name too long for the
+/// row, and it still may not nudge the indicator.
 ///
-/// `RowMetrics` is rendered for real — the block the panel draws, not a copy —
-/// and the ink is read back off the bitmap. Everything is checked in points at
-/// scale 4, so a quarter of a point is visible.
+/// `StatusBadge` and `SwitcherRowView` are rendered for real — what the panel
+/// draws, not a copy of it — and the ink is read back off the bitmap. Everything
+/// is measured in points at scale 4, so a quarter of a point shows.
 @MainActor
-final class RowMetricsLayoutTests: XCTestCase {
+final class RowLayoutTests: XCTestCase {
 
-    /// Room to the left of the block, so a number too wide for its slot spills
-    /// into the canvas instead of being clipped by the render bounds.
-    private static let leftPad: CGFloat = 20
-    /// Where the number's slot ends and the badge's begins, measured from the
-    /// left edge of the canvas.
+    /// Padding around the badge, so a glyph that outgrew its box lands as ink
+    /// outside the slot instead of being clipped away by the render bounds.
+    private static let pad: CGFloat = 20
+    /// Where the badge's box sits in an isolated render.
     private static var badgeSlot: ClosedRange<Double> {
-        let start = Double(leftPad + RowMetrics.countWidth + RowMetrics.spacing)
-        return start...(start + Double(StatusBadge.boxWidth))
+        Double(pad)...Double(pad + StatusBadge.boxWidth)
     }
-    /// Middle of the gap between the two slots. The number is trailing-aligned
-    /// and can only ever spill left, so nothing of it reaches this far right and
-    /// nothing of the badge reaches this far left.
-    private static var split: Double { badgeSlot.lowerBound - Double(RowMetrics.spacing) / 2 }
 
     private struct Rendered {
         var size: CGSize
@@ -680,14 +718,18 @@ final class RowMetricsLayoutTests: XCTestCase {
             let columns = ink.filter { $0 < x }
             return columns.isEmpty ? nil : columns.min()!...columns.max()!
         }
+        /// True when nothing at all is drawn between the two points.
+        func isBlank(from: Double, to: Double) -> Bool {
+            !ink.contains { $0 >= from && $0 <= to }
+        }
     }
 
-    private func render(status: RowStatus?, count: Int) throws -> Rendered {
+    private func render(status: RowStatus?) throws -> Rendered {
         // `panelVisible: false` keeps the pulse out of it: `.task` never runs
         // under `ImageRenderer`, but an animated opacity would be one more thing
         // deciding what counts as ink.
-        try measure(RowMetrics(status: status, count: count, panelVisible: false)
-            .padding(.leading, Self.leftPad))
+        try measure(StatusBadge(status: status, panelVisible: false)
+            .padding(.horizontal, Self.pad))
     }
 
     private func measure(_ view: some View) throws -> Rendered {
@@ -724,24 +766,36 @@ final class RowMetricsLayoutTests: XCTestCase {
         return Rendered(size: image.size, ink: columns)
     }
 
-    /// A whole row at a given width, laid out the way the list lays it out, and
-    /// built the way the data layer builds one — the status comes out of a real
-    /// chat state, the number out of real subagents. Both names are long enough
-    /// to push against the right-hand columns, which is the case that used to
-    /// move them.
-    private func renderRow(status: RowStatus, subagents: Int, width: Double) throws -> Rendered {
+    /// A whole row at a given width, laid out the way the list lays it out and
+    /// built the way the data layer builds one: both the status and the count
+    /// come out of real chats and real subagents, and the row is asked to
+    /// confirm it folded to what the test meant.
+    ///
+    /// Not every pair of status and count exists, and the fold is why (§3.1):
+    /// `done` and `asleep` say nothing is running, so their count is zero by
+    /// construction, and `active` says something is, so its count is never zero.
+    /// Only `blocked` is free in both — a chat can hold its hand up while the
+    /// rest of the window keeps working — which is why it is the status the
+    /// count-vs-indicator checks below are run against.
+    private func makeRow(status: RowStatus,
+                         count: Int,
+                         name: String = "проект с длинным именем, которое не влезает",
+                         topic: String? = "тема чата, тоже подлиннее строки") -> SwitcherRow {
         let state: AgentState = switch status {
         case .blocked: .question
         case .done: .waiting
-        case .active: .working
+        // A chat idle in itself, made active by the subagents hung off it, so
+        // that the count is exactly what the test asked for rather than one more
+        // than it.
+        case .active: .idle
         case .asleep: .idle
         }
         var session = TestFixtures.session(id: "s", cwd: "/tmp/p", state: state)
-        session.activeSubagents = subagents
+        session.activeSubagents = count
         let aggregate = DataSource.aggregate([session])
         let row = SwitcherRow(id: "window:1:w1",
                               kind: .window,
-                              displayName: "проект с длинным именем, которое не влезает",
+                              displayName: name,
                               colorHex: "#1857a4",
                               project: nil,
                               window: nil,
@@ -749,61 +803,54 @@ final class RowMetricsLayoutTests: XCTestCase {
                               state: aggregate.state,
                               activeSubagents: aggregate.activeSubagents,
                               subagentDescriptions: aggregate.subagentDescriptions,
-                              chatTopic: "тема чата, тоже подлиннее строки",
+                              chatTopic: topic,
                               model: nil,
                               contextUsedTokens: nil,
                               contextLimitTokens: nil,
                               lastActivity: nil)
-        XCTAssertEqual(row.status, status)
+        XCTAssertEqual(row.status, status, "the fixture does not fold to \(status)")
+        XCTAssertEqual(row.activeCount, count)
+        return row
+    }
 
+    private func renderRow(status: RowStatus,
+                           count: Int,
+                           name: String = "проект с длинным именем, которое не влезает",
+                           topic: String? = "тема чата, тоже подлиннее строки",
+                           width: Double) throws -> Rendered {
+        let row = makeRow(status: status, count: count, name: name, topic: topic)
         return try measure(SwitcherRowView(row: row, isFrontmost: false, panelVisible: false)
             .padding(.horizontal, 6)
             .frame(width: width))
     }
 
-    private let counts = [0, 1, 12, 123]
+    /// Where the badge lands in a whole row: the last box-width before the row's
+    /// trailing padding, with the list's own padding outside that.
+    private func badgeSlot(inRowOfWidth width: Double) -> ClosedRange<Double> {
+        // `LazyVStack` pads the list by 6 and the row pads itself by 7.
+        let slotEnd = width - 6 - 7
+        return (slotEnd - Double(StatusBadge.boxWidth))...slotEnd
+    }
 
-    /// The numbers themselves, in one place, so a change to any of them has to
-    /// be deliberate. 15 + 5 + 14 is what the whole block measures.
-    func testTheColumnWidthsAreWhatTheSpecSays() {
-        XCTAssertEqual(RowMetrics.countWidth, 15)
-        XCTAssertEqual(RowMetrics.spacing, 5)
+    /// The numbers, in one place, so a change to any of them has to be
+    /// deliberate. One slot on the right, and it is the badge's own box: the
+    /// count that used to have a slot of its own beside it now lives in the
+    /// title line, and there is nothing left outside the badge to set a width
+    /// for.
+    func testTheSlotIsWhatTheSpecSays() {
         XCTAssertEqual(StatusBadge.boxWidth, 14)
         XCTAssertEqual(StatusBadge.boxHeight, 12)
-        XCTAssertEqual(RowMetrics.totalWidth, 34)
     }
 
-    /// Nothing a row can hold changes the width of the block, so the badge slot
-    /// starts at the same distance from the right edge of every row.
-    func testTheBlockIsTheSameWidthWhateverIsInIt() throws {
+    /// Nothing a row can hold changes the width of the slot, so it starts at the
+    /// same distance from the right edge of every row.
+    func testTheSlotIsTheSameWidthWhateverIsInIt() throws {
         for status in RowStatus.allCases.map(Optional.some) + [nil] {
-            for count in counts {
-                let rendered = try render(status: status, count: count)
-                XCTAssertEqual(rendered.size.width,
-                               Self.leftPad + RowMetrics.totalWidth,
-                               accuracy: 0.01,
-                               "status=\(status as Any) count=\(count)")
-            }
-        }
-    }
-
-    /// The point of the round: for a given indicator, the number beside it —
-    /// absent, one digit, two, or a third that does not fit — never moves it by
-    /// so much as a subpixel.
-    func testTheNumberNeverMovesTheIndicator() throws {
-        for status in RowStatus.allCases {
-            var seen: ClosedRange<Double>?
-            for count in counts {
-                let rendered = try render(status: status, count: count)
-                let badge = try XCTUnwrap(rendered.span(rightOf: Self.split),
-                                          "no indicator drawn for \(status) count=\(count)")
-                if let seen {
-                    XCTAssertEqual(badge.lowerBound, seen.lowerBound, accuracy: 0.01, "\(status) count=\(count)")
-                    XCTAssertEqual(badge.upperBound, seen.upperBound, accuracy: 0.01, "\(status) count=\(count)")
-                } else {
-                    seen = badge
-                }
-            }
+            let rendered = try render(status: status)
+            XCTAssertEqual(rendered.size.width,
+                           2 * Self.pad + StatusBadge.boxWidth,
+                           accuracy: 0.01,
+                           "status=\(status as Any)")
         }
     }
 
@@ -812,23 +859,23 @@ final class RowMetricsLayoutTests: XCTestCase {
     /// They are not the same width — that is exactly why the box is fixed.
     ///
     /// The containment half is a canary rather than the requirement: `frame`
-    /// does not clip, so a glyph that outgrew the box would spill into the gap
+    /// does not clip, so a glyph that outgrew the box would spill outside it
     /// without moving the slot. Worth hearing about all the same.
     ///
-    /// And it is a canary with very little room: measured in the 40…54 slot,
-    /// `hand.raised.fill` 42.75…51.5, `checkmark.circle.fill` and
-    /// `moon.zzz.fill` 41.5…52.5, `arrow.triangle.2.circlepath` 40.25…53.5 —
+    /// And it is a canary with very little room: measured in the 20…34 slot,
+    /// `hand.raised.fill` 22.75…31.5, `checkmark.circle.fill` and
+    /// `moon.zzz.fill` 21.5…32.5, `arrow.triangle.2.circlepath` 20.25…33.5 —
     /// a quarter of a point from the left edge of the box. Half a point of
     /// glyph drift in an SF Symbols or macOS update breaks this line with
     /// nothing changed in the repository. If it fails on the containment
     /// assertions alone while the midpoints still agree, that is the OS having
-    /// moved, not the layout: widen the box (and `RowMetrics.totalWidth` with
-    /// it) rather than hunting for a regression that is not there.
+    /// moved, not the layout: widen the box rather than hunting for a regression
+    /// that is not there.
     func testEveryGlyphSitsInTheSameSlot() throws {
         var midpoints: [Double] = []
         for status in RowStatus.allCases {
-            let rendered = try render(status: status, count: 0)
-            let badge = try XCTUnwrap(rendered.span(rightOf: Self.split), "\(status)")
+            let rendered = try render(status: status)
+            let badge = try XCTUnwrap(rendered.span, "\(status)")
             XCTAssertGreaterThanOrEqual(badge.lowerBound, Self.badgeSlot.lowerBound, "\(status) overflows left")
             XCTAssertLessThanOrEqual(badge.upperBound, Self.badgeSlot.upperBound, "\(status) overflows right")
             midpoints.append((badge.lowerBound + badge.upperBound) / 2)
@@ -842,77 +889,140 @@ final class RowMetricsLayoutTests: XCTestCase {
     /// A row with nothing to report draws nothing in the slot, and the slot is
     /// still there — that is what makes the empty case hold the column.
     func testAnEmptySlotDrawsNothingAndStillHoldsItsGround() throws {
-        let empty = try render(status: nil, count: 0)
+        let empty = try render(status: nil)
         XCTAssertNil(empty.span, "an empty row drew something")
-        XCTAssertEqual(empty.size.width, Self.leftPad + RowMetrics.totalWidth, accuracy: 0.01)
-
-        let numberOnly = try render(status: nil, count: 3)
-        XCTAssertNil(numberOnly.span(rightOf: Self.split), "an empty slot drew something")
+        XCTAssertEqual(empty.size.width, 2 * Self.pad + StatusBadge.boxWidth, accuracy: 0.01)
     }
 
     /// The same thing measured where the user sees it: a whole row, laid out at
     /// the real panel width, with the list's padding around it. The indicator
     /// lands in the last 14 pt before the row's trailing padding — 353…367 in a
-    /// 380 pt panel — for every status and every count.
+    /// 380 pt panel — for every status and every count that status can have.
     ///
     /// Containment alone does not say "the same place": the four glyphs are
     /// right-aligned against one edge, so all of them fit inside 353…367 even
-    /// with the fixed box gone and the block's own width wandering by 4 pt —
-    /// this test passed in that state, which is what the midpoint check below
-    /// is for. Measured 359.875 / 360.0 / 360.125 against a slot midpoint of
-    /// 360, so 0.375 of the tolerance is spare.
-    ///
-    /// It is not the net for the box either, and is not meant to be: without it
-    /// the midpoints only drift to 360.25…360.5, which ±0.5 still admits. Three
-    /// tests above fail on that, and the tolerance stays where the isolated test
-    /// put it — loose enough not to call an SF Symbols update a regression, and
-    /// still tight enough for what it is here for: a 1 pt nudge of the slot
-    /// fails it for the narrow moon, whose ink goes on fitting the bounds.
+    /// with the fixed box gone — which is what the midpoint check is for.
+    /// Measured 359.875 / 360.0 / 360.125 against a slot midpoint of 360, so
+    /// 0.375 of the tolerance is spare. A 1 pt nudge of the slot fails it even
+    /// for the narrow moon, whose ink would still be inside the bounds.
     func testTheIndicatorIsInTheSamePlaceInAWholeRowAtPanelWidth() throws {
         let panelWidth = Config.default.panelWidth
-        // `LazyVStack` pads the list by 6 and the row pads itself by 7.
-        let slotEnd = panelWidth - 6 - 7
-        let slot = (slotEnd - Double(StatusBadge.boxWidth))...slotEnd
+        let slot = badgeSlot(inRowOfWidth: panelWidth)
         let slotMidpoint = (slot.lowerBound + slot.upperBound) / 2
 
         for status in RowStatus.allCases {
-            // A sleeping row cannot have a subagent running under it — that is
-            // the fold's own rule (§3.1), and the helper asserts it holds. Every
-            // count against every status is covered on `RowMetrics` above.
-            for subagents in (status == .asleep ? [0] : counts) {
-                let rendered = try renderRow(status: status, subagents: subagents, width: panelWidth)
-                let badge = try XCTUnwrap(rendered.span(rightOf: slot.lowerBound - Double(RowMetrics.spacing) / 2),
-                                          "\(status) subagents=\(subagents)")
-                XCTAssertGreaterThanOrEqual(badge.lowerBound, slot.lowerBound, "\(status) subagents=\(subagents)")
-                XCTAssertLessThanOrEqual(badge.upperBound, slot.upperBound, "\(status) subagents=\(subagents)")
+            for count in Self.counts(for: status) {
+                let rendered = try renderRow(status: status, count: count, width: panelWidth)
+                let badge = try XCTUnwrap(rendered.span(rightOf: slot.lowerBound - 3),
+                                          "\(status) count=\(count)")
+                XCTAssertGreaterThanOrEqual(badge.lowerBound, slot.lowerBound, "\(status) count=\(count)")
+                XCTAssertLessThanOrEqual(badge.upperBound, slot.upperBound, "\(status) count=\(count)")
                 XCTAssertEqual((badge.lowerBound + badge.upperBound) / 2, slotMidpoint, accuracy: 0.5,
-                               "\(status) subagents=\(subagents)")
+                               "\(status) count=\(count)")
             }
         }
     }
 
-    /// A count too wide for its slot draws in full and spills left into the gap,
-    /// rather than being cut short or wrapped onto a second line. In full it is
-    /// ink 16.0…33.75, four points past the left edge of its own slot.
-    ///
-    /// Both ways of losing it were measured on `123` in the 15 pt slot, and it
-    /// takes both assertions below to catch them. Drop `fixedSize` and the text
-    /// wraps to `12` over `3` — ink 22.0…33.75, block 26 pt tall instead of 13:
-    /// the height catches that one. Put a `lineLimit(1)` back on top of that and
-    /// it is truncated to a bare ellipsis instead — ink 26.5…33.75 on a block
-    /// still 13 pt tall, so the height says nothing and only the left edge does.
-    /// That second shape is why the height assertion is not the whole test.
-    func testACountTooWideForItsSlotSpillsLeftInsteadOfWrapping() throws {
-        let twoDigits = try render(status: .done, count: 12)
-        let threeDigits = try render(status: .done, count: 123)
+    /// The counts each fold can actually carry (§3.1). `blocked` is the only one
+    /// free to have any of them.
+    private static func counts(for status: RowStatus) -> [Int] {
+        switch status {
+        case .blocked: return [0, 1, 12, 123]
+        case .active: return [1, 12, 123]
+        case .done, .asleep: return [0]
+        }
+    }
 
-        XCTAssertEqual(threeDigits.size.height, twoDigits.size.height, accuracy: 0.01, "the number wrapped")
-        let wide = try XCTUnwrap(threeDigits.span(leftOf: Self.split))
-        let narrow = try XCTUnwrap(twoDigits.span(leftOf: Self.split))
-        // Same right edge — it is right-aligned — and it grows leftwards, past
-        // the left edge of its own slot.
-        XCTAssertEqual(wide.upperBound, narrow.upperBound, accuracy: 0.01)
-        XCTAssertLessThan(wide.lowerBound, Double(Self.leftPad))
+    /// The point of the round, and the part the move into the title line could
+    /// have broken: the count — absent, one digit, two, or three — never moves
+    /// the indicator by so much as a subpixel, whether the name leaves room or
+    /// runs the whole width of the row.
+    func testTheCountInTheTitleNeverMovesTheIndicator() throws {
+        let panelWidth = Config.default.panelWidth
+        let slot = badgeSlot(inRowOfWidth: panelWidth)
+        for name in ["p", "wirenboard/node-red-contrib-wirenboard"] {
+            var seen: ClosedRange<Double>?
+            for count in [0, 1, 12, 123] {
+                let rendered = try renderRow(status: .blocked, count: count, name: name, width: panelWidth)
+                let badge = try XCTUnwrap(rendered.span(rightOf: slot.lowerBound - 3),
+                                          "no indicator drawn for count=\(count)")
+                if let seen {
+                    XCTAssertEqual(badge.lowerBound, seen.lowerBound, accuracy: 0.01, "\(name) count=\(count)")
+                    XCTAssertEqual(badge.upperBound, seen.upperBound, accuracy: 0.01, "\(name) count=\(count)")
+                } else {
+                    seen = badge
+                }
+            }
+        }
+    }
+
+    /// The name is what gives way when the row runs out of width, not the count:
+    /// the ellipsis lands in the name and `(agents: N)` stays whole. The other
+    /// way round it would be the long-named row — the one worth reading the
+    /// number on — that lost it.
+    ///
+    /// Measured rather than asserted about. The label is rendered on its own to
+    /// learn how wide its ink is, and then looked for at the end of the title
+    /// line: that many points of ink flush with the right edge of the text, with
+    /// a blank band in front of them where the `HStack` spacing is. A label
+    /// truncated to fit would be narrower than its own ink, so the name would
+    /// fill that band; a label dropped altogether leaves the name running
+    /// unbroken to the edge. Both counts are checked, because a label clamped to
+    /// some fixed width would pass one of them by accident.
+    ///
+    /// The name is the longest real one on this machine, 36 characters, and has
+    /// no spaces in it — so a blank band this wide inside the title line is the
+    /// gap in front of the label and nothing else. The row is rendered without a
+    /// chat topic for the same reason: the second line would put its own ink in
+    /// these columns.
+    ///
+    /// Two widths, because only the second one puts `fixedSize` to work.
+    /// `HStack` hands each flexible child an equal share of the line and lets
+    /// what it does not need pass on, so at the 380 pt default the 63 pt label
+    /// is well under its ~160 pt share and survives on its own; the shrink lands
+    /// on the name, the longer text. At 150 pt — `panelWidth` is a setting and
+    /// takes any value above zero — the label is more than its share, and
+    /// without `fixedSize` it is the label that gets cut: measured, its ink comes
+    /// out 25.75 pt instead of 63.25, and the same stump for `123` as for `5`.
+    /// So the assertion below is run there too, and the removal of the modifier
+    /// fails it.
+    func testALongNameGivesWayBeforeTheCountDoes() throws {
+        let longest = "wirenboard/node-red-contrib-wirenboard"
+
+        for width in [Config.default.panelWidth, 150] {
+            let slot = badgeSlot(inRowOfWidth: width)
+            for count in [5, 123] {
+                let label = try XCTUnwrap(SwitcherRowView.countLabel(for: makeRow(status: .blocked, count: count)))
+                // The same text in the same font the row draws it in.
+                let alone = try measure(Text(label)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .padding(Self.pad))
+                let labelInk = try XCTUnwrap(alone.span)
+                let labelWidth = labelInk.upperBound - labelInk.lowerBound
+
+                let rendered = try renderRow(status: .blocked,
+                                             count: count,
+                                             name: longest,
+                                             topic: nil,
+                                             width: width)
+                let text = try XCTUnwrap(rendered.span(leftOf: slot.lowerBound - 3), "no title drawn")
+                // Half a point of slack: the label starts at a fractional x in
+                // the row and the antialiasing of its first stem can fall either
+                // side of a quarter-point column.
+                let labelStart = text.upperBound - labelWidth - 0.5
+                XCTAssertTrue(rendered.isBlank(from: labelStart - 2.5, to: labelStart - 0.5),
+                              "the name ran into the label — width=\(width) count=\(count)")
+                // And at the width the panel actually opens at, the name is
+                // still there in front of the gap rather than the label having
+                // taken the whole line. (At 150 pt it has: three digits of count
+                // leave the name nothing, which is the honest outcome for a
+                // panel that narrow and not what this checks.)
+                if width == Config.default.panelWidth {
+                    XCTAssertNotNil(rendered.span(leftOf: labelStart - 2.5), "no name drawn — count=\(count)")
+                }
+            }
+        }
     }
 }
 
