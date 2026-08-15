@@ -359,19 +359,22 @@ if [ "$event" = "Notification" ] && [ "$state" = "permission" ] && [ "$prev_stat
 	exit 0
 fi
 
-# The record is rebuilt from the file as it stands *now*, not from the copy read
-# a few milliseconds ago. Between that read and this write sit a jq run and a
-# `date`, and two PostToolUse from different subagents landing inside that window
-# would both compute their new list from the same old one — the second to write
-# would resurrect the wait the first had cleared, and it would then hold the
-# indicator until the end of the turn. Reading again here shrinks the window to
-# one jq run; it does not close it, because the read and the rename are still not
-# one operation (SPEC §2.6.3).
+# Where a readable record was found, it is read *again* here rather than reused
+# from the copy taken a few milliseconds ago. Between that read and this write
+# sit a jq run and a `date`, and two PostToolUse from different subagents landing
+# inside that window would both compute their new list from the same old one —
+# the second to write would resurrect the wait the first had cleared, and it
+# would then hold the indicator until the end of the turn. Reading again shrinks
+# the window to one jq run; it does not close it, because the read and the rename
+# are still not one operation (SPEC §2.6.3).
 #
-# `--slurpfile` is a fatal error on a missing or damaged file rather than a null,
-# so the case where nothing readable was there a moment ago hands jq an empty
-# stream instead. A record that was readable then and is gone now loses the
-# write, which is what a `SessionEnd` removing the file underneath should do.
+# The other branch does not re-read at all, and does not need to: `--slurpfile`
+# is a fatal error on a missing or damaged file rather than a null, so the case
+# where nothing readable was there a moment ago hands jq an empty stream instead.
+# That covers the first event of a session and every record too damaged to parse
+# — there is no list to carry over and so no window to narrow. A record that was
+# readable then and is gone now loses the write, which is what a `SessionEnd`
+# removing the file underneath should do.
 if [ "$prev" = "null" ]; then
 	prev_args=(--argjson prevFile '[]')
 else
