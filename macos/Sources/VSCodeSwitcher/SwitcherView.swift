@@ -31,11 +31,11 @@ final class SwitcherViewModel: ObservableObject {
     /// The panel is on screen — false for most of the app's life.
     ///
     /// `withAnimation(.repeatForever)` does not stop when the window is ordered
-    /// out, and a row in `working` or `permission` is the normal state of this
+    /// out, and a row with something running in it is the normal state of this
     /// user's machine. SwiftUI therefore went on laying the whole list out and
     /// rendering its display list at display-link rate into a window nobody
     /// could see: measured at 13.6% of a core with the panel closed, against
-    /// 2.0% once it stops. `StateBadge` keys its pulse on this as well as on the
+    /// 2.0% once it stops. `StatusBadge` keys its pulse on this as well as on the
     /// state.
     @Published private(set) var panelVisible = false
     @Published private(set) var snapshot: SwitcherSnapshot = .empty
@@ -48,8 +48,8 @@ final class SwitcherViewModel: ObservableObject {
     /// perfectly good frozen order — the windows opened from the panel after
     /// that have to be appended to it. Told apart by emptiness alone, that case
     /// read as "no freeze": the rule that records newcomers switched itself off
-    /// for the rest of the appearance and the list went back to live z-order,
-    /// reshuffling under the pointer at every click.
+    /// for the rest of the appearance and the list went back to the live order
+    /// from the data layer, reshuffling under the pointer at every click.
     @Published private var windowOrder: [String]?
     /// Set when the panel appears: the order above came from the cache and is
     /// provisional until a snapshot whose sources were read after this instant
@@ -89,12 +89,12 @@ final class SwitcherViewModel: ObservableObject {
         }
         // A window opened while the panel is up joins the frozen order the first
         // time it is seen, instead of being left out of it for `ordered` to
-        // append on every pass. Left out, its place was decided by live z-order:
-        // clicking two projects in a row put the two new rows at the bottom, and
+        // append on every pass. Left out, its place was decided by the live
+        // order: clicking two projects in a row put both new rows at the bottom, and
         // clicking either of them swapped them under the pointer — the list
         // moving from a click, which is what the freeze exists to stop. Not
         // while the re-freeze is still pending: the order is provisional until
-        // then, and a newcomer belongs in the z-order slot `merged` gives it.
+        // then, and a newcomer belongs in the slot `merged` gives it.
         // An order frozen empty counts as frozen — that is the panel summoned
         // with no editor window at all, where every row that ever appears is a
         // newcomer and this rule is the only thing holding the list still.
@@ -130,13 +130,13 @@ final class SwitcherViewModel: ObservableObject {
     /// confirms it a beat later — and settles the window order for good.
     ///
     /// The click is about to raise a window or open a new one, and both change
-    /// the z-order the next snapshot reports. Whatever the list looked like when
+    /// the order the next snapshot reports. Whatever the list looked like when
     /// the user aimed at it is what it has to keep looking like, so the order in
     /// force at this instant is written down and the pending re-freeze dropped.
     /// Clearing the pending flag alone was not enough: when the order was still
     /// empty — the panel's first appearance after launch, before any snapshot —
     /// the windows on screen appeared in it nowhere, so the list was laid out by
-    /// raw z-order and jumped after every click, which is the defect the freeze
+    /// the raw order and jumped after every click, which is the defect the freeze
     /// was built for.
     ///
     /// And when there is nothing to write down, the wait stays on. The panel can
@@ -144,7 +144,7 @@ final class SwitcherViewModel: ObservableObject {
     /// grant has only just been given — and then the only thing to click is a
     /// project. Settling an empty order there cancelled the re-freeze that was
     /// the one thing left to fix it, and every window opened from the panel
-    /// afterwards was ordered by live z-order again.
+    /// afterwards was ordered by the live order again.
     func rowActivated(_ row: SwitcherRow) {
         if orderPendingSince != nil {
             let settled = Self.ordered(snapshot.openWindows, by: windowOrder).map(\.id)
@@ -184,23 +184,23 @@ final class SwitcherViewModel: ObservableObject {
 
     /// Puts the open windows back into the order frozen at the last show.
     ///
-    /// `DataSource` hands them over in z-order, which is correct of it and
-    /// unusable here: raising a window is exactly what the panel is for, and the
-    /// next snapshot — one second later at most — moved the row the user had
-    /// just clicked to the top and shifted every other row under the pointer.
-    /// Stepping through several windows in a row meant chasing a list that
-    /// reshuffled after each click. Only the sequence is frozen; the contents of
-    /// the rows keep updating.
+    /// `DataSource` hands them over newest-message-first, which is correct of it
+    /// and unusable live: the list would move whenever an agent said something,
+    /// and raising a window — exactly what the panel is for — used to do the same
+    /// back when the order was the z-order. Either way the next snapshot, one
+    /// second later at most, shifted rows under the pointer, and stepping through
+    /// several windows meant chasing a list that reshuffled after each click.
+    /// Only the sequence is frozen; the contents of the rows keep updating.
     ///
     /// Matching is by `row.id`, which carries the `CGWindowID`, so a window that
     /// was closed simply drops out and leaves no hole, and one opened while the
     /// panel is up is appended rather than wedged into the middle. The order is
     /// taken afresh at every show — from the first snapshot read after that show
-    /// (see `update(snapshot:)`) — so the list is back in z-order, most recently
-    /// used first, as soon as the panel is reopened.
+    /// (see `update(snapshot:)`) — so the list is fresh again, the window with the
+    /// last message on top, as soon as the panel is reopened.
     ///
-    /// `nil` means no order has been frozen yet, and only then is the raw z-order
-    /// handed back untouched. An order frozen while no window was open is `[]`,
+    /// `nil` means no order has been frozen yet, and only then is the data
+    /// layer's own order handed back untouched. An order frozen while no window was open is `[]`,
     /// which is a frozen order like any other: its rows are all newcomers and
     /// keep the sequence `update(snapshot:)` recorded them in.
     static func ordered(_ rows: [SwitcherRow], by order: [String]?) -> [SwitcherRow] {
@@ -217,26 +217,26 @@ final class SwitcherViewModel: ObservableObject {
         return frozen.map(\.1) + appeared
     }
 
-    /// Folds a fresh z-order into an order already frozen, by inserting only the
+    /// Folds a fresh order into an order already frozen, by inserting only the
     /// windows the frozen one has never heard of.
     ///
     /// This runs once per appearance, at the worst possible moment: the panel
     /// has just finished sliding in and the pointer is already travelling
     /// towards a row. Taking the fresh order wholesale moved every row that had
-    /// been raised since the cached snapshot was read — for the sake of the one
-    /// window that genuinely was missing. A new window still lands where its
-    /// z-order says, so the window opened a second before the panel was summoned
-    /// is still at the top; the rows below the insertion point still shift by
-    /// one, which is as little as this can move at all.
+    /// moved since the cached snapshot was read — for the sake of the one window
+    /// that genuinely was missing. A new window still lands where the fresh order
+    /// puts it, so the window opened a second before the panel was summoned is
+    /// still at the top; the rows below the insertion point still shift by one,
+    /// which is as little as this can move at all.
     ///
-    /// The insertion point is the frozen slot of the closest window in front of
-    /// the newcomer, so several new windows keep their relative z-order, and one
-    /// that is frontmost overall goes to the very top.
+    /// The insertion point is the frozen slot of the closest window ahead of the
+    /// newcomer, so several new windows keep their relative order, and one that
+    /// leads the fresh order overall goes to the very top.
     ///
     /// Unless that slot is the last one, which would put the newest window at the
     /// very bottom of the list — the one place it must not be. It happens
-    /// whenever the window in front of the newcomer is the *oldest* one in the
-    /// frozen order: open a window, then click an old one, then summon the panel.
+    /// whenever the window ahead of the newcomer is the *last* one in the frozen
+    /// order: open a window, work in an older one, then summon the panel.
     /// The closest known window *behind* the newcomer is then the anchor instead,
     /// and the newcomer goes in just above it — the same rule seen from the other
     /// side. With nothing known behind it either, the end is where it belongs.
@@ -456,7 +456,7 @@ struct SwitcherRowView: View {
     let row: SwitcherRow
     /// True for the row whose window is currently in front.
     let isFrontmost: Bool
-    /// Passed through to `StateBadge`, which must not animate off screen.
+    /// Passed through to `StatusBadge`, which must not animate off screen.
     var panelVisible: Bool = true
 
     @State private var isHovering = false
