@@ -277,10 +277,14 @@ final class WindowOrderTests: XCTestCase {
     /// keeping the second one: the newcomer trails `c` (whose slot is the last)
     /// and leads `a` (whose slot is the first), so it goes above `a` — and thus
     /// above `b` and `c`, which currently outrank it. One layout on one
-    /// appearance, and the next show re-freezes from scratch. Pinned so that a
-    /// later repair of one side cannot quietly change the bargain: dropping the
-    /// second side sends a genuinely fresh window to the bottom in the commoner
-    /// case above, which is the trade this row buys.
+    /// appearance, and the next show re-freezes from scratch.
+    ///
+    /// A twin of the case above rather than a second net: measured by mutation,
+    /// every break it catches that one catches too, and the reverse does not
+    /// hold (`.first` → `.last` fails only the neighbour). It is here as the
+    /// executable form of the example in `merged`'s doc comment — the awkward
+    /// half of the bargain, written down so a later repair of one side cannot
+    /// quietly change what was agreed.
     func testTheTwoSidesDisagreeAndTheFrontOneWins() {
         XCTAssertEqual(SwitcherViewModel.merged(["a", "b", "c"], with: ["b", "c", "new", "a"]),
                        ["new", "a", "b", "c"])
