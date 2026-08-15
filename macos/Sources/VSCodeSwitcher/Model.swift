@@ -36,17 +36,27 @@ enum AgentState: String, Codable, Sendable, CaseIterable, Comparable {
 /// What a row's single indicator says, folded from every chat and background
 /// subagent it holds.
 ///
-/// The row answers a question about the *window*, not about its chats: is
-/// something wanted from me, is anything moving, or is it all asleep. The
-/// per-chat breakdown lives in the tooltip.
-enum RowStatus: String, Sendable, Codable, CaseIterable {
+/// The row answers a question about the *window*, not about its chats: am I
+/// standing in its way, has it left something for me to read, is anything
+/// moving, or is it all asleep. The per-chat breakdown lives in the tooltip.
+///
+/// Listed least urgent first, the way `AgentState` is, though nothing derives
+/// an order from it: the fold's priority is written out in `SwitcherRow.status`.
+///
+/// Not `Codable`: the fold is derived from `sessions`, never stored and never
+/// decoded, and a conformance nothing uses is a conformance that can rot.
+enum RowStatus: String, Sendable, CaseIterable {
     /// Nothing running and nothing to answer.
     case asleep
     /// A chat is taking a turn, or a background subagent is running under one.
     case active
-    /// A chat is waiting on the user: a question, a permission dialog, or a
-    /// finished turn nobody has read yet.
-    case attention
+    /// A chat finished its turn and nobody has read it. Nothing is blocked; the
+    /// user reads it whenever it suits them.
+    case done
+    /// A chat stopped *mid-task* and cannot go on until the user presses
+    /// something: a question, or a permission dialog. The bottleneck is the
+    /// human, and every second of it is idle time.
+    case blocked
 }
 
 /// Where a session's state came from. Useful for diagnostics: the hook value is
@@ -206,28 +216,36 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     /// say and the slot stays empty.
     ///
     /// `state` is already the highest state among the row's chats, and the
-    /// priority order puts every state that waits on the user above `working`,
-    /// so the fold needs nothing else from them: a window where one chat
-    /// answered and another is still working wants the user either way.
-    /// Subagents are the second half of "something is moving" — they run while
-    /// every chat of the row sits in `idle`.
+    /// priority order runs `question` > `permission` > `waiting` > `working` >
+    /// `idle`, so the fold needs nothing else from them: the top state alone
+    /// decides. Subagents are the second half of "something is moving" — they
+    /// run while every chat of the row sits in `idle`.
     ///
-    /// `nil` is not a fourth answer, it is the absence of a subject: a project
+    /// `blocked` and `done` are told apart because the cost of ignoring them
+    /// differs: a blocked chat stopped *mid-task* and burns idle time until a
+    /// key is pressed, a finished one is a message that keeps.
+    ///
+    /// `nil` is not a fifth answer, it is the absence of a subject: a project
     /// with no agent in it is not "asleep", there is simply nothing there to be
     /// asleep. The distinction earns its keep in the "projects" section, which
     /// is ninety-odd rows most of which have never seen an agent — an icon
     /// identical on all of them would distinguish nothing and be pure noise
     /// along the longest stretch of the list. `asleep` stays for the rows where
-    /// it is a real outcome of three: a window whose chats are alive but idle,
+    /// it is a real outcome of four: a window whose chats are alive but idle,
     /// or a project running an agent without a window.
+    ///
+    /// Sessions are the only source of subagents (`DataSource.aggregate` sums
+    /// them over `sessions`), so "no session" already implies "no subagent" and
+    /// the emptiness of `sessions` is the whole test.
     ///
     /// The user asked for the indicator to have a fixed *place*, not to be
     /// present on every row, and an empty slot of fixed width answers that in
     /// full: whenever there is an icon, it is at the same x.
     var status: RowStatus? {
-        guard !sessions.isEmpty || activeSubagents > 0 else { return nil }
+        guard !sessions.isEmpty else { return nil }
         switch state {
-        case .question, .permission, .waiting: return .attention
+        case .question, .permission: return .blocked
+        case .waiting: return .done
         case .working: return .active
         case .idle, .none: return activeSubagents > 0 ? .active : .asleep
         }

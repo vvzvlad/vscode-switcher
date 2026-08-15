@@ -577,7 +577,7 @@ struct SwitcherRowView: View {
     }
 
     /// A chat's state in words. The tooltip is the only place the five states
-    /// are still told apart — the row folds them into three — so this is where
+    /// are still told apart — the row folds them into four — so this is where
     /// the vocabulary lives.
     static func stateLabel(for state: AgentState) -> String {
         switch state {
@@ -666,7 +666,7 @@ struct StatusBadge: View {
         Group {
             // An icon rather than a coloured dot: the dot told the user there
             // was *a* state and left the meaning to be memorised. Each of the
-            // three shapes is different enough to be read without the colour,
+            // four shapes is different enough to be read without the colour,
             // and the tooltip spells the chats out in words.
             if let status {
                 Image(systemName: Self.symbol(for: status))
@@ -718,12 +718,15 @@ struct StatusBadge: View {
         // which pixel the pointer happened to be over.
     }
 
-    /// SF Symbols, one shape per status. The shapes are the ones the states
-    /// they fold used to wear, so the habit carries over: the green tick of an
-    /// answered chat, the turning arrows of a working one, the sleeping moon.
+    /// SF Symbols, one shape per status. Three of the shapes are the ones the
+    /// states they fold used to wear, so the habit carries over: the green tick
+    /// of an answered chat, the turning arrows of a working one, the sleeping
+    /// moon. The raised hand is the new one, and it reads as what it is — a
+    /// chat that stopped mid-task and is holding its hand up.
     static func symbol(for status: RowStatus) -> String {
         switch status {
-        case .attention: return "checkmark.circle.fill"
+        case .blocked: return "hand.raised.fill"
+        case .done: return "checkmark.circle.fill"
         case .active: return "arrow.triangle.2.circlepath"
         case .asleep: return "moon.zzz.fill"
         }
@@ -732,15 +735,18 @@ struct StatusBadge: View {
     /// Semantic system colours only — they follow light and dark appearance.
     static func color(for status: RowStatus) -> Color {
         switch status {
-        case .attention: return .green
+        case .blocked: return .orange
+        case .done: return .green
         case .active: return .blue
         case .asleep: return .secondary
         }
     }
 
-    /// Only movement pulses. `attention` does not: it is the resting state of a
-    /// window that has said its piece, it holds for as long as the user takes,
-    /// and a list where half the rows blink is a list nothing stands out in.
+    /// Only movement pulses. Neither `blocked` nor `done` does: both are states
+    /// the window rests in for as long as the user takes to come back, and a
+    /// list where half the rows blink is a list nothing stands out in. `blocked`
+    /// is told apart by its own glyph and colour instead — that is the choice
+    /// the user made when asked, over a pulse.
     static func animates(_ status: RowStatus) -> Bool { status == .active }
 }
 

@@ -355,10 +355,10 @@ final class TranscriptQuestionTests: XCTestCase {
     }
 }
 
-/// A row shows one indicator for the whole window — something is wanted from
-/// me, something is moving, or it is all asleep — and one number beside it. How
-/// many chats sit in which state is a question about the chats, and it is
-/// answered in the tooltip.
+/// A row shows one indicator for the whole window — I am blocking it, it has
+/// something for me to read, something is moving, or it is all asleep — and one
+/// number beside it. How many chats sit in which state is a question about the
+/// chats, and it is answered in the tooltip.
 final class RowStatusTests: XCTestCase {
 
     private func row(_ states: [AgentState], subagents: Int = 0) -> SwitcherRow {
@@ -385,12 +385,27 @@ final class RowStatusTests: XCTestCase {
                            lastActivity: nil)
     }
 
-    /// Every state that waits on a human folds into the same answer, `waiting`
-    /// included: "the agent answered and wants a reaction" is a thing to do.
-    func testEveryStateThatWaitsOnTheUserFoldsIntoAttention() {
-        for state in [AgentState.question, .permission, .waiting] {
-            XCTAssertEqual(row([state]).status, .attention, "\(state)")
+    /// The two states where the agent stopped mid-task and cannot go on until a
+    /// key is pressed. The user asked for these to be told apart from a
+    /// finished turn: here the bottleneck is the human and the wait is pure
+    /// idle time, there the work is done and the message keeps.
+    func testAStuckChatIsItsOwnAnswer() {
+        for state in [AgentState.question, .permission] {
+            XCTAssertEqual(row([state]).status, .blocked, "\(state)")
         }
+    }
+
+    /// A finished turn nobody has read is not the same thing, and no longer
+    /// wears the same icon.
+    func testAFinishedTurnIsDoneNotBlocked() {
+        XCTAssertEqual(row([.waiting]).status, .done)
+    }
+
+    /// Being stuck outranks having finished: a window holding both is the one
+    /// to walk to first.
+    func testBeingStuckOutranksHavingFinished() {
+        XCTAssertEqual(row([.waiting, .question]).status, .blocked)
+        XCTAssertEqual(row([.waiting, .permission, .idle]).status, .blocked)
     }
 
     /// The mixed window, which is the case the fold exists for: one chat
@@ -398,10 +413,10 @@ final class RowStatusTests: XCTestCase {
     /// row says — and the working chat is not lost, it is in the number.
     func testAnAnsweredChatBesideAWorkingOneStillWantsTheUser() {
         let mixed = row([.waiting, .working])
-        XCTAssertEqual(mixed.status, .attention)
+        XCTAssertEqual(mixed.status, .done)
         XCTAssertEqual(mixed.activeCount, 1)
-        XCTAssertEqual(row([.working, .question]).status, .attention)
-        XCTAssertEqual(row([.working, .permission, .idle]).status, .attention)
+        XCTAssertEqual(row([.working, .question]).status, .blocked)
+        XCTAssertEqual(row([.working, .permission, .idle]).status, .blocked)
     }
 
     func testAWorkingChatIsActivity() {
@@ -420,11 +435,11 @@ final class RowStatusTests: XCTestCase {
     /// But it does not outrank a human being waited on.
     func testASubagentDoesNotOutrankAWaitingUser() {
         let row = row([.waiting], subagents: 3)
-        XCTAssertEqual(row.status, .attention)
+        XCTAssertEqual(row.status, .done)
         XCTAssertEqual(row.activeCount, 3)
     }
 
-    /// Everything else is asleep — and "asleep" is a real outcome of three,
+    /// Everything else is asleep — and "asleep" is a real outcome of four,
     /// reported about chats that exist and are doing nothing.
     func testEverythingElseIsAsleep() {
         XCTAssertEqual(row([.idle]).status, .asleep)
@@ -442,21 +457,20 @@ final class RowStatusTests: XCTestCase {
         XCTAssertEqual(row([]).activeCount, 0)
     }
 
+    /// And "no session" is the whole test, because a subagent cannot exist
+    /// without one: the aggregate sums them over the sessions, so an empty pool
+    /// can only ever produce a zero. The `guard` used to check both halves, and
+    /// the second half could not fire — this pins the invariant that makes it
+    /// redundant, instead of the dead branch that hid behind it.
+    func testASubagentCannotOutliveTheChatItRunsUnder() {
+        XCTAssertEqual(DataSource.aggregate([]).activeSubagents, 0)
+        XCTAssertNil(DataSource.aggregate([]).state)
+    }
+
     /// But a single idle chat is something to report, and it reports "asleep" —
     /// the criterion is "is there anything to say", not "which section is this".
     func testASingleIdleChatStillReportsAsleep() {
         XCTAssertEqual(row([.idle]).status, .asleep)
-    }
-
-    /// The second half of the criterion: a subagent with no chat of its own to
-    /// hang off would still be something happening. Sessions are where
-    /// subagents come from, so this cannot arise from the assembly — the row is
-    /// built by hand here to pin the rule as written.
-    func testASubagentAloneIsAlsoSomethingToReport() {
-        var bare = row([])
-        bare.activeSubagents = 1
-        XCTAssertEqual(bare.status, .active)
-        XCTAssertEqual(bare.activeCount, 1)
     }
 
     /// The rule as the panel meets it: an open window has chats and shows an
@@ -481,9 +495,9 @@ final class RowStatusTests: XCTestCase {
     /// The whole fold in one table, so no combination of the five states is
     /// left to chance.
     func testEveryTopStateFoldsToItsOwnAnswer() {
-        let expected: [AgentState: RowStatus] = [.question: .attention,
-                                                 .permission: .attention,
-                                                 .waiting: .attention,
+        let expected: [AgentState: RowStatus] = [.question: .blocked,
+                                                 .permission: .blocked,
+                                                 .waiting: .done,
                                                  .working: .active,
                                                  .idle: .asleep]
         for state in AgentState.allCases {
@@ -510,7 +524,7 @@ final class RowStatusTests: XCTestCase {
                                                       TestFixtures.session(id: "b", cwd: "/tmp/p", state: .question)],
                                            accessibilityTrusted: false)
         let row = try XCTUnwrap(snapshot.projects.first)
-        XCTAssertEqual(row.status, .attention)
+        XCTAssertEqual(row.status, .blocked)
         XCTAssertEqual(row.activeCount, 1)
     }
 }
@@ -1233,7 +1247,7 @@ final class SnapshotAssemblyTests: XCTestCase {
         let row = try XCTUnwrap(snapshot.projects.first { $0.displayName == "tool" })
         XCTAssertEqual(row.sessions.map(\.sessionId), ["s1", "s2", "s3"])
         XCTAssertEqual(row.state, .permission)
-        XCTAssertEqual(row.status, .attention)
+        XCTAssertEqual(row.status, .blocked)
         XCTAssertEqual(Set(snapshot.rows.map(\.id)).count, snapshot.rows.count)
         XCTAssertEqual(snapshot.rows.flatMap(\.sessions).count, 4)
     }

@@ -559,21 +559,30 @@ final class SyntheticProjectTests: XCTestCase {
 /// The pulse means "something is moving" (§3), so it has to follow the status
 /// rather than the lifetime of the view that draws it.
 final class StatusBadgeTests: XCTestCase {
-    /// Only movement pulses. `attention` holds for as long as the user takes to
-    /// come back, and a list where half the rows blink is a list nothing stands
-    /// out in.
+    /// Only movement pulses. Both `blocked` and `done` hold for as long as the
+    /// user takes to come back, and a list where half the rows blink is a list
+    /// nothing stands out in — the user chose a separate glyph over a second
+    /// blinking state.
     func testOnlyActivityAnimates() {
         XCTAssertTrue(StatusBadge.animates(.active))
-        XCTAssertFalse(StatusBadge.animates(.attention))
+        XCTAssertFalse(StatusBadge.animates(.blocked))
+        XCTAssertFalse(StatusBadge.animates(.done))
         XCTAssertFalse(StatusBadge.animates(.asleep))
     }
 
-    /// Each of the three has to be told apart by shape alone: the colour is a
+    /// Each of the four has to be told apart by shape alone: the colour is a
     /// second channel, not the only one.
     func testEveryStatusHasItsOwnSymbol() {
         let symbols = RowStatus.allCases.map { StatusBadge.symbol(for: $0) }
         XCTAssertEqual(Set(symbols).count, RowStatus.allCases.count)
         XCTAssertFalse(symbols.contains(where: \.isEmpty))
+    }
+
+    /// And the point of splitting the fold: a stuck chat does not look like a
+    /// finished one. Both the shape and the colour differ.
+    func testBeingStuckLooksNothingLikeHavingFinished() {
+        XCTAssertNotEqual(StatusBadge.symbol(for: .blocked), StatusBadge.symbol(for: .done))
+        XCTAssertNotEqual(StatusBadge.color(for: .blocked), StatusBadge.color(for: .done))
     }
 
     /// A name SF Symbols does not know draws nothing at all — an empty slot
@@ -602,7 +611,8 @@ final class StatusBadgeTests: XCTestCase {
     func testThePulseOnlyRunsWhileThePanelIsOnScreen() {
         XCTAssertEqual(StatusBadge(status: .active, panelVisible: true).pulseState, .active)
         XCTAssertNil(StatusBadge(status: .active, panelVisible: false).pulseState)
-        XCTAssertNil(StatusBadge(status: .attention, panelVisible: true).pulseState)
+        XCTAssertNil(StatusBadge(status: .blocked, panelVisible: true).pulseState)
+        XCTAssertNil(StatusBadge(status: .done, panelVisible: true).pulseState)
         // An empty slot has nothing to pulse either.
         XCTAssertNil(StatusBadge(status: nil, panelVisible: true).pulseState)
     }
