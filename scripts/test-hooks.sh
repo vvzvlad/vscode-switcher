@@ -267,6 +267,13 @@ start "a payload without session_id is a no-op"
 printf '{"hook_event_name":"Stop","cwd":"/tmp/project"}' | bash "$HOOK"
 check "nothing written" "$(ls "$VSCODE_SWITCHER_STATUS_DIR" | wc -l | tr -d ' ')" "0"
 
+start "the message heuristic survives non-ASCII text"
+# The script runs under LC_ALL=C, where `tr` folds ASCII and leaves every other
+# byte alone — which is what a mixed-script notification needs.
+send "$(payload Notification '"notification_type":"unknown_kind"' '"message":"Клод NEEDS YOUR PERMISSION пожалуйста"')"
+check "state" "$(state)" "permission"
+check "message" "$(field message)" "Клод NEEDS YOUR PERMISSION пожалуйста"
+
 start "a non-ASCII cwd survives"
 printf '{"session_id":"%s","cwd":"/Users/vvzvlad/Проекты/тест","hook_event_name":"Stop"}' "$SESSION" | bash "$HOOK"
 check "cwd" "$(field cwd)" "/Users/vvzvlad/Проекты/тест"
