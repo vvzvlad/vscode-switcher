@@ -219,19 +219,13 @@ if [ -s "$target" ]; then
 	[ -z "$prev" ] && prev="null"
 fi
 # One session can have several waits open at once, so the record carries a
-# *list* of them and not a single pair. The whole algebra of that list lives in
-# this one jq call — which has to run anyway to read the previous state — and it
-# hands back three things: the state that was on disk (for the Notification
-# guards below), the state the row should show now, and the new list. Computing
-# it here rather than in the writer keeps the mismatch case a plain `exit 0`
-# without a third fork: during an open dialog every background subagent tool
-# call lands on it.
-IFS=$'\037' read -r prev_state next_state next_waits <<EOF
-$(printf '%s' "$prev" | "$JQ" -r \
-	--arg event "$event" \
-	--arg state "$state" \
-	--arg toolName "$tool_name" \
-	--arg agentId "$agent_id" '
+# *list* of them and not a single pair. The algebra of that list is shared by
+# the two jq calls below — the one that decides whether this event writes at all,
+# and the writer, which recomputes the list from the file as it stands at write
+# time. Deciding here rather than in the writer keeps the mismatch case a plain
+# `exit 0` without a third fork: during an open dialog every background subagent
+# tool call lands on it.
+JQ_WAITS='
 	# Every wait currently open, read back from the record. Older versions of
 	# this script wrote a single waitTool/waitAgent pair and older ones still
 	# wrote neither, so both shapes have to load — a record stuck in a shape
@@ -258,29 +252,35 @@ $(printf '%s' "$prev" | "$JQ" -r \
 		if any(.state == "question") then "question"
 		elif length > 0 then "permission"
 		else $fallback end;
+	# The list once this event has been applied to the record it is called on.
+	def nextwaits($event; $state; $tool; $agent):
+		waitsof as $open
+		| if $event == "PostToolUse" then ($open | drop($tool; $agent))
+		  elif $event == "PermissionRequest" and $tool != ""
+		  then ($open | drop($tool; $agent))
+		       + [{tool: $tool, agent: $agent, state: $state}]
+		  # Anything else that keeps the state a wait — the Notification trailing
+		  # six seconds behind a dialog — carries the open ones along, or they
+		  # could never be cleared by the tools they belong to.
+		  elif $state == "permission" or $state == "question" then $open
+		  else [] end;
+'
 
-	waitsof as $open
-	| (if $event == "PostToolUse" then ($open | drop($toolName; $agentId))
-	   elif $event == "PermissionRequest" and $toolName != ""
-	   then ($open | drop($toolName; $agentId))
-	        + [{tool: $toolName, agent: $agentId, state: $state}]
-	   # Anything else that keeps the state a wait — the Notification trailing
-	   # six seconds behind a dialog — carries the open ones along, or they
-	   # could never be cleared by the tools they belong to.
-	   elif $state == "permission" or $state == "question" then $open
-	   else [] end) as $next
-	| [(.state // ""),
-	   # An empty state means "do not write": a PostToolUse whose pair matches
-	   # no open wait belongs to somebody else.
-	   (if $event == "PostToolUse"
-	    then (if ($open | any(.tool == $toolName and .agent == $agentId))
-	          then ($next | worst("working")) else "" end)
-	    else ($next | worst($state)) end),
-	   ($next | tojson)]
+# What was on disk a moment ago: the state, for the Notification guards, and
+# whether this PostToolUse has a wait of its own to clear. Only the decision is
+# taken from this read — the list itself is rebuilt by the writer.
+IFS=$'\037' read -r prev_state clears <<EOF
+$(printf '%s' "$prev" | "$JQ" -r \
+	--arg toolName "$tool_name" \
+	--arg agentId "$agent_id" "$JQ_WAITS"'
+	[(.state // ""),
+	 # Empty means "do not write": a PostToolUse whose pair matches no open
+	 # wait belongs to somebody else.
+	 (if (waitsof | any(.tool == $toolName and .agent == $agentId))
+	  then "yes" else "" end)]
 	| join([31] | implode)
 ' 2>/dev/null)
 EOF
-[ -z "$next_waits" ] && next_waits="[]"
 
 # PostToolUse ends a wait and nothing else. The fast path above already exits
 # for any other case, but that path matches a literal string in the payload, and
@@ -308,15 +308,14 @@ EOF
 # `UserPromptSubmit` still clear it, and holding an orange indicator too long
 # beats dropping it while the dialog is up.
 #
-# Which wait matches — and what is left over once it is gone — was worked out by
-# the jq call above; an empty `next_state` is its way of saying that this tool
-# call clears nothing here.
+# Whether any wait matches was worked out by the jq call above; an empty
+# `clears` is its way of saying that this tool call clears nothing here.
 if [ "$event" = "PostToolUse" ]; then
 	case "$prev_state" in
 	permission | question) ;;
 	*) exit 0 ;;
 	esac
-	[ -z "$next_state" ] && exit 0
+	[ -z "$clears" ] && exit 0
 fi
 
 # A Notification never clears a permission or question wait. `idle_prompt` only
@@ -342,54 +341,78 @@ if [ "$event" = "Notification" ] && [ "$state" = "permission" ] && [ "$prev_stat
 	exit 0
 fi
 
-# The state finally written is the one left over once the list has been updated:
-# a session with two waits open keeps showing the more urgent of them rather than
-# the one that happened to move last, and a PostToolUse that emptied the list
-# gets its `working` from there. The guards above deliberately run before this,
-# on the state the event alone implies, so that what a Notification is allowed to
-# do does not depend on what the list happens to hold. The fallback covers jq
-# having produced nothing at all.
-[ -n "$next_state" ] && state="$next_state"
+# The record is rebuilt from the file as it stands *now*, not from the copy read
+# a few milliseconds ago. Between that read and this write sit a jq run and a
+# `date`, and two PostToolUse from different subagents landing inside that window
+# would both compute their new list from the same old one — the second to write
+# would resurrect the wait the first had cleared, and it would then hold the
+# indicator until the end of the turn. Reading again here shrinks the window to
+# one jq run; it does not close it, because the read and the rename are still not
+# one operation (SPEC §2.6.3).
+#
+# `--slurpfile` is a fatal error on a missing or damaged file rather than a null,
+# so the case where nothing readable was there a moment ago hands jq an empty
+# stream instead. A record that was readable then and is gone now loses the
+# write, which is what a `SessionEnd` removing the file underneath should do.
+if [ "$prev" = "null" ]; then
+	prev_args=(--argjson prevFile '[]')
+else
+	prev_args=(--slurpfile prevFile "$target")
+fi
 
 tmp="$STATUS_DIR/.tmp.$session_id.$$"
 "$JQ" -n \
-	--argjson prev "$prev" \
-	--argjson waits "$next_waits" \
+	"${prev_args[@]}" \
 	--arg sessionId "$session_id" \
 	--arg cwd "$cwd" \
 	--arg state "$state" \
 	--arg event "$event" \
+	--arg toolName "$tool_name" \
+	--arg agentId "$agent_id" \
 	--arg notificationType "$notif_type" \
 	--arg message "$message" \
 	--arg reason "$reason" \
 	--arg transcript "$transcript" \
 	--argjson ts "$(date +%s)" \
-	'
+	"$JQ_WAITS"'
+	($prevFile[0]) as $raw
+	# Anything that is not an object is no previous record at all: `null.cwd` is
+	# valid jq and yields null, while `[1,2].cwd` is a fatal error that would
+	# take the whole program — and with it the new state — down with it.
+	| (if ($raw | type) == "object" then $raw else null end) as $prev
+	| ($raw | nextwaits($event; $state; $toolName; $agentId)) as $waits
+	# The state written is the one left over once the list has been updated: a
+	# session with two waits open keeps showing the more urgent of them rather
+	# than the one that happened to move last, and a PostToolUse that emptied
+	# the list gets its `working` from the fallback. The guards above
+	# deliberately ran before this, on the state the event alone implies, so
+	# that what a Notification is allowed to do does not depend on what the
+	# list happens to hold.
+	| ($waits | worst($state)) as $rowState
+	|
 	# A record older than the one already on disk is dropped: a delayed
 	# UserPromptSubmit must not bury the Stop that overtook it. Emitting
 	# nothing leaves the temporary file empty, and the caller keeps the
 	# existing state.
 	#
-	# The types are checked before the comparison, and not only to be tidy:
-	# in jq every number sorts before every string, so a `ts` of "abc" made
-	# the comparison true forever and no state could ever be written again,
-	# and a non-object `prev` such as `[1,2]` failed `.ts` outright, which
-	# killed the whole program with the same result.
+	# The type is checked before the comparison, and not only to be tidy: in
+	# jq every number sorts before every string, so a `ts` of "abc" made the
+	# comparison true forever and no state could ever be written again.
 	if (($prev | type) == "object" and ($prev.ts | type) == "number" and $prev.ts > $ts)
 	then empty else
 	  # Notification payloads carry no cwd for some types; taking the empty
 	  # string would blank out the path a previous event recorded.
 	  {sessionId: $sessionId,
 	   cwd: (if $cwd == "" then ($prev.cwd // "") else $cwd end),
-	   state: $state,
+	   state: $rowState,
 	   event: $event,
 	   ts: $ts}
 	  # Who is waiting and for what, so that PostToolUse can tell its own tool
 	  # from one belonging to a background subagent — a list, because a
 	  # subagent can be blocked on a permission dialog while the main agent is
 	  # blocked on a question, and answering one of them must not clear the
-	  # other. Worked out above; empty when nothing is waiting, and then the
-	  # key is left out entirely.
+	  # other. Empty when nothing is waiting, and then the key is left out
+	  # entirely.
 	  + (if ($waits | length) == 0 then {} else {waits: $waits} end)
 	  + (if $message == "" then {} else {message: $message} end)
 	  + (if $notificationType == "" then {} else {notificationType: $notificationType} end)
