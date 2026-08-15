@@ -35,7 +35,7 @@ struct Config: Sendable, Equatable {
         projectRoots: ["~/Data/Projects"],
         scanDepth: 2,
         activityWindowDays: 30,
-        dwellMilliseconds: 150,
+        dwellMilliseconds: 300,
         panelWidth: 380,
         panelHeightFraction: 0.7,
         subagentActiveSeconds: 90,
