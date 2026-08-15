@@ -14,6 +14,11 @@
 # touched.
 set -u
 
+# Inherited from the caller, this makes the hook drop a _debug.jsonl next to the
+# state files, and the four cases that assert an empty status directory fail. The
+# one case that wants the dump sets the variable itself.
+unset VSCODE_SWITCHER_DEBUG
+
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 HOOK="$REPO_DIR/hooks/claude-window-status.sh"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/vsw-hook-tests.XXXXXX")
