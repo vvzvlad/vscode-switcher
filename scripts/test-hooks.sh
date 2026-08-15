@@ -84,6 +84,14 @@ waits() { # [session]
 		"$(STATE_FILE "${1:-}")" 2>/dev/null
 }
 
+# Whether the key is there at all. `waits` above returns the empty string for
+# three different records — no file, no key, `waits: []` — so "nothing is
+# waiting" and "the key is gone" have to be asserted separately: SPEC §2.6 says
+# the key exists only while at least one wait is open.
+has_waits() { # [session]
+	jq -r 'has("waits")' "$(STATE_FILE "${1:-}")" 2>/dev/null
+}
+
 # --- the six events -----------------------------------------------------------
 
 start "UserPromptSubmit sets working"
@@ -229,6 +237,7 @@ check "only the question is left" "$(waits)" "AskUserQuestion//question"
 send "$(payload PostToolUse '"tool_name":"AskUserQuestion"')"
 check "answering it finally frees the row" "$(state)" "working"
 check "no waits left" "$(waits)" ""
+check "and the key itself is gone" "$(has_waits)" "false"
 
 start "clearing a question falls back to the permission still open"
 # The same in the other order: the state is the most urgent wait remaining, not
@@ -255,6 +264,7 @@ send "$(payload PermissionRequest '"tool_name":"Bash"' '"agent_id":"AAA"')"
 send "$(payload Stop)"
 check "state" "$(state)" "waiting"
 check "waits" "$(waits)" ""
+check "and the key itself is gone" "$(has_waits)" "false"
 
 start "a wait raised by Notification does not hide the ones with names"
 # Notification carries no tool name, so it can only keep the list it found.
