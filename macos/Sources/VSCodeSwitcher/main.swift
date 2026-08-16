@@ -149,7 +149,9 @@ enum ConsoleDump {
     /// the section on the machine where the relay is down.
     private static func printUsage(_ usage: UsageSnapshot) {
         print("Usage (claude_gw)")
-        if let failure = usage.failure {
+        // Both halves in one line: each reason names its own endpoint already,
+        // and the dump acts on neither.
+        if let failure = usage.failureText {
             print("  unavailable:      \(failure)")
         }
         if usage.since != .distantPast {
@@ -214,13 +216,12 @@ enum ConsoleDump {
     }
 
     /// `21.3M`, `914k`, `512`: the coarsest unit that still tells two numbers
-    /// apart at a glance.
+    /// apart at a glance. The panel's rows write the same figure, so the
+    /// formatting lives in one place — the same arrangement `countLabel` is in,
+    /// and for the same reason: a dump that rounds differently from the panel
+    /// describes a row the panel does not draw.
     private static func compact(_ value: Double) -> String {
-        switch abs(value) {
-        case 1_000_000...: return String(format: "%.2fM", value / 1_000_000)
-        case 1_000...: return String(format: "%.0fk", value / 1_000)
-        default: return String(format: "%.0f", value)
-        }
+        SwitcherRowView.compactTokens(value)
     }
 
     /// The name column of the "Projects" section: the name, then the count in

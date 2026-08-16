@@ -17,6 +17,63 @@ final class SwitcherPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// An activation this app performed for itself, and whether the keyboard is
+/// still owed back.
+///
+/// This app is an `.accessory` with no window of its own, so an activation that
+/// is never given back leaves it frontmost with nothing to type into: the user
+/// goes back to their editor, types, and the keystrokes go nowhere while the
+/// editor looks perfectly alive (§4). Three things activate — the panel's search
+/// field, the status item's popover and the alerts its menu items put up — and
+/// only all of them together are the answer to "may the app hide now": whichever
+/// is dismissed first, another may still legitimately need the app in front.
+/// Which is why they share one account instead of each minding its own: the
+/// alert was the one that did mind its own, activating with a bare `NSApp`
+/// call, and it left the app frontmost over nothing every time it was dismissed.
+///
+/// A value type, and the whole rule in one place, because the sequence that
+/// broke it cannot be reached from a test through `NSApp`: the popover activates,
+/// the popover is dismissed while the panel is up (nothing owed — the panel is in
+/// front for its own sake), and the panel then goes away with the debt still
+/// standing. Kept as two flags on the controller, that middle step used to lose
+/// the debt or never record it at all.
+struct ActivationDebt: Equatable {
+
+    /// What the caller should do about the debt right now.
+    enum Action: Equatable {
+        /// Hand the keyboard back — `NSApp.hide`. Settles the debt.
+        case hide
+        /// Something of this app's own is in the way (a modal, a menu being
+        /// tracked, the popover). Ask again shortly; the debt stands.
+        case retry
+        /// Nothing to do: nothing owed, something of ours is legitimately in
+        /// front, or the front slot has already gone elsewhere.
+        case nothing
+    }
+
+    private(set) var isOwed = false
+
+    /// The app was activated by us, for whatever reason.
+    mutating func activated() { isOwed = true }
+
+    /// What to do now, given what is on screen.
+    mutating func settle(panelVisible: Bool, appActive: Bool, canHide: Bool) -> Action {
+        // The panel is up: the app is in front for its sake, and the debt waits
+        // for the panel's own hide rather than being settled or forgotten here.
+        guard !panelVisible else { return .nothing }
+        guard isOwed else { return .nothing }
+        // Not active any more: a row click already handed the front slot to the
+        // editor, so there is nothing left to give back.
+        guard appActive else {
+            isOwed = false
+            return .nothing
+        }
+        guard canHide else { return .retry }
+        isOwed = false
+        return .hide
+    }
+}
+
 /// Owns the sliding panel: geometry, the show/hide animation and the dismissal
 /// rules.
 ///
@@ -42,6 +99,11 @@ final class PanelController {
     var onPanelMoved: ((NSRect) -> Void)?
     /// The user asked for the Accessibility permission from the panel.
     var onGrantAccessibility: (() -> Void)?
+    /// Whether the status item's usage popover is on screen. Asked afresh every
+    /// time rather than mirrored into a flag here: `NSPopover.isShown` is the
+    /// truth, and a copy of it is one more thing that can be left behind.
+    /// See `canHideApp`.
+    var isPopoverOpen: (() -> Bool)?
 
     private let config: Config
     private let store: SnapshotStore
@@ -60,9 +122,9 @@ final class PanelController {
     private var clickMonitor: Any?
     private var cancellables = Set<AnyCancellable>()
 
-    /// The app was activated for the search field and has not handed the
-    /// keyboard back yet. See `releaseKeyboardFocus`.
-    private var didActivateForSearch = false
+    /// This app activated itself and has not handed the keyboard back yet. See
+    /// `releaseKeyboardFocus`.
+    private var debt = ActivationDebt()
     /// How many of this app's menus are being tracked right now — the status
     /// item's, in practice. Counted rather than flagged so a submenu cannot
     /// close the count while its parent is still up.
@@ -71,6 +133,17 @@ final class PanelController {
     /// comes back down on its own, so it is reconciled with reality in
     /// `scheduleKeyboardReleaseRetry`.
     private var menuTrackingDepth = 0
+    /// A menu of ours has been asked for and is not over yet. See
+    /// `menuWillOpen`.
+    ///
+    /// Readable from outside, unlike the count beside it, because it is the one
+    /// of the four `canHideApp` states with no way back: the tracking count is
+    /// reconciled with reality before every retry, a modal is asked of the
+    /// system anew each time, the popover answers for itself — and this is a
+    /// flag set and cleared by two calls of ours, which stops the hand-back for
+    /// good if the second one is ever missed. A test can hold that pair only if
+    /// it can see the flag.
+    private(set) var menuOpening = false
     /// Retries a hand-back that had to wait. See `releaseKeyboardFocus`.
     private var keyboardReleaseRetry: Timer?
 
@@ -144,7 +217,10 @@ final class PanelController {
         let center = NotificationCenter.default
         _ = center.addObserver(forName: NSMenu.didBeginTrackingNotification,
                                object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.menuTrackingDepth += 1 }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.menuTrackingDepth += 1
+            }
         }
         _ = center.addObserver(forName: NSMenu.didEndTrackingNotification,
                                object: nil, queue: .main) { [weak self] _ in
@@ -282,12 +358,81 @@ final class PanelController {
     private func takeKeyboardFocus() {
         guard isVisible else { return }
         NSApp.activate(ignoringOtherApps: true)
-        didActivateForSearch = true
+        debt.activated()
         panel.makeKey()
         model.searchFieldFocused = true
     }
 
-    /// Hands the keyboard back after the panel is off screen.
+    /// Activates the app for something of ours that needs the app in front: the
+    /// status item's popover, and the alerts the menu items put up. An
+    /// `LSUIElement` that never activates spends the first click inside such a
+    /// window on becoming active instead of on the control it landed on, and an
+    /// alert behind every other window is worse still.
+    ///
+    /// It goes through here rather than through `NSApp.activate` at the call
+    /// site so that every activation lands on the same account. Kept apart, an
+    /// activation is one nobody is owed back: the popover hands it over only in
+    /// `popoverDidClose` and only with the panel down, so "clicked the status
+    /// item, then went to the panel, then dismissed the popover" left the app
+    /// frontmost with no window — §4's defect exactly, and the user typing into
+    /// nowhere until they clicked something. The alert reached the same end by a
+    /// shorter road: it activated for itself, was dismissed, and left nothing on
+    /// screen and nobody counting.
+    func activateAppForOwnWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        debt.activated()
+    }
+
+    /// A menu of ours is about to be put up.
+    ///
+    /// Held from the decision until the menu is over, because the stretch
+    /// before tracking begins is a window in which `NSApp.hide` cancels a
+    /// tracking that has not started yet — and the caller's own first step is
+    /// closing the popover, which hands the keyboard back and may hide the app
+    /// on the spot. Ordering the two lines the other way round would only work
+    /// as long as AppKit delivers the close synchronously, which is nobody's
+    /// promise; this closes the gap instead of stepping over it.
+    ///
+    /// Dropping the flag the moment tracking begins — a third writer, in
+    /// `didBeginTracking` — was removed rather than kept: from that moment
+    /// until `menuOpeningDidFinish` the tracking count answers no on its own,
+    /// in the same conjunction, so the only interval the early clear could
+    /// change is the sliver between `didEndTracking` and the call below, where
+    /// it *permits* a hide this flag would otherwise postpone.
+    func menuWillOpen() {
+        menuOpening = true
+    }
+
+    /// The menu has been put up and taken down again — or was never tracked at
+    /// all. Either way there is nothing left to stand in for.
+    func menuOpeningDidFinish() {
+        menuOpening = false
+    }
+
+    /// A modal of ours has finished. The same question the popover's close asks,
+    /// and asked in the same place for the same reason: the app was activated
+    /// for the alert, the alert is gone, and this is the moment the debt can be
+    /// settled — or postponed, if the panel is up or a menu is in the way.
+    func modalDidFinish() {
+        releaseKeyboardFocus()
+    }
+
+    /// The popover went away. Whether that means handing the keyboard back is
+    /// the same question the panel's own hide asks, so it is asked in the same
+    /// place: the panel may still be up (nothing owed yet), a menu or a modal
+    /// may be in the way (retry), or this may be the last of ours on screen.
+    ///
+    /// Whether `NSPopover.isShown` has already turned false by the time its
+    /// delegate is told needs no assumption here: if it has not, `canHideApp`
+    /// answers no, and the retry settles it a fifth of a second later.
+    func popoverDidClose() {
+        releaseKeyboardFocus()
+    }
+
+    /// Hands the keyboard back once nothing of ours needs the app in front.
+    /// Called when the panel has finished hiding, when the popover closes, when
+    /// a modal ends, and from the retry below — once per thing that can be the
+    /// last of ours to go away.
     ///
     /// This app is an `.accessory` with no window of its own once the panel is
     /// ordered out, and activating it is not undone by hiding that panel: it
@@ -308,40 +453,34 @@ final class PanelController {
     /// dropped: the app would otherwise stay frontmost with no window and
     /// swallow every keystroke, which is the whole defect this method exists
     /// for.
+    ///
+    /// Every rule of it lives in `ActivationDebt`; this only supplies the state
+    /// of the world and carries out the answer.
     private func releaseKeyboardFocus() {
-        // The panel came back up while a hand-back was still pending. The app is
-        // legitimately active for the new search now.
-        guard !isVisible else {
+        // Only once the panel is actually off screen. A panel that came back up
+        // while a hand-back was still pending is legitimately active for the new
+        // search, and clearing the caret under the user's typing would be worse
+        // than the stale flag.
+        if !isVisible { model.searchFieldFocused = false }
+        switch debt.settle(panelVisible: isVisible,
+                           appActive: NSApp.isActive,
+                           canHide: canHideApp) {
+        case .hide:
             cancelKeyboardReleaseRetry()
-            return
-        }
-        model.searchFieldFocused = false
-        guard didActivateForSearch else {
-            cancelKeyboardReleaseRetry()
-            return
-        }
-        // Not active any more: a row click already handed the front slot to the
-        // editor, so there is nothing left to give back.
-        guard NSApp.isActive else {
-            didActivateForSearch = false
-            cancelKeyboardReleaseRetry()
-            return
-        }
-        guard canHideApp else {
+            NSApp.hide(nil)
+        case .retry:
             scheduleKeyboardReleaseRetry()
-            return
+        case .nothing:
+            cancelKeyboardReleaseRetry()
         }
-        didActivateForSearch = false
-        cancelKeyboardReleaseRetry()
-        NSApp.hide(nil)
     }
 
     /// Whether `NSApp.hide` is safe to call at all right now.
     ///
-    /// Two states of this app's own make it destructive, and both are reachable
-    /// from the ordinary "clicked the search field, then walked away" path,
-    /// because the auto-hide fires 400 ms after the pointer leaves and its timer
-    /// runs in `.common`:
+    /// Four states of this app's own make it destructive. The first three are
+    /// reachable from the ordinary "clicked the search field, then walked away"
+    /// path, because the auto-hide fires 400 ms after the pointer leaves and its
+    /// timer runs in `.common`:
     ///
     /// - **A modal session.** `hide` orders the `NSAlert`'s window out, but
     ///   `runModal` keeps spinning on the main thread. The app is then stuck in
@@ -352,17 +491,57 @@ final class PanelController {
     /// - **Menu tracking.** `hide` cancels it, so the status item menu collapsed
     ///   under the pointer while the user was reading it — probed: `popUp`
     ///   returned 0.26 s after the hide that was scheduled during the tracking.
+    /// - **An open usage popover.** `hide` takes every window of the app down,
+    ///   the popover among them: it closed under the pointer while the user was
+    ///   reading the accounts. Probed the same way as the two above — an open
+    ///   popover reported `isShown=false` after `NSApp.hide(nil)` and did not
+    ///   come back on unhide. Unlike them it needs no retry of its own: the
+    ///   popover's own close hands the keyboard back (`popoverDidClose`), so the
+    ///   postponed hand-back happens at the moment the obstacle goes away.
+    ///
+    /// The fourth is the same menu one instruction earlier. Putting the status
+    /// menu up begins by closing the popover, and that close hands the keyboard
+    /// back — with the menu not yet tracked, nothing then answered no, and the
+    /// hide landed in the gap and cancelled a tracking that was about to start.
+    /// It is not reached from the auto-hide but from our own call order, which
+    /// is why it is a flag we set rather than a state we read: see
+    /// `menuWillOpen`.
     private var canHideApp: Bool {
-        NSApp.modalWindow == nil && menuTrackingDepth == 0
+        Self.canHideApp(modal: NSApp.modalWindow != nil,
+                        menuTrackingDepth: menuTrackingDepth,
+                        menuOpening: menuOpening,
+                        popoverOpen: isPopoverOpen?() ?? false)
+    }
+
+    /// The rule itself, free of `NSApp`, so all four of its states can be
+    /// checked. Every one of them was a defect before it was a clause.
+    static func canHideApp(modal: Bool,
+                           menuTrackingDepth: Int,
+                           menuOpening: Bool,
+                           popoverOpen: Bool) -> Bool {
+        !modal && menuTrackingDepth == 0 && !menuOpening && !popoverOpen
     }
 
     /// Retries a postponed hand-back.
     ///
     /// Deliberately scheduled in `.default` only, unlike every other timer here:
     /// that is precisely the mode a menu tracking loop and a modal session do
-    /// *not* run, so the retry cannot fire inside either of the two states it is
-    /// waiting out. The guards in `canHideApp` are still the ones that make it
-    /// safe; the mode only keeps the timer quiet meanwhile.
+    /// *not* run, so the retry cannot fire inside either of those two. The
+    /// guards in `canHideApp` are still the ones that make it safe; the mode
+    /// only keeps the timer quiet meanwhile.
+    ///
+    /// The other two states are not like that. A popover spins no loop of its
+    /// own, so the retry does fire while one is up, five times a second, and
+    /// finds `canHideApp` false every time. Harmless, and it ends by itself:
+    /// `popoverDidClose` hands the keyboard back at the same instant the
+    /// obstacle goes away, and the next tick then sees `NSApp.isActive` false
+    /// and cancels itself. `menuOpening` is bounded by one straight-line
+    /// stretch of our own code — set before the popover is closed, cleared once
+    /// the tracking has returned — so it stands for as long as the menu does. A
+    /// tick can still only land inside it in the two instructions before that
+    /// tracking begins, the loop itself not running in the default mode; if
+    /// AppKit spins a run loop in the middle of closing the popover, the answer
+    /// is no, which is exactly what the flag is there for.
     ///
     /// Which also makes this the one place the tracking count can be checked
     /// against reality: the timer firing at all means the run loop is in the

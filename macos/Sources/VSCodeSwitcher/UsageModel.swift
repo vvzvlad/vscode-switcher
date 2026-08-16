@@ -337,10 +337,24 @@ struct HistorySeries: Sendable, Decodable {
 
 /// One poll of the gateway, joined against the local transcripts: what the rest
 /// of the app reads.
+///
+/// The two halves are blamed separately, because they arrive separately:
+/// `/gw/usage` can answer while `/gw/sessions` times out. The half that is drawn
+/// with its own age beside it is timed separately too — a snapshot that carried
+/// one stamp for both said "updated just now" over figures an hour old.
+///
+/// Only that half. `/gw/sessions` has no stamp of its own here because nothing
+/// draws one: its figures are the spend on the panel's rows, and a row carries
+/// an indicator and a number with no age beside either. A stamp nobody reads is
+/// a field to keep in step with every future change of the merge rule, in
+/// exchange for nothing.
 struct UsageSnapshot: Sendable {
-    /// When this poll finished. Not the gateway's `now`: the age that matters is
-    /// the age of what we hold.
-    var fetchedAt: Date
+    /// When the last pass ran, whatever came of it. This is the age of the
+    /// attempt, never the age of the numbers — read `quotaFetchedAt` for that.
+    var checkedAt: Date
+    /// When `/gw/usage` last answered, or `nil` if it never has. The account
+    /// figures, the fleet mean and the accounts list are all as of this moment.
+    var quotaFetchedAt: Date?
     /// The window the gateway applied to the session figures.
     var since: Date
     /// The gateway dropped the cheapest sessions past its cap.
@@ -355,12 +369,15 @@ struct UsageSnapshot: Sendable {
     /// nodes, mostly. Not an error: it is real spend with no local owner.
     var unmatched: TokenCounts
     var unmatchedSessions: Int
-    /// Why the last poll did not fully succeed. The numbers next to it are the
-    /// previous ones, kept on purpose: slightly stale beats blank.
-    var failure: String?
+    /// Why `/gw/usage` did not answer on the last pass. The account figures next
+    /// to it are the previous ones, kept on purpose: slightly stale beats blank.
+    var quotaFailure: String?
+    /// Why `/gw/sessions` did not answer on the last pass. Same rule.
+    var sessionsFailure: String?
 
     /// Nothing polled yet.
-    static let empty = UsageSnapshot(fetchedAt: .distantPast,
+    static let empty = UsageSnapshot(checkedAt: .distantPast,
+                                     quotaFetchedAt: nil,
                                      since: .distantPast,
                                      truncated: false,
                                      fleetSevenDayMean: nil,
@@ -368,7 +385,33 @@ struct UsageSnapshot: Sendable {
                                      tokensByCwd: [:],
                                      unmatched: .zero,
                                      unmatchedSessions: 0,
-                                     failure: nil)
+                                     quotaFailure: nil,
+                                     sessionsFailure: nil)
+
+    /// The fleet's weekly quota as a whole per cent — the one figure two
+    /// surfaces show, rounded in one place so they cannot disagree about it.
+    ///
+    /// Rounding here rather than at each drawing also makes the menu bar picture
+    /// a pure function of one `Int?`, which is what lets its owner dedupe on the
+    /// value and redraw only when it really changed.
+    ///
+    /// Freshness is deliberately not part of it: whether an old reading may
+    /// still be shown is a question each surface answers for itself, and they
+    /// answer it differently — see `MenuBarIcon.percent` and the popover's
+    /// headline.
+    var fleetSevenDayPercent: Int? {
+        fleetSevenDayMean.map { Int($0.rounded()) }
+    }
+
+    /// Both reasons as one line, for the places that print a reason rather than
+    /// act on one. Deliberately not called `failure`: the readers that *decide*
+    /// something — the menu bar picture above all — must name the half they mean,
+    /// and the old single field let a failure of `/gw/sessions` blank out a
+    /// perfectly fresh quota figure.
+    var failureText: String? {
+        let both = [quotaFailure, sessionsFailure].compactMap { $0 }
+        return both.isEmpty ? nil : both.joined(separator: "; ")
+    }
 
     /// Everything the gateway reported for the window, matched or not.
     var total: TokenCounts {
