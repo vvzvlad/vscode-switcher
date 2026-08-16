@@ -3,7 +3,8 @@
 #
 # Reads a hook payload from stdin, derives a coarse agent state and writes it
 # atomically to $STATUS_DIR/<session_id>.json. Installed for UserPromptSubmit,
-# PermissionRequest, PostToolUse, Stop, Notification and SessionEnd.
+# PermissionRequest, PostToolUse, PostToolUseFailure, Stop, Notification and
+# SessionEnd.
 #
 # The script is deliberately defensive: any missing field, missing tool or
 # unexpected payload results in a silent exit 0, because a failing hook would
@@ -27,27 +28,60 @@ DEBUG_MAX_BYTES=4194304
 
 payload=$(cat 2>/dev/null)
 
-# PostToolUse is the one event on a hot path: it fires after *every* tool call,
-# while the rest fire a handful of times per turn. Its only job here is to end a
-# permission wait the moment the approved tool actually runs — before this, the
-# orange indicator stayed on until the whole turn ended, because `permission` is
-# by design only cleared by a later hook. So it exits before spawning jq unless
-# there is a permission wait to clear, using only shell built-ins from there on:
-# beyond the `cat` that reads stdin (a builtin `read -r -d ""` would do it
-# without the fork, but it consumes a pipe one byte at a time — two seconds on a
-# 5 MB payload against 31 ms) nothing else is forked and nothing is read from
-# disk except one small state file.
+# PostToolUse is the event on a hot path: it fires after every *successful* tool
+# call, while the rest fire a handful of times per turn. Its only job here is to
+# end a permission wait the moment the approved tool actually runs — before this,
+# the orange indicator stayed on until the whole turn ended, because `permission`
+# is by design only cleared by a later hook.
+#
+# A tool call that fails does not produce it at all: the CLI sends
+# `PostToolUseFailure` instead — for a non-zero exit, and also for an MCP result
+# carrying `isError: true` or a JSON-RPC error, all three verified on 2.1.233
+# (SPEC §2.6.2). Subscribing to one of the two is not enough: a permission
+# granted for an MCP tool that then answered 403 left its wait open for the whole
+# turn — twelve minutes of orange hand on an agent that was making tool calls the
+# entire time. Both names are handled identically everywhere below; failures run
+# at roughly 4% of calls (SPEC §2.6.3), so the second subscription adds nothing
+# measurable to the hot path.
+#
+# Either of them exits before spawning jq unless there is a permission wait to
+# clear, and uses only shell built-ins from there on: beyond the `cat` that
+# reads stdin (a builtin `read -r -d ""` would do it without the fork, but it
+# consumes a pipe one byte at a time — two seconds on a 5 MB payload against
+# 31 ms) nothing else is forked and nothing is read from disk except one small
+# state file.
 #
 # The head is cut *first* and the event name is matched inside the head only: a
 # glob over the whole payload would walk the entire tool response — megabytes
 # for a large file read — to find a key that sits in the first few hundred
-# bytes. The window is far wider than needed (the key ends by byte 580 in all
-# 1865 payloads captured, and it is preceded only by `session_id`,
-# `transcript_path` and `cwd`); an event name that still falls outside it simply
-# takes the slow path below, which is correct, only slower.
+# bytes. The window is far wider than needed: the key ends by byte 580 in all
+# 1865 payloads of the dump as it stood at the 2.1.227 stage — a corpus that
+# accumulated across CLI versions, every event type together, and the shorter
+# ones close it sooner — and by roughly byte 380 in the end-to-end run on
+# 2.1.233. Not because the payload's shape differs there: the comparable events
+# carry the same fields in front of the key, `PermissionRequest` on 2.1.227 and
+# `PostToolUseFailure` on 2.1.233 field for field (SPEC §2.6.2). What is shorter
+# there are the values — the sandbox path against a real project's. What moves
+# the key is not the number of fields but the length of what they hold:
+# `transcript_path` and `cwd` are both the project path, and `agent_type` is a
+# subagent's name rather than a constant. An event name that still falls outside
+# the window simply takes the slow path below, which is correct, only slower.
 head=${payload:0:2048}
+# The closing quote belongs to every pattern here. Without it `"PostToolUse`
+# would be a prefix that also swallows `PostToolUseFailure` and any future event
+# whose name merely starts the same way; with it, the failure event needs a pair
+# of patterns of its own rather than riding along on the success one. Losing the
+# quote would cost meaning rather than correctness — an event caught by a prefix
+# that this script does not handle still falls out at the `*) exit 0` of the
+# `case "$event"` below, only after paying for the jq run this path exists to
+# avoid. Subscribing to `PostToolUseFailure` without adding these two patterns
+# would cost the same on every failed tool call — which is why each of the four
+# patterns has an assertion of its own now, going by the debug dump: it is
+# written strictly after the early exit, so an absent dump is the proof the exit
+# ran (`the post-tool events leave before the dump is written`).
 case $head in
-*'"hook_event_name": "PostToolUse"'* | *'"hook_event_name":"PostToolUse"'*)
+*'"hook_event_name": "PostToolUse"'* | *'"hook_event_name":"PostToolUse"'* | \
+	*'"hook_event_name": "PostToolUseFailure"'* | *'"hook_event_name":"PostToolUseFailure"'*)
 	if [[ $head =~ \"session_id\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
 		probe="$STATUS_DIR/${BASH_REMATCH[1]}.json"
 		[ -s "$probe" ] || exit 0
@@ -58,8 +92,8 @@ case $head in
 		# those: the top-level `state` is the maximum over the list and the key
 		# is left out while the list is empty, so a nested occurrence only ever
 		# exists in a record whose top-level state already matches. Nothing
-		# rests on that invariant anyway — a false positive costs the slow path,
-		# which then exits on the `prev_state` guard below.
+		# rests on that invariant anyway: this match only decides whether jq
+		# runs at all, and what gets written is decided by the pair check below.
 		case "$current" in
 		*'"state": "permission"'* | *'"state":"permission"'* | \
 			*'"state": "question"'* | *'"state":"question"'*) ;;
@@ -198,10 +232,18 @@ PermissionRequest)
 	*) state="permission" ;;
 	esac
 	;;
-PostToolUse)
+PostToolUse | PostToolUseFailure)
 	# Only ever reached with a permission or question wait on disk (see the
 	# early exit above): the tool the user approved — or the question they
 	# answered — has now run, so the wait is over.
+	#
+	# The two names are one case because the wait ends either way: the CLI
+	# sends `PostToolUse` only when the call succeeded and `PostToolUseFailure`
+	# when it did not, and what matters here is that the tool stopped waiting
+	# for the human, not what it returned. The failure payload carries `error`,
+	# `is_interrupt` and `duration_ms` where the success one carries
+	# `tool_response`; the three fields the decision rests on — `tool_name`,
+	# `agent_id`, `session_id` — sit in both the same way (SPEC §2.6.2).
 	state="working"
 	;;
 Notification)
@@ -271,9 +313,12 @@ JQ_WAITS='
 		elif length > 0 then "permission"
 		else $fallback end;
 	# The list once this event has been applied to the record it is called on.
+	# A failed call ends its wait exactly as a successful one does; it only
+	# arrives under another event name (SPEC §2.6.3).
 	def nextwaits($event; $state; $tool; $agent):
 		waitsof as $open
-		| if $event == "PostToolUse" then ($open | drop($tool; $agent))
+		| if $event == "PostToolUse" or $event == "PostToolUseFailure"
+		  then ($open | drop($tool; $agent))
 		  elif $event == "PermissionRequest" and $tool != ""
 		  then ($open | drop($tool; $agent))
 		       + [{tool: $tool, agent: $agent, state: $state}]
@@ -285,37 +330,32 @@ JQ_WAITS='
 '
 
 # What was on disk a moment ago: the state, for the Notification guards, and
-# whether this PostToolUse has a wait of its own to clear. Only the decision is
-# taken from this read — the list itself is rebuilt by the writer.
+# whether this post-tool event has a wait of its own to clear. Only the decision
+# is taken from this read — the list itself is rebuilt by the writer.
 IFS=$'\037' read -r prev_state clears <<EOF
 $(printf '%s' "$prev" | "$JQ" -r \
 	--arg toolName "$tool_name" \
 	--arg agentId "$agent_id" "$JQ_WAITS"'
 	[(.state // ""),
-	 # Empty means "do not write": a PostToolUse whose pair matches no open
-	 # wait belongs to somebody else.
+	 # Empty means "do not write": a post-tool event whose pair matches no
+	 # open wait belongs to somebody else.
 	 (if (waitsof | any(.tool == $toolName and .agent == $agentId))
 	  then "yes" else "" end)]
 	| join([31] | implode)
 ' 2>/dev/null)
 EOF
 
-# PostToolUse ends a wait and nothing else. The fast path above already exits
-# for any other case, but that path matches a literal string in the payload, and
-# correctness must not hang off the CLI's JSON spacing: with the match missed,
-# every tool call would land here, and an async PostToolUse delivered after the
-# `Stop` it preceded would turn an answered chat back into a working one.
-#
-# And it ends *its own* wait. A session is one `session_id` but many agents:
+# A post-tool event — success or failure — ends a wait and nothing else,
+# and it ends *its own* wait. A session is one `session_id` but many agents:
 # every background subagent's tool call arrives here under the parent's
 # `session_id`, with its own `agent_id`. Caught in the wild: the main agent had
 # an `AskUserQuestion` dialog on screen and a subagent's `Bash` finished, which
-# cleared it — the yellow chip vanished while the question was still waiting for
-# an answer. Nothing brings a wait cleared by mistake back: `permission` is
-# invisible to the transcript, and `question` cannot be recovered from it either,
-# because the transcript of an agent blocked on a dialog stops growing while the
-# subagent writes to its own session file — and the transcript is only allowed to
-# overrule the hook when it is provably newer (SPEC §2.6.3).
+# cleared it — the yellow chip vanished while the question was still waiting
+# for an answer. Nothing brings a wait cleared by mistake back: `permission`
+# is invisible to the transcript, and `question` cannot be recovered from it
+# either, because the transcript of an agent blocked on a dialog stops growing
+# while the subagent writes to its own session file — and the transcript is only
+# allowed to overrule the hook when it is provably newer (SPEC §2.6.3).
 #
 # `PermissionRequest` carries no `tool_use_id`, so the wait is keyed on the pair
 # that it does carry: which agent asked and which tool it asked for. An absent
@@ -326,15 +366,30 @@ EOF
 # `UserPromptSubmit` still clear it, and holding an orange indicator too long
 # beats dropping it while the dialog is up.
 #
+# The same check is what stops an event that arrives after the turn it belonged to
+# from reviving it. That is not hypothetical: a subagent's `PostToolUseFailure`
+# was measured landing 3.7 s *after* the parent's `Stop` (SPEC §2.6.2). `Stop`
+# empties the list, so the event that follows it matches nothing and writes
+# nothing. Two things stop it, in this order — the fast path above, which reads
+# `waiting` off disk and leaves before jq, and this check, which is the one
+# correctness is allowed to rest on, because the fast path goes by a literal in
+# the payload and a different JSON spacing or a long enough head would miss it.
+#
+# There is deliberately no second check on the state the record carried. It
+# could never speak first: the state written is the worst of the list (`worst`
+# above), so a record holding a wait this pair matches is by construction a
+# record already in `permission` or `question`. That is true of every version
+# that ever wrote a wait field, the single `waitTool`/`waitAgent` one included,
+# and it is pinned by a test of its own — the guard that used to sit here was
+# decided by no event sequence, only by records built by hand (SPEC §2.6.3).
+#
 # Whether any wait matches was worked out by the jq call above; an empty
 # `clears` is its way of saying that this tool call clears nothing here.
-if [ "$event" = "PostToolUse" ]; then
-	case "$prev_state" in
-	permission | question) ;;
-	*) exit 0 ;;
-	esac
+case "$event" in
+PostToolUse | PostToolUseFailure)
 	[ -z "$clears" ] && exit 0
-fi
+	;;
+esac
 
 # A Notification never clears a permission or question wait. `idle_prompt` only
 # says the user has not typed for a while — which is exactly what happens while a
@@ -344,7 +399,7 @@ fi
 # and the orange indicator went green with the dialog still open.
 # `notification_type` was confirmed empirically for exactly one value on one CLI
 # version, so it is evidence, not a precondition. Only `Stop`, `UserPromptSubmit`
-# and `PostToolUse` take `permission` off.
+# and the two post-tool events take `permission` off.
 if [ "$event" = "Notification" ] && [ "$state" = "waiting" ]; then
 	case "$prev_state" in
 	permission | question) exit 0 ;;

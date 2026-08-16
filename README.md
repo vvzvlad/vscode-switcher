@@ -103,7 +103,7 @@ Claude, число работающих чатов и сабагентов в с
 make app        # собрать macos/VSCodeSwitcher.app
 make install    # собрать, положить в /Applications и запустить
 make run        # собрать и запустить из репозитория, без установки
-make test       # swift test + тесты хука (scripts/test-hooks.sh)
+make test       # swift test + тесты хука и установщика (scripts/test-*.sh)
 make icons      # перерисовать иконки из macos/Resources/*.svg (нужен librsvg)
 make dump       # напечатать собранную модель в консоль (диагностика)
 make clean
@@ -192,6 +192,10 @@ scripts/install-hooks.sh --uninstall
 
 Скрипт идемпотентный: делает бэкап `~/.claude/settings.json`, удаляет только свои записи и
 добавляет их заново, чужие хуки не трогает. Нужен `jq`.
+
+**После обновления репозитория `make hooks` надо прогнать заново.** Набор событий меняется —
+последним добавился `PostToolUseFailure`, — а в `~/.claude/settings.json` уже установленные
+записи сами не обновляются: без переустановки новое событие туда не попадёт.
 
 ## Конфиг
 
