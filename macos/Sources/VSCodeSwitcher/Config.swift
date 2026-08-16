@@ -32,6 +32,14 @@ struct Config: Sendable, Equatable {
     var transcriptTailBytes: Int
     /// Bundle identifier of the editor whose windows are listed.
     var editorBundleID: String
+    /// Base address of the claude_gw gateway the token figures come from. The
+    /// default is the local launchd relay, which forwards to the gateway over
+    /// WireGuard; `http://10.20.30.1:8787` is the gateway itself, for when the
+    /// relay is not running. Neither takes any authentication.
+    ///
+    /// The poll interval and the seven-day window are constants in the code:
+    /// nobody asked for them to be settings.
+    var usageBaseURL: String
 
     static let `default` = Config(
         projectRoots: ["~/Data/Projects"],
@@ -42,7 +50,8 @@ struct Config: Sendable, Equatable {
         panelHeightFraction: 0.7,
         subagentActiveSeconds: 90,
         transcriptTailBytes: 512 * 1024,
-        editorBundleID: "com.microsoft.VSCode"
+        editorBundleID: "com.microsoft.VSCode",
+        usageBaseURL: "http://127.0.0.1:8788"
     )
 
     /// Standard location of the config file.
@@ -63,6 +72,17 @@ struct Config: Sendable, Equatable {
             }
         }
         return result
+    }
+
+    /// The gateway address as a `URL`.
+    ///
+    /// `load` only accepts a string with a scheme and a host, so the fallback
+    /// here is for a `Config` assembled in code. It is written as `??` rather
+    /// than as a force-unwrap because `URL` has no non-failing initialiser for a
+    /// string literal; that the default parses is held by a test, not by this
+    /// line.
+    var resolvedUsageBaseURL: URL {
+        URL(string: usageBaseURL) ?? URL(fileURLWithPath: "/")
     }
 
     /// Loads the config, falling back to defaults for anything missing or invalid.
@@ -101,6 +121,21 @@ struct Config: Sendable, Equatable {
         }
         if let value = dict["editorBundleID"] as? String, !value.isEmpty {
             config.editorBundleID = value
+        }
+        // Validated by parsing it, and by insisting on an HTTP scheme and a
+        // host: `URL(string:)` alone accepts far more than it used to — `not a
+        // url at all` parses into a relative URL on macOS 14 — and an address
+        // with nothing to connect to would turn every poll into a failure line.
+        // The scheme is checked by name rather than merely for being present:
+        // `ftp://host/x` and `file://localhost/tmp` both have one and a host,
+        // and both are exactly the permanent failure this check exists to keep
+        // out — `URLSession` answers the first with an unsupported-URL error and
+        // the second with a body that is not the gateway's. The built-in default
+        // is the one that works on this machine.
+        if let value = dict["usageBaseURL"] as? String, !value.isEmpty,
+           let url = URL(string: value), url.host() != nil,
+           let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {
+            config.usageBaseURL = value
         }
         return config
     }
