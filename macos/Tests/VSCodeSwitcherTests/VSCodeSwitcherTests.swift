@@ -355,6 +355,465 @@ final class TranscriptQuestionTests: XCTestCase {
     }
 }
 
+/// A `tool_use` tail says a turn was started, not that it is still running, and
+/// until this was added nothing ever took a transcript-sourced `working` back.
+/// The reproducer is session `3fc12f86-…` of home-network: its last assistant
+/// record is from 2026-08-05, the user interrupted the `Artifact` call it had
+/// started three days later, and reopened the chat on 2026-08-16 — eleven days
+/// after that record — without typing anything. The row spun for a turn that
+/// had been cancelled.
+final class TranscriptInterruptTests: XCTestCase {
+
+    /// The assistant record the fallback state comes from, in the shape the real
+    /// file has: `timestamp` at the record level, never inside `message`.
+    private func assistant(toolName: String = "Artifact",
+                           id: String = "toolu_01UWEyrHaGuNMkhfrzUbpAew",
+                           timestamp: String = "2026-08-05T13:27:47.970Z") -> String {
+        "{\"type\":\"assistant\",\"isSidechain\":false,\"timestamp\":\"\(timestamp)\","
+            + "\"message\":{\"model\":\"claude-opus-5\",\"stop_reason\":\"tool_use\","
+            + "\"content\":[{\"type\":\"tool_use\",\"name\":\"\(toolName)\",\"id\":\"\(id)\"}]}}"
+    }
+
+    /// A finished turn: the agent answered and is waiting to be read.
+    private func finishedTurn() -> String {
+        "{\"type\":\"assistant\",\"isSidechain\":false,\"timestamp\":\"2026-08-05T13:27:47.970Z\","
+            + "\"message\":{\"model\":\"claude-opus-5\",\"stop_reason\":\"end_turn\","
+            + "\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}"
+    }
+
+    /// One of the two shapes a typed prompt arrives in: block content with a
+    /// `text` block — the same shape as the marker, which is why the two are
+    /// told apart by the text and not by the record.
+    private func prompt(_ text: String = "и ещё вот это поправь",
+                        isSidechain: Bool = false) -> String {
+        "{\"type\":\"user\",\"isSidechain\":\(isSidechain),\"timestamp\":\"2026-08-08T14:25:31.100Z\","
+            + "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"\(text)\"}]}}"
+    }
+
+    /// The other shape, and the one that was being read as silence: `content`
+    /// is a plain string. 4110 user records in the §2.4 census look like this —
+    /// dragged-in paths, slash commands, messages from other sessions — and not
+    /// one of its 789 markers ever did.
+    private func stringPrompt(_ text: String = "/Users/vvzvlad/Data/Projects/fusion") -> String {
+        "{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"2026-08-08T14:25:31.100Z\","
+            + "\"message\":{\"role\":\"user\",\"content\":\"\(text)\"}}"
+    }
+
+    /// A prompt that is nothing but a pasted image: eight user records in the
+    /// §2.4 census have exactly this shape, and each one started a turn.
+    private func imagePrompt() -> String {
+        "{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"2026-08-08T14:25:31.100Z\","
+            + "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"image\","
+            + "\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBOR\"}}]}}"
+    }
+
+    /// The aborted call still gets an answer — an `is_error` result — which is
+    /// why "was the last `tool_use` answered" cannot be the signal on its own:
+    /// six of the seven tails that go on reading `working` have theirs answered
+    /// too, and so does a session that is genuinely thinking after a result.
+    private func result(to id: String, timestamp: String = "2026-08-08T14:25:22.670Z") -> String {
+        "{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"\(timestamp)\","
+            + "\"message\":{\"role\":\"user\",\"content\":"
+            + "[{\"type\":\"tool_result\",\"tool_use_id\":\"\(id)\",\"is_error\":true}]}}"
+    }
+
+    /// The marker in the shape it usually has: block-shaped `content` with a
+    /// `text` block — 786 of the 789 markers in the §2.4 census.
+    private func interrupt(_ text: String = "[Request interrupted by user]",
+                           isSidechain: Bool = false) -> String {
+        "{\"type\":\"user\",\"isSidechain\":\(isSidechain),\"timestamp\":\"2026-08-08T14:25:24.390Z\","
+            + "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"\(text)\"}]}}"
+    }
+
+    /// The marker in its other shape: the *content* of a `tool_result` block,
+    /// with no text block anywhere in the record. Three records in the census,
+    /// and it is written when the interrupted turn was inside a tool call.
+    private func interruptAsResult(to id: String,
+                                   timestamp: String = "2026-08-08T14:25:24.390Z") -> String {
+        "{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"\(timestamp)\","
+            + "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\","
+            + "\"tool_use_id\":\"\(id)\",\"is_error\":true,"
+            + "\"content\":\"[Request interrupted by user for tool use]\"}]}}"
+    }
+
+    /// What resuming a chat appends before it replays anything: records with no
+    /// `timestamp` field at all. Ten types of them in the §2.4 census, and the
+    /// reason the replay window exists — none of them moves `newestRecordAt`,
+    /// so between the resume and the result the newest stamp in the file is
+    /// still the pre-resume one.
+    private func resumeNoise() -> [String] {
+        ["{\"type\":\"last-prompt\",\"lastPrompt\":\"собери панель\"}",
+         "{\"type\":\"agent-setting\",\"value\":\"default\"}",
+         "{\"type\":\"mode\",\"mode\":\"default\",\"sessionId\":\"s\"}"]
+    }
+
+    /// What the machine says when a dialog is answered: a `tool_result` whose
+    /// `content` is a string too — 771 of 771 answers to
+    /// `AskUserQuestion`/`ExitPlanMode` in the §2.4 census have this shape. Only the marker prefix
+    /// tells the two apart.
+    private func dialogAnswer(to id: String) -> String {
+        "{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"2026-08-08T14:25:24.390Z\","
+            + "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\","
+            + "\"tool_use_id\":\"\(id)\","
+            + "\"content\":\"Your questions have been answered: ok\"}]}}"
+    }
+
+    private func summary(_ lines: [String]) throws -> ClaudeSessions.TranscriptSummary {
+        let url = try temporaryFile()
+        try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+        return ClaudeSessions.transcriptSummary(atPath: url.path, tailBytes: 64 * 1024)
+    }
+
+    private func fallbackState(_ lines: [String]) throws -> AgentState? {
+        try summary(lines).fallbackState
+    }
+
+    /// Both halves of §2.4 over a real-shaped tail: the scan reads the state and
+    /// the newest stamp, and `resolveState` decides whether the process that is
+    /// running now could have started that turn.
+    private func resolved(_ lines: [String],
+                          startedAt: String) throws -> (state: AgentState, source: AgentStateSource) {
+        ClaudeSessions.resolveState(hook: nil,
+                                    transcript: try summary(lines),
+                                    sessionStartedAt: try stamp(startedAt),
+                                    now: try stamp(startedAt).addingTimeInterval(60))
+    }
+
+    private func stamp(_ text: String) throws -> Date {
+        try Date(text, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true))
+    }
+
+    /// The reproducer's own shape: the call, its aborted result, and the marker
+    /// the user's Escape left behind.
+    func testAnInterruptedToolCallIsNotWork() throws {
+        let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
+        XCTAssertEqual(try fallbackState([assistant(id: id), result(to: id), interrupt()]), .idle)
+    }
+
+    /// The other marker text Claude Code writes: 248 records in the §2.4 census
+    /// against 541 of the plain one, 789 together, and the prefix
+    /// `[Request interrupted` is what covers both.
+    func testTheToolUseVariantOfTheMarkerCountsToo() throws {
+        XCTAssertEqual(try fallbackState([assistant(), interrupt("[Request interrupted by user for tool use]")]),
+                       .idle)
+    }
+
+    /// And the other *shape*: the interruption written as the content of the
+    /// `tool_result` itself, with no text block in the record at all. Three
+    /// records in the census have it — `9b8601b5` line 248, `758a45e9` line 124,
+    /// `aceb7b4f` line 579 — and until this was read the rule saw them as "the
+    /// user said nothing". Two are followed by an ordinary marker seconds later
+    /// and cost nothing; `9b8601b5` has no other marker at all, and its next
+    /// speech is a prompt 39.7 s later — 40 seconds of spinner over a turn the
+    /// user had cancelled.
+    func testTheMarkerInsideAToolResultCountsToo() throws {
+        let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
+        XCTAssertEqual(ClaudeSessions.interruptVerdict(
+            record: try XCTUnwrap(try JSONC.parse(interruptAsResult(to: id)) as? [String: Any])), true)
+        XCTAssertEqual(try fallbackState([assistant(toolName: "Agent", id: id), interruptAsResult(to: id)]),
+                       .idle)
+    }
+
+    /// The narrowness that makes the shape above safe to read. The answer to a
+    /// dialog is a string-shaped `tool_result` as well, and it must go on saying
+    /// nothing: it is the machine handing the agent what the user picked, the
+    /// turn carries straight on, and a `true` here would stop the spinner over
+    /// it. Only the marker prefix separates the two.
+    func testAnAnsweredDialogInsideAToolResultIsStillSilence() throws {
+        let id = "toolu_ask"
+        XCTAssertNil(ClaudeSessions.interruptVerdict(
+            record: try XCTUnwrap(try JSONC.parse(dialogAnswer(to: id)) as? [String: Any])))
+        XCTAssertEqual(try fallbackState([assistant(toolName: "AskUserQuestion", id: id), dialogAnswer(to: id)]),
+                       .working)
+    }
+
+    /// The window the marker rule must not misjudge: the user pressed Escape and
+    /// immediately retyped, and the agent is working on the new prompt with no
+    /// assistant record of its own yet. Caught on live data — a marker at
+    /// 14:18:58.819 and the prompt that replaced it 36 ms later.
+    ///
+    /// This is why the *newest* thing the user said decides, and not "a marker
+    /// was seen somewhere above": the marker is still there, and reading it as
+    /// the last word would stop the spinner over a running turn. With no hooks
+    /// installed nothing else would notice, and §2.4 promises this source works
+    /// without them.
+    func testAPromptAfterTheMarkerIsANewTurn() throws {
+        let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
+        XCTAssertEqual(try fallbackState([assistant(id: id), result(to: id), interrupt(), prompt()]), .working)
+        // The same tail with the prompt taken off is the reproducer again.
+        XCTAssertEqual(try fallbackState([assistant(id: id), result(to: id), interrupt()]), .idle)
+    }
+
+    /// The same window, with the prompt in its other shape. This is the one the
+    /// first version got wrong: a plain-string `content` was read as "nothing
+    /// was said", the backwards scan walked straight past it and stopped at the
+    /// marker underneath, and the row went dark over an agent that was working.
+    ///
+    /// Not a hypothetical shape: 42 distinct events in the §2.4 census have a
+    /// string-shaped record immediately after a marker, six of them the
+    /// user's own words. In `150c56e0-…` the marker landed at 16:10:35.461, the
+    /// string-shaped prompt 6 ms later, and the turn's first assistant record
+    /// at 16:10:39.606 — 4.1 s of a wrongly darkened row, against a median of
+    /// 17 s and a p90 of 68 s for prompt → first record.
+    func testAStringShapedPromptAfterTheMarkerIsANewTurnToo() throws {
+        let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
+        XCTAssertEqual(try fallbackState([assistant(id: id), result(to: id), interrupt(), stringPrompt()]),
+                       .working)
+    }
+
+    /// And with the prompt that is only a pasted image. Words are not the only
+    /// way to start a turn, and the census's eight image-only records each did.
+    func testAPastedImageAfterTheMarkerIsANewTurnToo() throws {
+        XCTAssertEqual(try fallbackState([assistant(), interrupt(), imagePrompt()]), .working)
+    }
+
+    /// The other half of that: a `tool_result` is not the user saying anything.
+    /// It is the machine answering the agent, it arrives in the middle of a
+    /// running turn, and if it counted as speech the marker right under it
+    /// would never be reached — the reproducer has exactly this shape.
+    func testAToolResultIsNotTheUserSpeaking() throws {
+        let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
+        XCTAssertNil(ClaudeSessions.interruptVerdict(
+            record: try XCTUnwrap(try JSONC.parse(result(to: id)) as? [String: Any])))
+        XCTAssertEqual(try fallbackState([assistant(id: id), interrupt(), result(to: id)]), .idle)
+    }
+
+    /// A marker below the last assistant record belongs to an earlier turn: the
+    /// user interrupted, then sent a new prompt and the agent started working
+    /// again. Only a marker *newer* than that record ends the turn it began.
+    ///
+    /// Nothing in the scan tests this explicitly — it falls out of the verdict
+    /// being read exactly once, at the assistant record, with only newer records
+    /// scanned by then. That is the invariant this pins, so that a later change
+    /// to where the state is computed cannot quietly break it — including the
+    /// `needsAssistant` early-out on the user branch, which is there for the
+    /// cost of the casts and must stay behaviour-neutral.
+    func testAMarkerOlderThanTheLastTurnChangesNothing() throws {
+        XCTAssertEqual(try fallbackState([interrupt(), assistant()]), .working)
+    }
+
+    /// The marker rule stops at `question` on purpose: a wrongly cleared
+    /// question never comes back on its own (§2.6.3), and an agent that asked
+    /// and was interrupted still has its dialog on screen. Moving the marker
+    /// check above the question check has to break this.
+    func testAMarkerDoesNotTakeAwayAnUnansweredQuestion() throws {
+        XCTAssertEqual(try fallbackState([assistant(toolName: "AskUserQuestion", id: "toolu_ask"), interrupt()]),
+                       .question)
+    }
+
+    /// And it stops at `waiting` as well: the turn ended by itself, the answer
+    /// is on screen to be read, and a marker after it belongs to whatever the
+    /// user did next. Only `working` is a claim about right now.
+    func testAMarkerDoesNotTakeAwayAFinishedTurn() throws {
+        XCTAssertEqual(try fallbackState([finishedTurn(), interrupt()]), .waiting)
+    }
+
+    /// Symmetry with the assistant branch, which skips sidechain records for the
+    /// same reason: another branch of the conversation says nothing about the
+    /// chat the row shows. Not a scenario anybody has met — subagents write into
+    /// their own session file (§2.6.3), and there is no record with
+    /// `isSidechain: true` anywhere in the 425 parent transcripts of the §2.4
+    /// control run. What this pins is the shape, so that the two branches
+    /// cannot drift apart if such a record ever does turn up.
+    func testASubagentsInterruptIsIgnored() throws {
+        XCTAssertEqual(try fallbackState([assistant(), interrupt(isSidechain: true)]), .working)
+    }
+
+    /// The case that must not be broken by any of this: a `tool_use` with no
+    /// marker after it is a long `Bash`, and a working agent must never silently
+    /// vanish from the list. Seven stale tails in the §2.4 census keep reading
+    /// `working` on purpose (96–741 hours idle; six have no marker after their
+    /// last assistant record, the seventh has one a newer prompt supersedes),
+    /// because nothing tells them apart from a command running for an hour.
+    func testAPlainToolCallStillReadsWorking() throws {
+        XCTAssertEqual(try fallbackState([assistant(toolName: "Bash"), result(to: "toolu_01UWEyrHaGuNMkhfrzUbpAew")]),
+                       .working)
+    }
+
+    /// The stamp Rule 2 compares against the process start, read off the record
+    /// level and keeping its fractional seconds. It is the newest record of
+    /// *any* type, not the newest assistant record: here the answer to the call
+    /// is the newest thing in the tail, and it is the answer's stamp that must
+    /// come out.
+    func testTheNewestRecordStampIsParsedWhateverTheRecordIs() throws {
+        let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
+        let parsed = try XCTUnwrap(try summary([assistant(id: id), result(to: id)]).newestRecordAt)
+        XCTAssertEqual(parsed.timeIntervalSince1970,
+                       try stamp("2026-08-08T14:25:22.670Z").timeIntervalSince1970,
+                       accuracy: 0.001)
+
+        // Resuming a chat writes records that carry no `timestamp` at all, and
+        // the scan has to walk past them rather than give up on the first one.
+        let resumeNoise = "{\"type\":\"mode\",\"mode\":\"default\",\"sessionId\":\"s\"}"
+        let afterNoise = try XCTUnwrap(try summary([assistant(id: id), result(to: id),
+                                                    resumeNoise]).newestRecordAt)
+        XCTAssertEqual(afterNoise.timeIntervalSince1970, parsed.timeIntervalSince1970, accuracy: 0.001)
+    }
+
+    /// A stamp that does not parse must stop the search, not hand it on to the
+    /// record below. Missing and unreadable are different questions: no
+    /// `timestamp` field means "keep looking" — that is the ordinary
+    /// untimestamped metadata — while a field that will not parse still belongs
+    /// to the newest record, and taking the next, older stamp instead would
+    /// demote a session that has just written into its own file.
+    ///
+    /// Here the newest record is the answer to the call, stamped 48 s after the
+    /// process started but without fractional seconds; the assistant record
+    /// under it is eleven days old. Read the older stamp and this live session
+    /// goes dark. §2.4 leans on this: it is what lets the parse be attempted
+    /// once, with no fraction-less second try.
+    func testAStampThatDoesNotParseStopsTheSearch() throws {
+        let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
+        let tail = [assistant(toolName: "Bash", id: id, timestamp: "2026-08-05T13:27:47.970Z"),
+                    result(to: id, timestamp: "2026-08-16T02:31:02Z")]
+        XCTAssertNil(try summary(tail).newestRecordAt)
+
+        let state = try resolved(tail, startedAt: "2026-08-16T02:30:14.000Z")
+        XCTAssertEqual(state.state, .working)
+        XCTAssertEqual(state.source, .transcript)
+    }
+
+    /// The reproducer, end to end: a `tool_use` tail whose every record predates
+    /// the process reading it. `3fc12f86-…` was resumed at 2026-08-16T02:30:14Z
+    /// with nothing newer than the marker of 2026-08-08T14:25:24.390Z in it.
+    ///
+    /// The second half is the one that pins Rule 2 on its own. The full tail is
+    /// already `idle` from Rule 1, so neutering the stamp comparison would not
+    /// show there; strip the marker and only the stamps are left to notice that
+    /// the turn belongs to a previous life of the file.
+    func testATailEntirelyOlderThanTheProcessIsNotRunningNow() throws {
+        let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
+        let started = "2026-08-16T02:30:14.000Z"
+        let full = try resolved([assistant(id: id), result(to: id), interrupt()], startedAt: started)
+        XCTAssertEqual(full.state, .idle)
+        XCTAssertEqual(full.source, .transcript)
+
+        let noMarker = try resolved([assistant(toolName: "Bash", id: id), result(to: id)],
+                                    startedAt: started)
+        XCTAssertEqual(noMarker.state, .idle)
+        XCTAssertEqual(noMarker.source, .transcript)
+    }
+
+    /// An answered question, which is the shape that made the last assistant
+    /// record the wrong thing to compare against. The answer to a dialog arrives
+    /// as a bare `tool_result` — 771 of 771 `AskUserQuestion`/`ExitPlanMode`
+    /// answers in the §2.4 census, and an approved permission dialog too — so a
+    /// question asked before the process started and answered after it leaves
+    /// the last assistant record in the past while the agent is thinking about
+    /// what it was just told. Live instance: `79583d9f-…` of home-network, asked
+    /// 2026-08-13T20:50:28.699Z, answered 2026-08-15T01:44:22.150Z, 28.9 hours
+    /// later, with the next assistant record 45 s after that.
+    func testAQuestionAnsweredAfterTheProcessStartedIsWork() throws {
+        let asked = assistant(toolName: "AskUserQuestion", id: "toolu_ask",
+                              timestamp: "2026-08-13T20:50:28.699Z")
+        let answer = result(to: "toolu_ask", timestamp: "2026-08-15T01:44:22.150Z")
+        // The scan reads `working`, not `question`: the answer is in the tail.
+        XCTAssertEqual(try fallbackState([asked, answer]), .working)
+
+        let state = try resolved([asked, answer], startedAt: "2026-08-15T01:30:00.000Z")
+        XCTAssertEqual(state.state, .working)
+        XCTAssertEqual(state.source, .transcript)
+    }
+
+    /// The same trap without a dialog: a tool call left hanging when the window
+    /// was closed is replayed on resume, and its result lands under the new
+    /// process while the assistant record that asked for it stays weeks old.
+    /// Live instance: `3c820b4c-…`, where the resume noise is followed by the
+    /// answer to a `Bash` call from 9.7 hours earlier and no prompt at all.
+    ///
+    /// This is the state *after* the result lands — 48 s past the process start
+    /// here. The window before it is `testACallStillInFlightStandsRuleTwoDown`.
+    func testAToolCallReplayedAfterTheProcessStartedIsWork() throws {
+        let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
+        let state = try resolved([assistant(toolName: "Bash", id: id, timestamp: "2026-08-05T13:27:47.970Z"),
+                                  result(to: id, timestamp: "2026-08-16T02:31:02.100Z")],
+                                 startedAt: "2026-08-16T02:30:14.000Z")
+        XCTAssertEqual(state.state, .working)
+        XCTAssertEqual(state.source, .transcript)
+    }
+
+    /// The same replay while it is still running, which is the shape Rule 2 is
+    /// not allowed to judge. The resume records carry no stamp, so the newest
+    /// one in the file is the eleven-day-old `tool_use` itself, and the stamps
+    /// alone would call this `idle` over a command that is executing right now.
+    /// The window is the call's own run time and has no ceiling: 63 442
+    /// call → result pairs on this machine give a median of 0.1 s, a p90 of
+    /// 8.3 s and a p99 of 606 s.
+    ///
+    /// Nothing new is needed to see it. §2.4 already refuses to judge an
+    /// unanswered `tool_use` with no marker after it — it cannot be told apart
+    /// from a `Bash` that has been running for an hour — and a replay has
+    /// exactly that shape until its result lands. Rule 2 was reaching into that
+    /// exception; this is it put back.
+    func testACallStillInFlightStandsRuleTwoDown() throws {
+        let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
+        let replaying = [assistant(toolName: "Bash", id: id, timestamp: "2026-08-05T13:27:47.970Z")]
+            + resumeNoise()
+        let scanned = try summary(replaying)
+        XCTAssertTrue(scanned.lastTurnAwaitingToolResult)
+        // The stamps really are the pre-resume ones — otherwise this would pass
+        // for the wrong reason.
+        XCTAssertEqual(try XCTUnwrap(scanned.newestRecordAt).timeIntervalSince1970,
+                       try stamp("2026-08-05T13:27:47.970Z").timeIntervalSince1970,
+                       accuracy: 0.001)
+
+        let state = try resolved(replaying, startedAt: "2026-08-16T02:30:14.000Z")
+        XCTAssertEqual(state.state, .working)
+        XCTAssertEqual(state.source, .transcript)
+
+        // And the boundary: the same tail with the call answered is the shape
+        // Rule 2 exists for, and it is demoted exactly as before. Six of the
+        // seven stale `working` tails on disk have their call answered like
+        // this, so the refinement costs Rule 2 one of the seven.
+        let answered = try resolved([assistant(toolName: "Bash", id: id, timestamp: "2026-08-05T13:27:47.970Z"),
+                                     result(to: id)],
+                                    startedAt: "2026-08-16T02:30:14.000Z")
+        XCTAssertEqual(answered.state, .idle)
+        XCTAssertEqual(answered.source, .transcript)
+    }
+
+    /// The control that the refinement left `question` where it was. A dialog
+    /// waiting for an answer is a turn awaiting a tool result too — the same
+    /// `tool_use` block, unanswered — but the two questions stay apart:
+    /// `unansweredQuestion` looks only at the two user-facing tools and still
+    /// decides the state, and Rule 2 never touched `question` in the first
+    /// place. A `Bash` is the mirror image: in flight, but no question.
+    func testAnUnansweredDialogIsStillAQuestion() throws {
+        let asked = assistant(toolName: "AskUserQuestion", id: "toolu_ask")
+        let scanned = try summary([asked])
+        XCTAssertEqual(scanned.fallbackState, .question)
+        XCTAssertTrue(scanned.lastTurnAwaitingToolResult)
+
+        let state = try resolved([asked], startedAt: "2026-08-16T02:30:14.000Z")
+        XCTAssertEqual(state.state, .question)
+        XCTAssertEqual(state.source, .transcript)
+
+        // The two predicates asked of the same message, so that a later merge
+        // of the two has to break something.
+        let message = try XCTUnwrap(
+            try XCTUnwrap(try JSONC.parse(assistant(toolName: "Bash")) as? [String: Any])["message"]
+                as? [String: Any])
+        XCTAssertTrue(ClaudeSessions.awaitingToolResult(message: message, answered: []))
+        XCTAssertFalse(ClaudeSessions.unansweredQuestion(message: message, answered: []))
+
+        // The id-less block, which the two also answer the same way and for the
+        // same reason: nothing can match it, so the safe direction is the one
+        // that keeps the row alive. `unansweredQuestion` has that branch pinned
+        // by `testAQuestionWithoutAnIdStaysAQuestion`; this is its half. No such
+        // block exists on this machine (0 of 63 855 `tool_use` blocks), so the
+        // claim is what is being held here, not a case from live data.
+        let idless: [String: Any] = ["content": [["type": "tool_use", "name": "Bash"]]]
+        XCTAssertTrue(ClaudeSessions.awaitingToolResult(message: idless, answered: ["toolu_1"]))
+    }
+
+    private func temporaryFile() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vscode-switcher-interrupt-\(UUID().uuidString).jsonl")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+}
+
 /// A row shows one indicator for the whole window — I am blocking it, it has
 /// something for me to read, something is moving, or it is all asleep — and one
 /// number beside it. How many chats sit in which state is a question about the
@@ -1104,7 +1563,8 @@ final class SessionStateTests: XCTestCase {
         transcript.lastActivity = now.addingTimeInterval(-30)
 
         let hook = ClaudeSessions.HookStatus(state: .working, event: "UserPromptSubmit", timestamp: now)
-        let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now)
+        let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript,
+                                                   sessionStartedAt: nil, now: now)
         XCTAssertEqual(resolved.state, .working)
         XCTAssertEqual(resolved.source, .hook)
     }
@@ -1120,7 +1580,8 @@ final class SessionStateTests: XCTestCase {
         let hook = ClaudeSessions.HookStatus(state: .working,
                                              event: "UserPromptSubmit",
                                              timestamp: now.addingTimeInterval(-40 * 60))
-        let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now)
+        let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript,
+                                                   sessionStartedAt: nil, now: now)
         XCTAssertEqual(resolved.state, .waiting)
         XCTAssertEqual(resolved.source, .transcript)
     }
@@ -1136,7 +1597,8 @@ final class SessionStateTests: XCTestCase {
         let hook = ClaudeSessions.HookStatus(state: .working,
                                              event: "UserPromptSubmit",
                                              timestamp: now.addingTimeInterval(-39.6 * 60))
-        XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now).state, .working)
+        XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript,
+                                                   sessionStartedAt: nil, now: now).state, .working)
     }
 
     func testStaleWorkingHookWithNoOtherEvidenceDegradesToIdle() {
@@ -1147,7 +1609,8 @@ final class SessionStateTests: XCTestCase {
         let hook = ClaudeSessions.HookStatus(state: .working,
                                              event: "UserPromptSubmit",
                                              timestamp: now.addingTimeInterval(-40 * 60))
-        let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now)
+        let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript,
+                                                   sessionStartedAt: nil, now: now)
         XCTAssertEqual(resolved.state, .idle)
         XCTAssertEqual(resolved.source, .unknown)
     }
@@ -1170,7 +1633,8 @@ final class SessionStateTests: XCTestCase {
         let hook = ClaudeSessions.HookStatus(state: .working,
                                              event: "UserPromptSubmit",
                                              timestamp: now.addingTimeInterval(-301))
-        XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now).state, .working)
+        XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript,
+                                                   sessionStartedAt: nil, now: now).state, .working)
     }
 
     func testStaleWorkingHookWithAStaleTranscriptStillDegrades() {
@@ -1181,7 +1645,8 @@ final class SessionStateTests: XCTestCase {
         let hook = ClaudeSessions.HookStatus(state: .working,
                                              event: "UserPromptSubmit",
                                              timestamp: now.addingTimeInterval(-301))
-        XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now).state, .idle)
+        XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript,
+                                                   sessionStartedAt: nil, now: now).state, .idle)
     }
 
     func testWaitingAndPermissionAreNeverAgedOut() {
@@ -1195,7 +1660,8 @@ final class SessionStateTests: XCTestCase {
             let hook = ClaudeSessions.HookStatus(state: state,
                                                  event: "Notification",
                                                  timestamp: now.addingTimeInterval(-3 * 3600))
-            XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now).state, state)
+            XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript,
+                                                       sessionStartedAt: nil, now: now).state, state)
         }
     }
 
@@ -1213,7 +1679,8 @@ final class SessionStateTests: XCTestCase {
             let hook = ClaudeSessions.HookStatus(state: state,
                                                  event: "Notification",
                                                  timestamp: now.addingTimeInterval(-3 * 3600))
-            let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now)
+            let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript,
+                                                       sessionStartedAt: nil, now: now)
             XCTAssertEqual(resolved.state, state)
             XCTAssertEqual(resolved.source, .hook)
         }
@@ -1231,7 +1698,8 @@ final class SessionStateTests: XCTestCase {
         let hook = ClaudeSessions.HookStatus(state: .question,
                                              event: "PermissionRequest",
                                              timestamp: now.addingTimeInterval(-3 * 3600))
-        let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now)
+        let resolved = ClaudeSessions.resolveState(hook: hook, transcript: transcript,
+                                                   sessionStartedAt: nil, now: now)
         XCTAssertEqual(resolved.state, .question)
         XCTAssertEqual(resolved.source, .hook)
     }
@@ -1248,7 +1716,8 @@ final class SessionStateTests: XCTestCase {
                                ("Stop", .waiting),
                                ("UserPromptSubmit", .working)] {
             let hook = ClaudeSessions.HookStatus(state: state, event: event, timestamp: now)
-            XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript, now: now).state,
+            XCTAssertEqual(ClaudeSessions.resolveState(hook: hook, transcript: transcript,
+                                                       sessionStartedAt: nil, now: now).state,
                            state, "after \(event)")
         }
     }
@@ -1258,7 +1727,8 @@ final class SessionStateTests: XCTestCase {
     func testWithoutAHookAQuestionStillShows() {
         var transcript = ClaudeSessions.TranscriptSummary()
         transcript.fallbackState = .question
-        let resolved = ClaudeSessions.resolveState(hook: nil, transcript: transcript)
+        let resolved = ClaudeSessions.resolveState(hook: nil, transcript: transcript,
+                                                   sessionStartedAt: nil)
         XCTAssertEqual(resolved.state, .question)
         XCTAssertEqual(resolved.source, .transcript)
     }
@@ -1266,15 +1736,235 @@ final class SessionStateTests: XCTestCase {
     func testWithoutAHookTheTranscriptIsUsed() {
         var transcript = ClaudeSessions.TranscriptSummary()
         transcript.fallbackState = .waiting
-        let resolved = ClaudeSessions.resolveState(hook: nil, transcript: transcript)
+        let resolved = ClaudeSessions.resolveState(hook: nil, transcript: transcript,
+                                                   sessionStartedAt: nil)
         XCTAssertEqual(resolved.state, .waiting)
         XCTAssertEqual(resolved.source, .transcript)
     }
 
     func testWithNoSourceAtAllTheSessionIsIdle() {
-        let resolved = ClaudeSessions.resolveState(hook: nil, transcript: ClaudeSessions.TranscriptSummary())
+        let resolved = ClaudeSessions.resolveState(hook: nil,
+                                                   transcript: ClaudeSessions.TranscriptSummary(),
+                                                   sessionStartedAt: nil)
         XCTAssertEqual(resolved.state, .idle)
         XCTAssertEqual(resolved.source, .unknown)
+    }
+
+    /// A resumed chat replays its last turn. Session `3fc12f86-…` of
+    /// home-network was interrupted on 2026-08-08 and reopened on 2026-08-16
+    /// without a single prompt typed into it: no hook file, a `tool_use` tail,
+    /// and a spinner over a process that had never run a turn.
+    func testATurnFromBeforeTheProcessStartedIsNotRunningNow() {
+        let started = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .working
+        transcript.newestRecordAt = started.addingTimeInterval(-8 * 86_400)
+
+        let resolved = ClaudeSessions.resolveState(hook: nil,
+                                                   transcript: transcript,
+                                                   sessionStartedAt: started,
+                                                   now: started.addingTimeInterval(60))
+        XCTAssertEqual(resolved.state, .idle)
+        XCTAssertEqual(resolved.source, .transcript)
+    }
+
+    /// The ordinary working session: something was written after the process
+    /// that is reading it started, so the turn is this process's own.
+    func testATurnStartedByTheLivingProcessStaysWorking() {
+        let started = Date().addingTimeInterval(-3600)
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .working
+        transcript.newestRecordAt = started.addingTimeInterval(30)
+
+        XCTAssertEqual(ClaudeSessions.resolveState(hook: nil,
+                                                   transcript: transcript,
+                                                   sessionStartedAt: started).state,
+                       .working)
+    }
+
+    /// Five of the thirteen live sessions in the §2.4 control run have written
+    /// nothing since their own process started, and all five read `waiting`.
+    /// "Answered
+    /// before you resumed it" is a true statement about a resumed chat, and the
+    /// green tick over it is the right thing to show.
+    func testAResumedChatThatHadAnsweredKeepsWaiting() {
+        let started = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .waiting
+        transcript.newestRecordAt = started.addingTimeInterval(-8 * 86_400)
+
+        let resolved = ClaudeSessions.resolveState(hook: nil,
+                                                   transcript: transcript,
+                                                   sessionStartedAt: started,
+                                                   now: started.addingTimeInterval(60))
+        XCTAssertEqual(resolved.state, .waiting)
+        XCTAssertEqual(resolved.source, .transcript)
+    }
+
+    /// Neither half of the comparison may be guessed at: with no stamp, or with
+    /// no `startedAt` in the session file, the state stays exactly as the
+    /// transcript read it. This is the rule's own half of that — the two inputs
+    /// handed to it directly. That an unreadable stamp *arrives here* as `nil`
+    /// instead of as the older record's is the scanner's half, and it is pinned
+    /// where the scanner is driven: `testAStampThatDoesNotParseStopsTheSearch`.
+    func testAMissingStampNeverDemotesAnything() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .working
+
+        XCTAssertEqual(ClaudeSessions.resolveState(hook: nil,
+                                                   transcript: transcript,
+                                                   sessionStartedAt: now,
+                                                   now: now).state,
+                       .working)
+
+        transcript.newestRecordAt = now.addingTimeInterval(-8 * 86_400)
+        XCTAssertEqual(ClaudeSessions.resolveState(hook: nil,
+                                                   transcript: transcript,
+                                                   sessionStartedAt: nil,
+                                                   now: now).state,
+                       .working)
+    }
+
+    /// The rule aims at the transcript fallback only. A hook that says `working`
+    /// is a live event from this process, and an old tail next to it proves
+    /// nothing — the turn it belongs to is not the one the hook reported.
+    func testAHookWorkingSurvivesAStaleTranscriptStamp() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .working
+        transcript.newestRecordAt = now.addingTimeInterval(-8 * 86_400)
+        transcript.lastActivity = now.addingTimeInterval(-1)
+
+        let hook = ClaudeSessions.HookStatus(state: .working, event: "PostToolUse", timestamp: now)
+        let resolved = ClaudeSessions.resolveState(hook: hook,
+                                                   transcript: transcript,
+                                                   sessionStartedAt: now.addingTimeInterval(-60),
+                                                   now: now)
+        XCTAssertEqual(resolved.state, .working)
+        XCTAssertEqual(resolved.source, .hook)
+    }
+
+    /// A fresh file mtime is not the signal, and this is the pair of cases that
+    /// says why. Resuming a chat touches the transcript without appending a
+    /// stamped record — the reproducer's mtime is two seconds *after* its
+    /// process started — so writing alone proves somebody is alive, not that
+    /// this process ever started a turn. Only a record stamp newer than the
+    /// process stands the rule down, and once one exists the mtime is beside
+    /// the point: an hour of silence after it changes nothing.
+    func testTheFileStampIsNotTheRecordStamp() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .working
+        transcript.newestRecordAt = now.addingTimeInterval(-8 * 86_400)
+        transcript.lastActivity = now.addingTimeInterval(-1)
+
+        XCTAssertEqual(ClaudeSessions.resolveState(hook: nil,
+                                                   transcript: transcript,
+                                                   sessionStartedAt: now.addingTimeInterval(-60),
+                                                   now: now).state,
+                       .idle)
+
+        transcript.newestRecordAt = now.addingTimeInterval(-30)
+        transcript.lastActivity = now.addingTimeInterval(-3600)
+        XCTAssertEqual(ClaudeSessions.resolveState(hook: nil,
+                                                   transcript: transcript,
+                                                   sessionStartedAt: now.addingTimeInterval(-60),
+                                                   now: now).state,
+                       .working)
+    }
+
+    /// The hook is provably behind — the session kept writing 395 s after the
+    /// last state it reported — so the transcript decides. What it must decide
+    /// here is `working`: this process has written into the transcript, so the
+    /// turn on screen is its own.
+    func testTheOverruledHookHandsOverAStateTheStampDoesNotDemote() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .working
+        transcript.newestRecordAt = now.addingTimeInterval(-5)
+        transcript.lastActivity = now.addingTimeInterval(-5)
+
+        let hook = ClaudeSessions.HookStatus(state: .idle, event: "Stop", timestamp: now.addingTimeInterval(-400))
+        let resolved = ClaudeSessions.resolveState(hook: hook,
+                                                   transcript: transcript,
+                                                   sessionStartedAt: now.addingTimeInterval(-60),
+                                                   now: now)
+        XCTAssertEqual(resolved.state, .working)
+        XCTAssertEqual(resolved.source, .transcript)
+    }
+
+    /// A `working` hook older than five minutes with a transcript touched five
+    /// seconds ago: §2.4 promises the fresh mtime keeps the row alive, and the
+    /// process-start rule must not undo that promise on the way out.
+    ///
+    /// It exits through the lag-overrule branch above, not through the ageing
+    /// branch it is named for, and no input can make it do otherwise: liveness
+    /// wants the transcript newer than `now - 120`, ageing wants the hook older
+    /// than `now - 300`, and the two together always leave the transcript more
+    /// than 90 s newer than the hook. So the ageing branch's own
+    /// `fromTranscript ??` is unreachable with the current constants — removing
+    /// it breaks no test, which was checked. The promise is what this pins.
+    func testAStaleWorkingHookNextToAFreshTranscriptKeepsTheRowAlive() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        transcript.fallbackState = .working
+        transcript.newestRecordAt = now.addingTimeInterval(-5)
+        transcript.lastActivity = now.addingTimeInterval(-5)
+
+        let hook = ClaudeSessions.HookStatus(state: .working,
+                                             event: "UserPromptSubmit",
+                                             timestamp: now.addingTimeInterval(-400))
+        let resolved = ClaudeSessions.resolveState(hook: hook,
+                                                   transcript: transcript,
+                                                   sessionStartedAt: now.addingTimeInterval(-60),
+                                                   now: now)
+        XCTAssertEqual(resolved.state, .working)
+        XCTAssertEqual(resolved.source, .transcript)
+    }
+
+    /// What an Escape looks like with hooks installed, and how long its `idle`
+    /// waits for the hook to get out of the way. The marker moves the
+    /// transcript's mtime to the moment of the Escape, so the lag-overrule
+    /// branch compares the hook's age *at that moment* — and that decides
+    /// between the two halves of §2.4's answer.
+    ///
+    /// Above the tolerance, the transcript wins at once. This is not an
+    /// exotic case: 44 of the 786 markers in the §2.4 census (5.6%) were
+    /// written more than 90 s after the last record that would have fired a
+    /// hook, which is Escape during a long generation or a long tool call.
+    /// Below it, the hook's `working` outlives the transcript's `idle` until
+    /// the 300 s ageing — nothing else moves, because no hook event follows an
+    /// Escape.
+    func testAfterAnEscapeAStaleHookHandsOverAtOnce() {
+        let now = Date()
+        var transcript = ClaudeSessions.TranscriptSummary()
+        // Rule 1 has read the marker; the marker itself is what touched the file.
+        transcript.fallbackState = .idle
+        transcript.newestRecordAt = now
+        transcript.lastActivity = now
+        let started = now.addingTimeInterval(-3600)
+
+        let stale = ClaudeSessions.HookStatus(state: .working, event: "PostToolUse",
+                                              timestamp: now.addingTimeInterval(-91))
+        let overruled = ClaudeSessions.resolveState(hook: stale, transcript: transcript,
+                                                    sessionStartedAt: started, now: now)
+        XCTAssertEqual(overruled.state, .idle)
+        XCTAssertEqual(overruled.source, .transcript)
+
+        let hookTime = now.addingTimeInterval(-89)
+        let recent = ClaudeSessions.HookStatus(state: .working, event: "PostToolUse", timestamp: hookTime)
+        let held = ClaudeSessions.resolveState(hook: recent, transcript: transcript,
+                                               sessionStartedAt: started, now: now)
+        XCTAssertEqual(held.state, .working)
+        XCTAssertEqual(held.source, .hook)
+
+        // The mtime is frozen at the Escape, so the gap the branch above looks
+        // at never grows: only the 300 s ageing ends this one.
+        let aged = ClaudeSessions.resolveState(hook: recent, transcript: transcript,
+                                               sessionStartedAt: started,
+                                               now: hookTime.addingTimeInterval(301))
+        XCTAssertEqual(aged.state, .idle)
     }
 }
 
