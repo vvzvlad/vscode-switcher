@@ -116,7 +116,7 @@ enum ConsoleDump {
         }
 
         // In the order the panel shows them, which is what the ranking is for.
-        print("Projects section: \(snapshot.projects.count) (showing 15, most active first)")
+        print("Projects section: \(snapshot.projects.count) (showing 15, most recently worked in first)")
         for row in snapshot.projects.prefix(15) {
             let workspace = row.project?.workspaceFile == nil ? "git" : "workspace"
             // The indicator is printed here too, because this is where the rule
@@ -165,14 +165,33 @@ enum ConsoleDump {
         return text + String(repeating: " ", count: width - text.count)
     }
 
-    /// Sessions inside the activity window and the age of the newest one — the
-    /// two numbers `DataSource.ranked` sorts this section by.
+    /// Sessions inside the activity window and when the newest one was written.
+    /// The second is what `DataSource.ranked` sorts this section by; the count is
+    /// printed alongside because it says how much work the project has seen,
+    /// which is worth knowing even though it no longer decides the order.
+    ///
+    /// The stamp is printed to the second, and in days only for what is older
+    /// than a day. Whole days alone — which is what this printed while the count
+    /// was the key — cannot explain the order it is printed in: the key is a
+    /// sub-second mtime, and the top of a live list is several rows of "last 0d
+    /// ago" in an order nothing in the dump accounts for. The dump exists to
+    /// verify the data layer, so it has to show the number the data layer sorted
+    /// by; below a day that means hours, minutes and seconds, and above it the
+    /// days are what the eye wants.
     private static func activity(_ row: SwitcherRow, config: Config) -> String {
         guard let path = row.project?.path else { return "outside the scan roots" }
         let activity = ClaudeSessions.activity(forPath: path, windowDays: config.activityWindowDays)
         guard let last = activity.lastSession else { return "no sessions" }
-        let days = Int(Date().timeIntervalSince(last) / 86_400)
-        return "\(activity.recentSessions) in \(config.activityWindowDays)d, last \(days)d ago"
+        return "\(activity.recentSessions) in \(config.activityWindowDays)d, last \(age(of: last)) ago"
+    }
+
+    /// How long ago something was, in the coarsest unit that still separates it
+    /// from its neighbours: `4h 12m 03s` inside a day, `8d 3h` beyond one.
+    static func age(of date: Date, now: Date = Date()) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        let (days, hours) = (seconds / 86_400, seconds % 86_400 / 3600)
+        guard days == 0 else { return "\(days)d \(hours)h" }
+        return String(format: "%dh %02dm %02ds", hours, seconds % 3600 / 60, seconds % 60)
     }
 
     /// The folded indicator the row draws on its right. A row with no chat and

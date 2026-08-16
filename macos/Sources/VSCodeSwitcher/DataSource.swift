@@ -71,10 +71,22 @@ final class DataSource: @unchecked Sendable {
         // finished is younger than its own data.
         let readAt = Date()
         let projects = index.projects(config: config)
+        // Only the stamp is read on this path: it is the sort key and `ranked`
+        // looks at nothing else. The other half of `ProjectActivity` — how many
+        // sessions fall inside `activityWindowDays` — belongs to `--dump`, which
+        // computes it itself through `ClaudeSessions.activity`; counting it here
+        // meant a pass over the transcript stamps of all 99 projects on every
+        // snapshot for a number nobody on this path would read.
+        //
+        // Not a saving worth measuring, and measured anyway so that nobody puts
+        // it back believing it was: the count over the live 408 transcripts is
+        // 0.0095 ms against the 1.25 ms `stat(2)` spends over the 362 reachable
+        // from the index — different passes over different populations, so the
+        // pair is an order of magnitude and not a ratio (SPEC §2.2.1, §6). What
+        // is wrong with it is that it is work with no reader, and
+        // `config.activityWindowDays` reaching in here to parametrise it.
         let activity = Dictionary(projects.map {
-            ($0.path, ClaudeSessions.activity(forPath: $0.path,
-                                              windowDays: config.activityWindowDays,
-                                              now: readAt))
+            ($0.path, ProjectActivity(lastSession: ClaudeSessions.sessionTimes(forPath: $0.path).max()))
         }, uniquingKeysWith: { first, _ in first })
         return Self.assemble(projects: projects,
                              windows: VSCodeWindows.listWindows(bundleID: config.editorBundleID),
@@ -303,8 +315,8 @@ final class DataSource: @unchecked Sendable {
     /// An orphan row exists only because an agent is running in that directory:
     /// take the sessions away and the row is gone, which is not true of a
     /// project row. So the rows that are made of live agents come first, and the
-    /// two orderings — agent state here, sessions-per-month there — never have
-    /// to be compared against each other.
+    /// two orderings — agent state here, time of the last session there — never
+    /// have to be compared against each other.
     ///
     /// They used to be appended at the very end. The thirty-row cap hid
     /// everything below it and so dragged them up to roughly position 31 by
@@ -330,33 +342,59 @@ final class DataSource: @unchecked Sendable {
         }
     }
 
-    /// Orders the projects that have no window by how much Claude Code work has
-    /// happened in them lately.
+    /// Orders the projects that have no window by when Claude Code work last
+    /// happened in them, newest first.
     ///
     /// Directory mtime, which is what this used to be, answers almost nothing:
     /// it does not move when a file inside the project is edited, so the order
     /// looked arbitrary — a project worked in all week could sit below one last
-    /// touched in spring. The number of sessions started in the last few weeks
-    /// does answer it, and a hard window rather than a decayed sum is what keeps
-    /// a project with a big enough past from floating at the top forever.
+    /// touched in spring. What that rules out is the *directory's* mtime as a
+    /// source, not time as the question. The key here is the mtime of the
+    /// newest session transcript, which is exactly the moment someone last
+    /// worked in the project.
     ///
-    /// Three groups, in this order: worked in during the window, ranked by how
-    /// many sessions; worked in before it, ranked by the newest of them; never
-    /// worked in at all, left in the directory-mtime order they arrived in.
-    /// Rows keep that arrival order whenever the activity cannot separate them,
-    /// so the sort is stable in effect even though `sorted` is not.
+    /// The number of sessions inside `activityWindowDays`, which this sorted by
+    /// until now, answers a different question — how much was done here, not
+    /// where the work is — and the two come apart in practice: a project closed
+    /// a week ago with 36 sessions behind it held the top of the list, above the
+    /// one being typed in at that moment. `recentSessions` survives as a number
+    /// `--dump` prints and counts for itself; on this path it is not even
+    /// computed. It is not kept as a second key either, because it could never
+    /// fire: it would take
+    /// two transcripts written in the same instant, and mtime is sub-second,
+    /// while the tie that does happen — `nil` against `nil` — has a count of
+    /// zero on both sides by construction.
+    ///
+    /// Projects that never hosted a session have no time at all and go to the
+    /// end, keeping the directory-mtime order the index handed over. That order
+    /// is spelled out through the arrival index rather than left to the sort:
+    /// `sorted` is not stable, so rows the key cannot separate would otherwise
+    /// be free to swap places between two snapshots a second apart.
     static func ranked(_ rows: [SwitcherRow], activity: [String: ProjectActivity]) -> [SwitcherRow] {
-        rows.enumerated().sorted { left, right in
-            let leftActivity = left.element.project.flatMap { activity[$0.path] } ?? ProjectActivity()
-            let rightActivity = right.element.project.flatMap { activity[$0.path] } ?? ProjectActivity()
-            if leftActivity.recentSessions != rightActivity.recentSessions {
-                return leftActivity.recentSessions > rightActivity.recentSessions
-            }
-            if leftActivity.lastSession != rightActivity.lastSession {
-                return (leftActivity.lastSession ?? .distantPast) > (rightActivity.lastSession ?? .distantPast)
-            }
-            return left.offset < right.offset
-        }.map(\.element)
+        rows.enumerated().sorted { ranksAbove($0, $1, activity: activity) }.map(\.element)
+    }
+
+    /// The comparison `ranked` sorts by, spelled out as a function so that the
+    /// tie-break can be checked directly.
+    ///
+    /// Going through `sorted` cannot check it. `sorted` is only *documented* as
+    /// unstable; today's implementation keeps equal elements in place anyway, so
+    /// deleting the arrival-index line leaves every test of this ranking green
+    /// and hands the order over to whatever the next standard library does with
+    /// it. Asked here, the comparison has to answer both ways round: rows the
+    /// stamps cannot separate are ordered by arrival, and the mirrored call has
+    /// to say the opposite.
+    static func ranksAbove(_ left: (offset: Int, element: SwitcherRow),
+                           _ right: (offset: Int, element: SwitcherRow),
+                           activity: [String: ProjectActivity]) -> Bool {
+        let leftLast = left.element.project.flatMap { activity[$0.path] }?.lastSession
+        let rightLast = right.element.project.flatMap { activity[$0.path] }?.lastSession
+        switch (leftLast, rightLast) {
+        case let (leftDate?, rightDate?) where leftDate != rightDate: return leftDate > rightDate
+        case (.some, nil): return true
+        case (nil, .some): return false
+        default: return left.offset < right.offset
+        }
     }
 
     // MARK: - Matching

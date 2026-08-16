@@ -495,6 +495,157 @@ final class WindowOrderTests: XCTestCase {
     }
 }
 
+/// The frozen order of the "projects" section — the same freeze as the windows
+/// above, for the same reason. That section is ordered by the time of the last
+/// session (SPEC §2.2.1), which is the mtime of a transcript a working agent
+/// moves several times a minute, so its rows travelled under the pointer once a
+/// second: two projects with no editor window and an agent writing in each is
+/// the ordinary shape of "Accessibility not granted", where every live agent is
+/// in this section.
+@MainActor
+final class ProjectOrderTests: XCTestCase {
+
+    private func rows(_ ids: [String]) -> [SwitcherRow] {
+        ids.map { id in
+            SwitcherRow(id: id,
+                        kind: .project,
+                        displayName: id,
+                        colorHex: "#000000",
+                        project: nil,
+                        window: nil,
+                        sessions: [],
+                        state: nil,
+                        activeSubagents: 0,
+                        subagentDescriptions: [],
+                        chatTopic: nil,
+                        model: nil,
+                        contextUsedTokens: nil,
+                        contextLimitTokens: nil,
+                        lastActivity: nil)
+        }
+    }
+
+    private func snapshot(_ ids: [String], generatedAt: Date) -> SwitcherSnapshot {
+        SwitcherSnapshot(openWindows: [],
+                         projects: rows(ids),
+                         accessibilityTrusted: true,
+                         generatedAt: generatedAt)
+    }
+
+    private func projectIDs(_ model: SwitcherViewModel) -> [String] {
+        model.sections.first { $0.title == "Проекты" }?.rows.map(\.id) ?? []
+    }
+
+    /// The panel is up and an agent writes a line in project "c": its transcript
+    /// becomes the newest, the data layer puts it first, and the row must not
+    /// move — once a second, under a pointer already aimed at a row.
+    func testTheOrderHoldsWhenASessionIsWrittenTo() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["project:/a", "project:/b", "project:/c"], generatedAt: Date()))
+        model.panelDidShow()
+        model.update(snapshot: snapshot(["project:/a", "project:/b", "project:/c"], generatedAt: Date()))
+
+        model.update(snapshot: snapshot(["project:/c", "project:/a", "project:/b"], generatedAt: Date()))
+        XCTAssertEqual(projectIDs(model), ["project:/a", "project:/b", "project:/c"])
+        // And again a second later, the other way round.
+        model.update(snapshot: snapshot(["project:/b", "project:/c", "project:/a"], generatedAt: Date()))
+        XCTAssertEqual(projectIDs(model), ["project:/a", "project:/b", "project:/c"])
+    }
+
+    /// A row that turns up while the panel is up is written into the frozen
+    /// order at the place the fresh ranking gives it — a project whose window has
+    /// just been closed comes back into this section where its last session puts
+    /// it, and stays there. Appending it instead, as the windows section does,
+    /// would put it at the bottom of a hundred rows.
+    func testAProjectThatAppearsIsWovenInWhereTheRankingPutsIt() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["project:/a", "project:/b", "project:/c"], generatedAt: Date()))
+        model.panelDidShow()
+        model.update(snapshot: snapshot(["project:/a", "project:/b", "project:/c"], generatedAt: Date()))
+
+        model.update(snapshot: snapshot(["project:/a", "project:/new", "project:/b", "project:/c"],
+                                        generatedAt: Date()))
+        XCTAssertEqual(projectIDs(model),
+                       ["project:/a", "project:/new", "project:/b", "project:/c"])
+        // Frozen from then on: the newcomer keeps its slot when the ranking moves.
+        model.update(snapshot: snapshot(["project:/c", "project:/a", "project:/new", "project:/b"],
+                                        generatedAt: Date()))
+        XCTAssertEqual(projectIDs(model),
+                       ["project:/a", "project:/new", "project:/b", "project:/c"])
+    }
+
+    /// An orphan `cwd:` row is a live agent running outside the scan roots, and
+    /// it belongs at the head of the section (SPEC §2.2.1) — that is where the
+    /// data layer puts it and where the freeze has to keep it. Appending
+    /// newcomers, which is the rule for windows, would drop an agent that has
+    /// just started to the bottom of the list at the moment it is wanted most.
+    func testAnOrphanThatAppearsGoesToTheHeadOfTheSection() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["project:/a", "project:/b"], generatedAt: Date()))
+        model.panelDidShow()
+        model.update(snapshot: snapshot(["project:/a", "project:/b"], generatedAt: Date()))
+
+        model.update(snapshot: snapshot(["cwd:/private/tmp/scratch", "project:/a", "project:/b"],
+                                        generatedAt: Date()))
+        XCTAssertEqual(projectIDs(model), ["cwd:/private/tmp/scratch", "project:/a", "project:/b"])
+    }
+
+    /// The newcomer arrives with the *first* snapshot after the show — the state
+    /// the two tests above never reach, because each of them burns a snapshot
+    /// first and so exercises the standing rule instead. For the projects that
+    /// first snapshot is also where the re-freeze would happen, and this is the
+    /// only test that would notice if weaving newcomers in were left to a
+    /// separate line of it.
+    func testANewcomerInTheFirstSnapshotAfterTheShowIsWovenInToo() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["project:/a", "project:/b"], generatedAt: Date()))
+        model.panelDidShow()
+
+        model.update(snapshot: snapshot(["cwd:/private/tmp/x", "project:/a", "project:/b"],
+                                        generatedAt: Date()))
+        XCTAssertEqual(projectIDs(model), ["cwd:/private/tmp/x", "project:/a", "project:/b"])
+    }
+
+    /// And that first snapshot is routinely one read *before* the show: the store
+    /// serves a cache up to two seconds old and no watcher tells it an agent has
+    /// started, so an agent a second older than the panel is missing from the
+    /// order frozen at the show and turns up in a stale snapshot. Held back until
+    /// a snapshot read after the show — around a second of polling, plus 40–180 ms
+    /// of assembly — the row fell through to the tail `ordered` appends, which
+    /// for an orphan `cwd:` row is the one place it must never be (SPEC §2.2.1).
+    func testAnOrphanFromAStaleSnapshotStillGoesToTheHead() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["project:/a", "project:/b"], generatedAt: Date()))
+        model.panelDidShow()
+
+        let readBeforeTheShow = Date().addingTimeInterval(-5)
+        model.update(snapshot: snapshot(["cwd:/private/tmp/x", "project:/a", "project:/b"],
+                                        generatedAt: readBeforeTheShow))
+        XCTAssertEqual(projectIDs(model), ["cwd:/private/tmp/x", "project:/a", "project:/b"])
+
+        // And it keeps that place once the fresh snapshot arrives, rather than
+        // being re-frozen into a different one.
+        model.update(snapshot: snapshot(["cwd:/private/tmp/x", "project:/a", "project:/b"],
+                                        generatedAt: Date()))
+        XCTAssertEqual(projectIDs(model), ["cwd:/private/tmp/x", "project:/a", "project:/b"])
+    }
+
+    /// The freeze is taken afresh at every show, so the list is ranked again —
+    /// the project worked in last on top — as soon as the panel is reopened.
+    func testReopeningThePanelTakesTheFreshOrder() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["project:/a", "project:/b", "project:/c"], generatedAt: Date()))
+        model.panelDidShow()
+        model.update(snapshot: snapshot(["project:/c", "project:/a", "project:/b"], generatedAt: Date()))
+        XCTAssertEqual(projectIDs(model), ["project:/a", "project:/b", "project:/c"])
+
+        model.panelDidHide()
+        model.panelDidShow()
+        model.update(snapshot: snapshot(["project:/c", "project:/a", "project:/b"], generatedAt: Date()))
+        XCTAssertEqual(projectIDs(model), ["project:/c", "project:/a", "project:/b"])
+    }
+}
+
 /// Clicking an orphan row. It has neither a window nor an indexed project, and
 /// used to do nothing at all while looking exactly as clickable as its
 /// neighbours.
@@ -706,6 +857,21 @@ final class RowTitleTests: XCTestCase {
         XCTAssertTrue(cell.hasSuffix(" (agents: 123)"), "the count did not survive whole: '\(cell)'")
         // And the name is what was cut, visibly, by `shorten`.
         XCTAssertTrue(cell.hasPrefix("wirenboard/node-red\u{2026}"), "'\(cell)'")
+    }
+
+    /// The age of the last session, which is the key this section is sorted by.
+    /// Whole days — what the dump printed while the count was the key — cannot
+    /// explain the order they are printed in: the top of a live list is several
+    /// rows of "last 0d ago", and the dump exists to verify the ranking.
+    func testTheDumpPrintsTheLastSessionFinelyEnoughToExplainTheOrder() {
+        let now = Date()
+        XCTAssertEqual(ConsoleDump.age(of: now.addingTimeInterval(-3 * 3600 - 754), now: now),
+                       "3h 12m 34s")
+        XCTAssertEqual(ConsoleDump.age(of: now.addingTimeInterval(-47), now: now), "0h 00m 47s")
+        // Beyond a day the days are what the eye wants, with the hours kept so
+        // two projects last worked in on the same day are still told apart.
+        XCTAssertEqual(ConsoleDump.age(of: now.addingTimeInterval(-8 * 86_400 - 5 * 3600), now: now),
+                       "8d 5h")
     }
 }
 

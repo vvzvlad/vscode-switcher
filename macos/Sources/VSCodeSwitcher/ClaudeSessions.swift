@@ -166,7 +166,7 @@ enum ClaudeSessions {
 
     // MARK: - Project activity
 
-    private static let sessionTimesCache = FileDerivedCache<[Date]>()
+    private static let sessionNamesCache = FileDerivedCache<[String]>()
 
     /// When each session ever recorded for a working directory was last written.
     ///
@@ -178,11 +178,21 @@ enum ClaudeSessions {
     /// all, and some directories hold no transcript (worktree snapshots,
     /// sessions since deleted).
     ///
-    /// Cached against the directory's own mtime, which moves exactly when a
-    /// session is added or removed — the events this is counting. Appending to
-    /// an existing transcript does not move it, so one session's timestamp can
-    /// lag until the next session is started; against a window measured in
-    /// weeks that changes no order.
+    /// The *listing* is cached against the directory's own mtime, which moves
+    /// exactly when a session file is added or removed — that is, exactly when
+    /// the listing changes. The timestamps are deliberately not cached with it.
+    /// Appending to an existing transcript moves neither the directory's mtime
+    /// nor its size, so a cached stamp freezes at the moment the last session
+    /// was *started* while that session goes on writing for hours. It did not
+    /// matter while this only fed a count over weeks; it decides the order now
+    /// (SPEC §2.2.1), and the freeze is not small: across the 47 project
+    /// directories on this machine the gap between the directory's mtime and its
+    /// newest transcript is 1.7 h at the median, 6 h or more in a third of them
+    /// and 222 h at the worst — the project being typed in right now would sit
+    /// where it stood nine days ago. Re-stat'ing every transcript instead is one
+    /// `stat(2)` each, 362 of them here: 1.25 ms for the whole pass warm and
+    /// 3.4–4.1 ms on the first one, against a snapshot that spends 40–180 ms on
+    /// disk (release build, live data, SPEC §2.2.1).
     static func sessionTimes(forPath path: String,
                              projectsDirectory: URL = ClaudeSessions.projectsDirectory) -> [Date] {
         let directory = projectsDirectory.appendingPathComponent(slug(forPath: path))
@@ -193,21 +203,26 @@ enum ClaudeSessions {
         // snapshot; building those `NSError`s cost more than every other part of
         // the ranking together.
         guard fileStamp(atPath: directory.path) != nil else { return [] }
-        return sessionTimesCache.value(atPath: directory.path) {
+        let names = sessionNamesCache.value(atPath: directory.path) {
             guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
-            return names.filter { $0.hasSuffix(".jsonl") }.compactMap {
-                fileStamp(atPath: directory.appendingPathComponent($0).path)?.modificationDate
-            }
+            return names.filter { $0.hasSuffix(".jsonl") }
         }
+        // The base path is built once and the names concatenated onto it.
+        // `URL.appendingPathComponent($0).path` per file was three quarters of
+        // the whole pass — 2.54 ms of it against 0.27 ms of `stat(2)` — which is
+        // the same trap the note about `claudeHome` below is about.
+        let base = directory.path
+        return names.compactMap { fileStamp(atPath: base + "/" + $0)?.modificationDate }
     }
 
-    /// How much Claude Code work a project has seen: how many of its sessions
-    /// fall inside the window, and when the newest one of any age was written.
+    /// The Claude Code work a project has seen: when the newest session of any
+    /// age was written, and how many of them fall inside the window.
     ///
-    /// A count inside a fixed window rather than a decayed total over all
-    /// history: the question the list answers is "what have I been doing
-    /// lately", and a project with a large enough past keeps floating to the top
-    /// under any weighting that never forgets it.
+    /// Both halves go to `--dump`, and only there: the count used to be the key,
+    /// and it answers the wrong question — how much was done here, rather than
+    /// where the work is now (SPEC §2.2.1). The panel needs the stamp alone and
+    /// takes it straight from `sessionTimes`, so this whole function is off the
+    /// snapshot path.
     static func activity(forPath path: String,
                          windowDays: Int,
                          now: Date = Date(),
