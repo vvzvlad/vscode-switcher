@@ -240,7 +240,7 @@ enum ConsoleDump {
         return (row.usageIsLowerBound ? ">=" : "") + compact(value)
     }
 
-    /// `21.3M`, `914k`, `512`: the coarsest unit that still tells two numbers
+    /// `21.30M`, `914k`, `512`: the coarsest unit that still tells two numbers
     /// apart at a glance. The panel's rows write the same figure, so the
     /// formatting lives in one place — the same arrangement `countLabel` is in,
     /// and for the same reason: a dump that rounds differently from the panel
