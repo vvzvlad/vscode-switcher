@@ -363,8 +363,20 @@ struct UsageSnapshot: Sendable {
     /// contributed to it.
     var fleetSevenDayMean: Double?
     var accounts: [AccountUsage]
-    /// Spend per working directory, already joined from session ids.
-    var tokensByCwd: [String: TokenCounts]
+    /// Spend per slug directory of `~/.claude/projects`, already joined from
+    /// session ids.
+    ///
+    /// The key is the directory Claude Code filed the session under, which is
+    /// the directory the session was *started* in — not where its tokens were
+    /// spent, because a session walks between directories while it runs
+    /// (`UsageIndex`). Read as "the spend of the sessions started here". A slug
+    /// is never decoded back into a path; it is matched forwards, against the
+    /// slug of each known project (`DataSource`).
+    var tokensBySlug: [String: TokenCounts]
+    /// Sessions filed under more than one slug — resumed in another directory —
+    /// kept unattributed until the project list can be asked whether the two
+    /// slugs mean two projects (`DataSource.settle`).
+    var contested: [ContestedSpend]
     /// Spend of the sessions whose transcript is not on this machine — agent
     /// nodes, mostly. Not an error: it is real spend with no local owner.
     var unmatched: TokenCounts
@@ -382,7 +394,8 @@ struct UsageSnapshot: Sendable {
                                      truncated: false,
                                      fleetSevenDayMean: nil,
                                      accounts: [],
-                                     tokensByCwd: [:],
+                                     tokensBySlug: [:],
+                                     contested: [],
                                      unmatched: .zero,
                                      unmatchedSessions: 0,
                                      quotaFailure: nil,
@@ -413,8 +426,10 @@ struct UsageSnapshot: Sendable {
         return both.isEmpty ? nil : both.joined(separator: "; ")
     }
 
-    /// Everything the gateway reported for the window, matched or not.
+    /// Everything the gateway reported for the window, matched or not — the
+    /// contested sessions included, because they are spend that happened and the
+    /// only open question is whose row it belongs on.
     var total: TokenCounts {
-        tokensByCwd.values.reduce(unmatched, +)
+        contested.reduce(tokensBySlug.values.reduce(unmatched, +)) { $0 + $1.tokens }
     }
 }

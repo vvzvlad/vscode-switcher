@@ -350,7 +350,9 @@ final class UsageClientTests: XCTestCase {
     }
 }
 
-/// Finding out where a session ran, from what Claude Code left on disk.
+/// Finding out which directories hold a session's transcript, from what Claude
+/// Code left on disk. Nothing here opens a transcript, and the fixtures are
+/// deliberately not valid JSON — a reader would have to fail on them.
 final class UsageIndexTests: XCTestCase {
 
     private func makeProjectsDirectory() throws -> URL {
@@ -361,26 +363,27 @@ final class UsageIndexTests: XCTestCase {
         return root
     }
 
-    private func write(_ lines: [String], to url: URL) throws {
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
-                                                withIntermediateDirectories: true)
-        try Data(lines.joined(separator: "\n").utf8).write(to: url)
+    /// A transcript filed under the slug of `directory`, exactly where Claude
+    /// Code files one. The bytes are gibberish on purpose.
+    private func file(_ sessionId: String, under directory: String, in root: URL) throws {
+        let slug = root.appendingPathComponent(ClaudeSessions.slug(forPath: directory))
+        try FileManager.default.createDirectory(at: slug, withIntermediateDirectories: true)
+        try Data("not json at all".utf8).write(to: slug.appendingPathComponent("\(sessionId).jsonl"))
     }
 
-    /// The slug replaces `_` and `.` with `-` and cannot be turned back into a
-    /// path, so the working directory has to come out of the file itself.
-    func testTheWorkingDirectoryComesFromTheTranscriptAndNotFromTheSlug() throws {
+    /// One session resumed in another directory has two files under two slugs,
+    /// and both have to come back. Taking the first one found is the defect this
+    /// suite exists for: the winner was whichever directory the walk reached
+    /// first, and that could change between two polls.
+    func testEverySlugHoldingTheSessionIsFound() throws {
         let root = try makeProjectsDirectory()
-        let cwd = "/Users/x/Data/Projects/my_project.v2"
         let sessionId = UUID().uuidString
-        let directory = root.appendingPathComponent(ClaudeSessions.slug(forPath: cwd))
-        try write(["{\"type\":\"summary\",\"summary\":\"no cwd on this one\"}",
-                   "{\"type\":\"user\",\"cwd\":\"\(cwd)\",\"sessionId\":\"\(sessionId)\"}"],
-                  to: directory.appendingPathComponent("\(sessionId).jsonl"))
+        try file(sessionId, under: "/Users/x/one", in: root)
+        try file(sessionId, under: "/Users/x/two", in: root)
 
-        XCTAssertEqual(directory.lastPathComponent, "-Users-x-Data-Projects-my-project-v2")
-        let found = UsageIndex.cwdBySessionId(for: [sessionId], projectsDirectory: root)
-        XCTAssertEqual(found[sessionId], cwd, "the underscore and the dot survive only in the file")
+        XCTAssertEqual(UsageIndex.slugsBySessionId(for: [sessionId], projectsDirectory: root)[sessionId],
+                       ["-Users-x-one", "-Users-x-two"],
+                       "both copies, sorted, so two polls describe the session the same way")
     }
 
     /// Subagent transcripts live one level down, in `<sessionId>/subagents/`, and
@@ -388,16 +391,16 @@ final class UsageIndexTests: XCTestCase {
     func testSubagentTranscriptsAreNotListed() throws {
         let root = try makeProjectsDirectory()
         let sessionId = UUID().uuidString
-        let directory = root.appendingPathComponent("-Users-x-project")
-        try write(["{\"cwd\":\"/Users/x/project\"}"],
-                  to: directory.appendingPathComponent("\(sessionId).jsonl"))
-        try write(["{\"cwd\":\"/Users/x/project\"}"],
-                  to: directory.appendingPathComponent(sessionId)
-                      .appendingPathComponent("subagents")
-                      .appendingPathComponent("agent-deadbeef.jsonl"))
+        try file(sessionId, under: "/Users/x/project", in: root)
+        let nested = root.appendingPathComponent("-Users-x-project")
+            .appendingPathComponent(sessionId)
+            .appendingPathComponent("subagents")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: nested.appendingPathComponent("agent-deadbeef.jsonl"))
 
-        let found = UsageIndex.cwdBySessionId(for: [sessionId, "agent-deadbeef"], projectsDirectory: root)
-        XCTAssertEqual(found[sessionId], "/Users/x/project")
+        let found = UsageIndex.slugsBySessionId(for: [sessionId, "agent-deadbeef"],
+                                                projectsDirectory: root)
+        XCTAssertEqual(found[sessionId], ["-Users-x-project"])
         XCTAssertNil(found["agent-deadbeef"], "a subagent is not a session")
     }
 
@@ -405,117 +408,251 @@ final class UsageIndexTests: XCTestCase {
     /// no transcript here. Ordinary, not an error.
     func testASessionWithNoTranscriptIsSimplyAbsent() throws {
         let root = try makeProjectsDirectory()
-        XCTAssertTrue(UsageIndex.cwdBySessionId(for: ["nowhere-\(UUID().uuidString)"],
-                                                projectsDirectory: root).isEmpty)
+        XCTAssertTrue(UsageIndex.slugsBySessionId(for: ["nowhere-\(UUID().uuidString)"],
+                                                  projectsDirectory: root).isEmpty)
     }
 
     func testAskingForNothingReadsNothing() throws {
         let root = try makeProjectsDirectory()
-        XCTAssertTrue(UsageIndex.cwdBySessionId(for: [], projectsDirectory: root).isEmpty)
-    }
-
-    func testATranscriptWithoutACwdYieldsNothing() throws {
-        let root = try makeProjectsDirectory()
-        let sessionId = UUID().uuidString
-        try write(["{\"type\":\"summary\"}", "{\"type\":\"user\"}"],
-                  to: root.appendingPathComponent("-Users-x-project")
-                      .appendingPathComponent("\(sessionId).jsonl"))
-        XCTAssertNil(UsageIndex.cwdBySessionId(for: [sessionId], projectsDirectory: root)[sessionId])
-    }
-
-    // MARK: - The head window
-
-    private func makeTranscript(_ text: String) throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("usage-head-\(UUID().uuidString).jsonl")
-        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
-        try Data(text.utf8).write(to: url)
-        return url
-    }
-
-    /// Only the head of a transcript is read. Transcripts reach tens of
-    /// megabytes and this runs over every session the gateway reports, so a
-    /// `cwd` past the window is not found — and must not be, because the only
-    /// way to find it is to read the whole file.
-    ///
-    /// Nothing tested this: every other transcript here fits inside the window
-    /// whole, so `read(upToCount:)` could be swapped for reading the file
-    /// entire and the suite would not notice. The second half of the assertion
-    /// is the control — the same file, a window that reaches the record.
-    func testOnlyTheHeadOfATranscriptIsRead() throws {
-        // 19 bytes each, so three of them fit in a 64-byte window and the fourth
-        // line is cut by it. The record is followed by two more so that it is
-        // not the last line of the file: the last line inside the window is
-        // dropped, and a whole-file read would have that rule cover for it.
-        let filler = String(repeating: "{\"type\":\"summary\"}\n", count: 10)
-        let url = try makeTranscript(filler + "{\"cwd\":\"/tmp/past-the-window\"}\n"
-                                     + "{\"type\":\"summary\"}\n{\"type\":\"summary\"}\n")
-
-        XCTAssertNil(UsageIndex.cwd(fromTranscriptAtPath: url.path, headBytes: 64),
-                     "the record sits 190 bytes in, outside a 64-byte window")
-        XCTAssertEqual(UsageIndex.cwd(fromTranscriptAtPath: url.path, headBytes: 4096),
-                       "/tmp/past-the-window",
-                       "the same file, with a window that reaches it")
-    }
-
-    /// The last line inside the window is dropped whether the window cut it in
-    /// half or it happened to end exactly there. From inside the window the two
-    /// are indistinguishable — there is no byte that says "and the file goes on"
-    /// — and half a record can only yield a path that was never anybody's
-    /// working directory.
-    func testTheLastLineInsideTheWindowIsDropped() throws {
-        let head = "{\"type\":\"summary\"}\n"
-        let record = "{\"cwd\":\"/tmp/x\"}"
-        let url = try makeTranscript(head + record + "\n{\"cwd\":\"/tmp/later\"}\n")
-
-        XCTAssertNil(UsageIndex.cwd(fromTranscriptAtPath: url.path,
-                                    headBytes: head.utf8.count + record.utf8.count),
-                     "a record ending exactly on the boundary is dropped like a cut one")
-        XCTAssertNil(UsageIndex.cwd(fromTranscriptAtPath: url.path, headBytes: head.utf8.count + 8),
-                     "and a record the boundary cuts is never parsed")
-    }
-
-    /// A first line longer than the whole window leaves no complete record to
-    /// read, so the session has no working directory and its spend goes to
-    /// `unmatched` — spend with no owner on this machine, which is a state the
-    /// app already shows. The alternative would be attributing it to whatever
-    /// path a truncated record left behind.
-    func testASessionWhoseFirstLineExceedsTheWindowGoesToUnmatched() throws {
-        let root = try makeProjectsDirectory()
-        let sessionId = UUID().uuidString
-        let padding = String(repeating: "x", count: UsageIndex.headBytes)
-        try write(["{\"cwd\":\"/Users/x/project\",\"toolResult\":\"\(padding)\"}",
-                   "{\"cwd\":\"/Users/x/project\"}"],
-                  to: root.appendingPathComponent("-Users-x-project")
-                      .appendingPathComponent("\(sessionId).jsonl"))
-
-        let found = UsageIndex.cwdBySessionId(for: [sessionId], projectsDirectory: root)
-        XCTAssertTrue(found.isEmpty, "no complete record inside the window, so no directory")
-
-        let session = try UsageFixtures.decode("""
-        {"session_id": "\(sessionId)", "input_tokens": 7, "output_tokens": 0,
-         "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
-        """, as: GatewaySession.self)
-        let folded = UsageIndex.fold(sessions: [session], cwdBySessionId: found)
-        XCTAssertTrue(folded.tokensByCwd.isEmpty)
-        XCTAssertEqual(folded.unmatchedSessions, 1)
-        XCTAssertEqual(folded.unmatched.input, 7, "counted, and counted as nobody's")
+        XCTAssertTrue(UsageIndex.slugsBySessionId(for: [], projectsDirectory: root).isEmpty)
     }
 
     /// Several chats of the same project are several sessions in one directory,
     /// which is the ordinary case rather than a collision.
     func testSeveralSessionsOfOneDirectoryAreAllFound() throws {
         let root = try makeProjectsDirectory()
-        let cwd = "/Users/x/project"
-        let directory = root.appendingPathComponent(ClaudeSessions.slug(forPath: cwd))
         let identifiers = [UUID().uuidString, UUID().uuidString]
-        for sessionId in identifiers {
-            try write(["{\"cwd\":\"\(cwd)\"}"], to: directory.appendingPathComponent("\(sessionId).jsonl"))
-        }
+        for sessionId in identifiers { try file(sessionId, under: "/Users/x/project", in: root) }
 
-        let found = UsageIndex.cwdBySessionId(for: Set(identifiers), projectsDirectory: root)
+        let found = UsageIndex.slugsBySessionId(for: Set(identifiers), projectsDirectory: root)
         XCTAssertEqual(found.count, 2)
-        XCTAssertEqual(Set(found.values), [cwd])
+        XCTAssertEqual(Set(found.values), [["-Users-x-project"]])
+    }
+}
+
+/// The whole join, over real directories: what Claude Code writes on disk, what
+/// the gateway reports, and which row the number ends up on.
+///
+/// Built out of temporary directories rather than dictionaries because the rule
+/// under test *is* the correspondence between a project on disk and a slug
+/// directory on disk. A test that hands `assemble` a slug it computed itself
+/// would agree with any slug function at all, including a wrong one.
+final class UsageAttributionTests: XCTestCase {
+
+    private var base = URL(fileURLWithPath: "/")
+    private var projectsRoot = URL(fileURLWithPath: "/")
+    /// Stands in for `~/.claude/projects`.
+    private var transcripts = URL(fileURLWithPath: "/")
+
+    override func setUpWithError() throws {
+        base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("usage-attribution-\(UUID().uuidString)")
+        projectsRoot = base.appendingPathComponent("Projects")
+        transcripts = base.appendingPathComponent("claude-projects")
+        try FileManager.default.createDirectory(at: transcripts, withIntermediateDirectories: true)
+        addTeardownBlock { [base] in try? FileManager.default.removeItem(at: base) }
+    }
+
+    /// A project directory, with the named worktrees under it.
+    private func makeProject(_ name: String, worktrees: [String] = []) throws -> ProjectInfo {
+        let path = projectsRoot.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: path.appendingPathComponent(".git"),
+                                                withIntermediateDirectories: true)
+        for worktree in worktrees {
+            try FileManager.default.createDirectory(at: worktreePath(of: path.path, worktree),
+                                                    withIntermediateDirectories: true)
+        }
+        return TestFixtures.project(path: path.path, rootName: name)
+    }
+
+    private func worktreePath(of project: String, _ name: String) -> URL {
+        URL(fileURLWithPath: project)
+            .appendingPathComponent(".claude/worktrees")
+            .appendingPathComponent(name)
+    }
+
+    /// One transcript, filed under the slug of the directory the session started
+    /// in. The bytes are gibberish: attribution must not depend on them.
+    private func file(_ sessionId: String, startedIn directory: String) throws {
+        let slug = transcripts.appendingPathComponent(ClaudeSessions.slug(forPath: directory))
+        try FileManager.default.createDirectory(at: slug, withIntermediateDirectories: true)
+        try Data("not json at all".utf8).write(to: slug.appendingPathComponent("\(sessionId).jsonl"))
+    }
+
+    private func session(_ identifier: String, input: Int) throws -> GatewaySession {
+        try UsageFixtures.decode("""
+        {"session_id": "\(identifier)", "input_tokens": \(input), "output_tokens": 0,
+         "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        """, as: GatewaySession.self)
+    }
+
+    /// The path the app takes: list the slug directories, fold the gateway's
+    /// figures onto them, assemble the rows.
+    private func attribute(_ sessions: [GatewaySession], projects: [ProjectInfo])
+        -> (snapshot: SwitcherSnapshot, unmatched: TokenCounts, unmatchedSessions: Int) {
+        let slugs = UsageIndex.slugsBySessionId(for: Set(sessions.map(\.sessionId)),
+                                                projectsDirectory: transcripts)
+        let folded = UsageIndex.fold(sessions: sessions, slugsBySessionId: slugs)
+        let snapshot = DataSource.assemble(projects: projects,
+                                           windows: [],
+                                           sessions: [],
+                                           tokensBySlug: folded.tokensBySlug,
+                                           contested: folded.contested,
+                                           worktrees: DataSource.worktrees(of: projects),
+                                           accessibilityTrusted: true)
+        return (snapshot, folded.unmatched, folded.unmatchedSessions)
+    }
+
+    private func spend(_ project: ProjectInfo, in snapshot: SwitcherSnapshot) -> Int? {
+        snapshot.projects.first { $0.project?.path == project.path }?.usage?.input
+    }
+
+    /// The ordinary case: the session started in the project, so its file sits
+    /// under the project's own slug.
+    ///
+    /// Checked by deleting the line that enters a project's own slug in
+    /// `projectPathsBySlug`: this and most of the file below it fail.
+    func testSpendUnderAProjectsOwnSlugLandsOnItsRow() throws {
+        let project = try makeProject("switcher")
+        try file("s1", startedIn: project.path)
+
+        let result = attribute([try session("s1", input: 10)], projects: [project])
+        XCTAssertEqual(spend(project, in: result.snapshot), 10)
+        XCTAssertEqual(result.unmatchedSessions, 0)
+    }
+
+    /// A session started in a worktree belongs to the project the worktree is
+    /// of. Nothing opens a window on `.claude/worktrees/<name>`, so keyed by its
+    /// own slug the number would sit on no row at all.
+    ///
+    /// This is also the one case that cannot be answered from the slug alone:
+    /// the slug of a worktree is not a prefix-match away from the slug of its
+    /// project — the separator is gone, so `-x-portainer-` prefixes the slug of
+    /// `portainer-agent` too. It is answered by having listed the worktree
+    /// directories, which is what `DataSource.worktrees(of:)` is for.
+    ///
+    /// Checked by deleting the worktree pass in `projectPathsBySlug`, and again
+    /// by having `attribute` pass `worktrees: [:]`: this test fails and the rest
+    /// of the file does not.
+    func testSpendUnderAWorktreeSlugLandsOnTheProjectsRow() throws {
+        let project = try makeProject("switcher", worktrees: ["usage-ui"])
+        try file("s1", startedIn: worktreePath(of: project.path, "usage-ui").path)
+
+        let result = attribute([try session("s1", input: 7)], projects: [project])
+        XCTAssertEqual(spend(project, in: result.snapshot), 7)
+    }
+
+    /// A slug that is no project and no worktree of one — an agent node's
+    /// directory, `/private/tmp`, anything outside the scan roots — is not
+    /// forced onto a row. It stays in the gateway's totals and belongs to
+    /// nobody, which is what the app already says about spend it cannot place.
+    func testASlugThatMatchesNoProjectLandsOnNoRow() throws {
+        let project = try makeProject("switcher")
+        try file("s1", startedIn: "/private/tmp/somewhere-else")
+
+        let result = attribute([try session("s1", input: 10)], projects: [project])
+        XCTAssertNil(spend(project, in: result.snapshot),
+                     "the only project must not inherit a directory that is not it")
+        XCTAssertEqual(result.snapshot.ambiguousUsageSessions, 0,
+                       "one candidate is not a contest, however little it matches")
+    }
+
+    /// A session with no transcript here at all — the agent nodes run their own
+    /// Claude Code and report to the same gateway. Real spend with no local
+    /// owner, counted as such rather than dropped.
+    func testASessionWithNoTranscriptAtAllIsUnmatched() throws {
+        let project = try makeProject("switcher")
+
+        let result = attribute([try session("elsewhere", input: 7)], projects: [project])
+        XCTAssertEqual(result.unmatchedSessions, 1)
+        XCTAssertEqual(result.unmatched.input, 7, "counted, and counted as nobody's")
+        XCTAssertNil(spend(project, in: result.snapshot))
+    }
+
+    /// Two copies of one session, both inside one project — the session was
+    /// resumed in a worktree of the project it started in. One session, one
+    /// aggregate from the gateway, one number on the row.
+    ///
+    /// Checked by summing the contested tokens once per candidate slug in
+    /// `settle`: this test fails with 20 and nothing else notices.
+    func testTwoCopiesInsideOneProjectAreCountedOnceAndNotTwice() throws {
+        let project = try makeProject("switcher", worktrees: ["usage-ui"])
+        try file("s1", startedIn: project.path)
+        try file("s1", startedIn: worktreePath(of: project.path, "usage-ui").path)
+
+        let result = attribute([try session("s1", input: 10)], projects: [project])
+        XCTAssertEqual(spend(project, in: result.snapshot), 10, "one session, one aggregate, once")
+        XCTAssertEqual(result.snapshot.ambiguousUsageSessions, 0,
+                       "two directories of one project are not a disagreement")
+    }
+
+    /// Two copies in two different projects. The gateway reports one aggregate
+    /// for the whole session and there is nothing to divide it by, so neither
+    /// project gets it and the fact is reported instead of being resolved by
+    /// coin-flip.
+    ///
+    /// This is the defect the suite was written for. Checked by restoring "the
+    /// first directory found wins": the spend then lands on one of the two
+    /// projects — which one depends on the order the directories are listed in —
+    /// and this test fails.
+    func testTwoCopiesInTwoProjectsGoToTheAmbiguousBucket() throws {
+        let first = try makeProject("switcher")
+        let second = try makeProject("home-network")
+        try file("s1", startedIn: first.path)
+        try file("s1", startedIn: second.path)
+
+        let result = attribute([try session("s1", input: 12)], projects: [first, second])
+        XCTAssertNil(spend(first, in: result.snapshot))
+        XCTAssertNil(spend(second, in: result.snapshot))
+        XCTAssertEqual(result.snapshot.ambiguousUsageSessions, 1)
+        XCTAssertEqual(result.snapshot.ambiguousUsage.input, 12, "counted, and named as nobody's")
+    }
+
+    /// The slug replaces every character outside `[A-Za-z0-9-]`, not just the
+    /// separator, and cannot be turned back into a path. So the match runs
+    /// forwards, through `ClaudeSessions.slug(forPath:)`.
+    ///
+    /// Checked by matching on a naive `/` → `-` replacement instead: the
+    /// underscore and the dot survive, the slug does not match, and this test
+    /// fails while every other project name in the file goes on matching.
+    func testAProjectWithUnderscoresAndDotsInItsNameStillMatches() throws {
+        let project = try makeProject("my_project.v2")
+        try file("s1", startedIn: project.path)
+
+        XCTAssertTrue(ClaudeSessions.slug(forPath: project.path).hasSuffix("-my-project-v2"),
+                      "the name is not recoverable from the slug, which is the point")
+        let result = attribute([try session("s1", input: 5)], projects: [project])
+        XCTAssertEqual(spend(project, in: result.snapshot), 5)
+    }
+
+    /// The line `--dump` prints about the bucket. Silence would be the same
+    /// silent loss the split exists to stop, one level up.
+    func testTheDumpNamesTheAmbiguousBucketAndCountsIt() throws {
+        let first = try makeProject("switcher")
+        let second = try makeProject("home-network")
+        try file("s1", startedIn: first.path)
+        try file("s1", startedIn: second.path)
+
+        let result = attribute([try session("s1", input: 12)], projects: [first, second])
+        XCTAssertEqual(ConsoleDump.ambiguousLine(sessions: result.snapshot.ambiguousUsageSessions,
+                                                 tokens: result.snapshot.ambiguousUsage),
+                       "ambiguous:        1 sessions, 12 ie (in 12, out 0, cw 0, cr 0)")
+        XCTAssertEqual(ConsoleDump.ambiguousLine(sessions: 0, tokens: .zero),
+                       "ambiguous:        0 sessions, -",
+                       "and it is printed when the bucket is empty, which is most weeks")
+    }
+
+    /// The worktree listing is the one piece of disk `assemble` cannot do for
+    /// itself. A project with no `.claude/worktrees` must not appear in it at
+    /// all — that guard is what keeps 96 failing `contentsOfDirectory` calls off
+    /// a path that runs once a second.
+    func testOnlyProjectsThatHaveWorktreesAreListed() throws {
+        let bare = try makeProject("plain")
+        let withTree = try makeProject("switcher", worktrees: ["usage-ui"])
+
+        let found = DataSource.worktrees(of: [bare, withTree])
+        XCTAssertNil(found[bare.path])
+        XCTAssertEqual(found[withTree.path], [withTree.path + "/.claude/worktrees/usage-ui"])
     }
 }
 
@@ -531,18 +668,35 @@ final class UsageJoinTests: XCTestCase {
 
     func testSessionsOfOneDirectoryAreSummed() throws {
         let folded = UsageIndex.fold(sessions: [try session("a", input: 10), try session("b", input: 5)],
-                                     cwdBySessionId: ["a": "/Users/x/project", "b": "/Users/x/project"])
-        XCTAssertEqual(folded.tokensByCwd["/Users/x/project"]?.input, 15)
+                                     slugsBySessionId: ["a": ["-Users-x-project"], "b": ["-Users-x-project"]])
+        XCTAssertEqual(folded.tokensBySlug["-Users-x-project"]?.input, 15)
         XCTAssertEqual(folded.unmatchedSessions, 0)
         XCTAssertEqual(folded.unmatched, .zero)
+        XCTAssertTrue(folded.contested.isEmpty)
     }
 
     func testASessionWithNoLocalTranscriptIsUnmatchedRatherThanDropped() throws {
         let folded = UsageIndex.fold(sessions: [try session("a", input: 10), try session("node", input: 7)],
-                                     cwdBySessionId: ["a": "/Users/x/project"])
-        XCTAssertEqual(folded.tokensByCwd.count, 1)
+                                     slugsBySessionId: ["a": ["-Users-x-project"]])
+        XCTAssertEqual(folded.tokensBySlug.count, 1)
         XCTAssertEqual(folded.unmatchedSessions, 1)
         XCTAssertEqual(folded.unmatched.input, 7)
+    }
+
+    /// A session found under two slugs is set aside whole rather than counted
+    /// under either. The gateway reports one aggregate for the session and the
+    /// fold has no project list to ask whether the two slugs mean two projects,
+    /// so the question is passed on instead of being answered here.
+    func testASessionUnderTwoSlugsIsSetAsideRatherThanCounted() throws {
+        let folded = UsageIndex.fold(sessions: [try session("a", input: 10), try session("b", input: 5)],
+                                     slugsBySessionId: ["a": ["-x-one", "-x-two"],
+                                                        "b": ["-x-two"]])
+        XCTAssertEqual(folded.tokensBySlug, ["-x-two": TokenCounts(input: 5, output: 0,
+                                                                   cacheCreation: 0, cacheRead: 0)],
+                       "only the session with one slug was folded")
+        XCTAssertEqual(folded.contested, [ContestedSpend(slugs: ["-x-one", "-x-two"],
+                                                         tokens: try session("a", input: 10).tokens)])
+        XCTAssertEqual(folded.unmatchedSessions, 0, "it has a transcript; whose is the open question")
     }
 
     func testAnUnnamedCounterSurvivesTheFold() throws {
@@ -550,9 +704,9 @@ final class UsageJoinTests: XCTestCase {
         {"session_id": "p", "input_tokens": 10, "output_tokens": null}
         """, as: GatewaySession.self)
         let folded = UsageIndex.fold(sessions: [try session("a", input: 1), partial],
-                                     cwdBySessionId: ["a": "/x", "p": "/x"])
-        XCTAssertEqual(folded.tokensByCwd["/x"]?.input, 11)
-        XCTAssertEqual(folded.tokensByCwd["/x"]?.isComplete, false)
+                                     slugsBySessionId: ["a": ["-x"], "p": ["-x"]])
+        XCTAssertEqual(folded.tokensBySlug["-x"]?.input, 11)
+        XCTAssertEqual(folded.tokensBySlug["-x"]?.isComplete, false)
     }
 
     // MARK: - Attribution to rows
@@ -563,52 +717,71 @@ final class UsageJoinTests: XCTestCase {
         TokenCounts(input: input, output: 0, cacheCreation: 0, cacheRead: 0)
     }
 
-    private func assemble(tokensByCwd: [String: TokenCounts],
+    /// Keyed by directory here and slugged on the way in, exactly as Claude Code
+    /// slugs it when it files a transcript. These tests are about which row the
+    /// number lands on; that the slug of a directory on disk is the one the app
+    /// computes is held by `UsageAttributionTests`, over real directories.
+    private func assemble(spend: [String: TokenCounts],
                           sessions: [ClaudeSessionInfo] = [],
-                          windows: [VSCodeWindowInfo] = []) -> SwitcherSnapshot {
+                          windows: [VSCodeWindowInfo] = [],
+                          worktrees: [String] = []) -> SwitcherSnapshot {
         DataSource.assemble(projects: [TestFixtures.project(path: projectPath, rootName: "switcher")],
                             windows: windows,
                             sessions: sessions,
-                            tokensByCwd: tokensByCwd,
+                            tokensBySlug: Dictionary(uniqueKeysWithValues: spend.map {
+                                (ClaudeSessions.slug(forPath: $0.key), $0.value)
+                            }),
+                            worktrees: worktrees.isEmpty ? [:] : [projectPath: worktrees],
                             accessibilityTrusted: true)
     }
 
     func testSpendInTheProjectDirectoryLandsOnItsRow() {
-        let snapshot = assemble(tokensByCwd: [projectPath: tokens(10)])
+        let snapshot = assemble(spend: [projectPath: tokens(10)])
         let row = snapshot.projects.first { $0.project?.path == projectPath }
         XCTAssertEqual(row?.usage?.input, 10)
         XCTAssertEqual(row?.usageInputEquivalent, 10)
     }
 
-    /// The case this rule exists for: an agent working in a worktree of the
-    /// project spends the project's tokens. Keyed by its own directory it would
-    /// vanish — nothing opens a window on `.claude/worktrees/<name>`.
-    func testSpendInAWorktreeCountsAsTheProjects() {
-        let worktree = projectPath + "/.claude/worktrees/usage-stats"
-        let snapshot = assemble(tokensByCwd: [worktree: tokens(7)])
-        let row = snapshot.projects.first { $0.project?.path == projectPath }
-        XCTAssertEqual(row?.usage?.input, 7)
-    }
-
     func testTheProjectAndItsWorktreesAddUp() {
-        let snapshot = assemble(tokensByCwd: [projectPath: tokens(10),
-                                              projectPath + "/.claude/worktrees/one": tokens(7),
-                                              projectPath + "/macos": tokens(3)])
+        let one = projectPath + "/.claude/worktrees/one"
+        let two = projectPath + "/.claude/worktrees/two"
+        let snapshot = assemble(spend: [projectPath: tokens(10), one: tokens(7), two: tokens(3)],
+                                worktrees: [one, two])
         let row = snapshot.projects.first { $0.project?.path == projectPath }
         XCTAssertEqual(row?.usage?.input, 20)
     }
 
+    /// A subdirectory of a project is *not* the project, and this is a deliberate
+    /// narrowing rather than an oversight.
+    ///
+    /// The old rule matched paths and so counted `<project>/macos` as the
+    /// project's. The rule matches slugs now, and a slug has lost the
+    /// separators: `-Users-x-Data-Projects-switcher-macos` is exactly what a
+    /// project genuinely called `switcher-macos` would be filed under, and
+    /// nothing can tell the two apart after the fact. Worktrees are the one
+    /// exception, and only because they are *enumerated* — the app knows their
+    /// real paths and slugs those.
+    ///
+    /// So such spend lands on no row, which is the honest outcome. On the live
+    /// 7-day window it costs nothing: all 30 local sessions were filed under a
+    /// project's own slug or a worktree's (measured 2026-08-17).
+    func testSpendUnderASubdirectorySlugDoesNotReachTheProject() {
+        let snapshot = assemble(spend: [projectPath + "/macos": tokens(3)])
+        XCTAssertNil(snapshot.projects.first { $0.project?.path == projectPath }?.usage)
+    }
+
     func testAWindowRowCarriesItsProjectsSpend() {
         let window = TestFixtures.window(index: 0, title: "topic \u{2014} switcher (Workspace)")
-        let snapshot = assemble(tokensByCwd: [projectPath: tokens(10)], windows: [window])
+        let snapshot = assemble(spend: [projectPath: tokens(10)], windows: [window])
         XCTAssertEqual(snapshot.openWindows.first?.usage?.input, 10)
         XCTAssertTrue(snapshot.projects.isEmpty, "the project has a window, so it has no second row")
     }
 
     /// A directory outside every scan root has a row of its own as soon as an
-    /// agent runs there, and that row keeps its own spend.
+    /// agent runs there, and that row keeps its own spend — found by slugging
+    /// its own path, the same forward direction everything else uses.
     func testAnOrphanRowKeepsItsOwnSpend() {
-        let snapshot = assemble(tokensByCwd: [projectPath: tokens(10), "/tmp/scratch": tokens(4)],
+        let snapshot = assemble(spend: [projectPath: tokens(10), "/tmp/scratch": tokens(4)],
                                 sessions: [TestFixtures.session(id: "s1", cwd: "/tmp/scratch", state: .working)])
         let orphan = snapshot.projects.first { $0.id == "cwd:/tmp/scratch" }
         XCTAssertEqual(orphan?.usage?.input, 4)
@@ -616,7 +789,7 @@ final class UsageJoinTests: XCTestCase {
     }
 
     func testARowWithNoSpendCarriesNoNumberRatherThanZero() {
-        let snapshot = assemble(tokensByCwd: [:])
+        let snapshot = assemble(spend: [:])
         let row = snapshot.projects.first { $0.project?.path == projectPath }
         XCTAssertNil(row?.usage)
         XCTAssertNil(row?.usageInputEquivalent, "no figure at all is not a figure of zero")
@@ -625,7 +798,7 @@ final class UsageJoinTests: XCTestCase {
     /// Spend the gateway reports for a directory nobody has a row for is not
     /// invented into one: it stays in the snapshot's totals.
     func testSpendOutsideEveryRowDoesNotCreateARow() {
-        let snapshot = assemble(tokensByCwd: ["/tmp/finished-last-week": tokens(4)])
+        let snapshot = assemble(spend: ["/tmp/finished-last-week": tokens(4)])
         XCTAssertNil(snapshot.projects.first { $0.id.hasPrefix("cwd:") })
     }
 
@@ -647,7 +820,7 @@ final class UsageJoinTests: XCTestCase {
         let second = TestFixtures.window(index: 1,
                                          title: "another \u{2014} switcher (Workspace)",
                                          windowNumber: 12)
-        let snapshot = assemble(tokensByCwd: [projectPath: tokens(10)], windows: [first, second])
+        let snapshot = assemble(spend: [projectPath: tokens(10)], windows: [first, second])
 
         XCTAssertEqual(snapshot.openWindows.count, 2)
         XCTAssertEqual(snapshot.openWindows.map { $0.usage?.input }, [10, 10],
@@ -664,7 +837,7 @@ final class UsageJoinTests: XCTestCase {
     /// UI reads answers `nil` and the dump prints a dash.
     func testARowThatKnowsNothingShowsNoNumberRatherThanAConfidentZero() throws {
         let unnamed = TokenCounts(input: nil, output: nil, cacheCreation: nil, cacheRead: nil)
-        let snapshot = assemble(tokensByCwd: [projectPath: unnamed])
+        let snapshot = assemble(spend: [projectPath: unnamed])
         let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == projectPath })
 
         XCTAssertNotNil(row.usage, "the gateway did report for this directory")
@@ -678,7 +851,7 @@ final class UsageJoinTests: XCTestCase {
     /// with the mark that says it is a floor.
     func testAPartlyKnownRowIsANumberMarkedAsALowerBound() throws {
         let partial = TokenCounts(input: 1000, output: nil, cacheCreation: nil, cacheRead: nil)
-        let snapshot = assemble(tokensByCwd: [projectPath: partial])
+        let snapshot = assemble(spend: [projectPath: partial])
         let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == projectPath })
 
         XCTAssertEqual(row.usageInputEquivalent, 1000)
@@ -687,7 +860,7 @@ final class UsageJoinTests: XCTestCase {
     }
 
     func testACompletelyKnownRowIsANumberWithoutTheMark() throws {
-        let snapshot = assemble(tokensByCwd: [projectPath: tokens(1000)])
+        let snapshot = assemble(spend: [projectPath: tokens(1000)])
         let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == projectPath })
         XCTAssertFalse(row.usageIsLowerBound)
         XCTAssertEqual(ConsoleDump.usageCell(for: row), "1k")
@@ -701,12 +874,12 @@ final class UsageJoinTests: XCTestCase {
         let partial = TokenCounts(input: 1000, output: nil, cacheCreation: nil, cacheRead: nil)
         let window = TestFixtures.window(index: 0, title: "topic \u{2014} switcher (Workspace)")
 
-        let withWindow = assemble(tokensByCwd: [projectPath: partial], windows: [window])
+        let withWindow = assemble(spend: [projectPath: partial], windows: [window])
         let windowRow = try XCTUnwrap(withWindow.openWindows.first)
         XCTAssertTrue(ConsoleDump.formatTokens(try XCTUnwrap(windowRow.usage)).hasPrefix(">="),
                       "windows section")
 
-        let withoutWindow = assemble(tokensByCwd: [projectPath: partial])
+        let withoutWindow = assemble(spend: [projectPath: partial])
         let projectRow = try XCTUnwrap(withoutWindow.projects.first { $0.project?.path == projectPath })
         XCTAssertTrue(ConsoleDump.usageCell(for: projectRow).hasPrefix(">="), "projects section")
     }
@@ -824,7 +997,7 @@ final class UsageWiringTests: XCTestCase {
         let cache = UsageCache()
         var polled = UsageSnapshot.empty
         polled.checkedAt = Date()
-        polled.tokensByCwd = [project.path: TokenCounts(input: 10, output: 2,
+        polled.tokensBySlug = [ClaudeSessions.slug(forPath: project.path): TokenCounts(input: 10, output: 2,
                                                         cacheCreation: 0, cacheRead: 0)]
         cache.store(polled)
 
@@ -898,7 +1071,7 @@ final class UsageStoreTests: XCTestCase {
     func testAFailedPassKeepsThePreviousNumbersAndTheirStamps() async {
         let earlier = Date(timeIntervalSince1970: 1_786_700_000)
         var previous = UsageSnapshot.empty
-        previous.tokensByCwd = ["/x": TokenCounts(input: 1, output: 2, cacheCreation: 3, cacheRead: 4)]
+        previous.tokensBySlug = ["-x": TokenCounts(input: 1, output: 2, cacheCreation: 3, cacheRead: 4)]
         previous.fleetSevenDayMean = 42
         previous.quotaFetchedAt = earlier
 
@@ -906,7 +1079,7 @@ final class UsageStoreTests: XCTestCase {
         let snapshot = await UsageStore.poll(client: client(transport(usage: nil, sessions: nil)),
                                              previous: previous,
                                              now: now)
-        XCTAssertEqual(snapshot.tokensByCwd, previous.tokensByCwd)
+        XCTAssertEqual(snapshot.tokensBySlug, previous.tokensBySlug)
         XCTAssertEqual(snapshot.fleetSevenDayMean, 42)
         XCTAssertEqual(snapshot.quotaFailure?.contains("/gw/usage"), true)
         XCTAssertEqual(snapshot.sessionsFailure?.contains("/gw/sessions"), true)
@@ -971,7 +1144,7 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertTrue(failure.contains("/gw/sessions: unreachable"), "got \(failure)")
         XCTAssertLessThan(elapsed, 5,
                           "a refused connection is immediate; this waited like a pass that hung")
-        XCTAssertTrue(snapshot.tokensByCwd.isEmpty)
+        XCTAssertTrue(snapshot.tokensBySlug.isEmpty)
         XCTAssertNil(snapshot.fleetSevenDayMean)
     }
 
