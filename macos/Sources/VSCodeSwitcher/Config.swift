@@ -11,8 +11,10 @@ struct Config: Sendable, Equatable {
     var projectRoots: [String]
     /// How deep below each root a project directory may sit. 1 = direct children.
     var scanDepth: Int
-    /// How far back the "projects" section counts Claude Code sessions when it
-    /// ranks projects by how much work has happened in them lately.
+    /// How far back Claude Code sessions are counted for the figure `--dump`
+    /// prints beside each project. The ranking itself does not use it: the
+    /// "projects" section is ordered by the time of the last session (SPEC
+    /// §2.2.1), whatever its age.
     var activityWindowDays: Int
     /// How long the pointer has to rest against the screen edge before the panel opens.
     var dwellMilliseconds: Int

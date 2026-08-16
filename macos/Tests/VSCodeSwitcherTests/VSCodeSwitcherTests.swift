@@ -1592,20 +1592,21 @@ final class WindowOrderingTests: XCTestCase {
     }
 }
 
-/// The order of the "projects" section: how much Claude Code work happened in
-/// each project inside the activity window. Directory mtime, which this used to
-/// be, does not move when a file inside the project is edited, so the order it
-/// produced looked arbitrary.
+/// The order of the "projects" section: when Claude Code work last happened in
+/// each project, newest first. Directory mtime, which this used to be, does not
+/// move when a file inside the project is edited, so the order it produced
+/// looked arbitrary; the key is the mtime of the newest session transcript
+/// instead. The count of sessions inside the window, which ordered this section
+/// for a while in between, answers "how much" rather than "where" and no longer
+/// takes part.
 final class ProjectRankingTests: XCTestCase {
 
     private func daysAgo(_ days: Double) -> Date {
         Date().addingTimeInterval(-days * 86_400)
     }
 
-    private func ranked(_ names: [String], _ activity: [String: ProjectActivity]) -> [String] {
-        var byPath: [String: ProjectActivity] = [:]
-        for (name, value) in activity { byPath["/p/\(name)"] = value }
-        let rows = names.map { name -> SwitcherRow in
+    private func rows(_ names: [String]) -> [SwitcherRow] {
+        names.map { name -> SwitcherRow in
             let project = TestFixtures.project(path: "/p/\(name)", rootName: name)
             return SwitcherRow(id: "project:\(project.path)",
                                kind: .project,
@@ -1623,40 +1624,56 @@ final class ProjectRankingTests: XCTestCase {
                                contextLimitTokens: nil,
                                lastActivity: nil)
         }
-        return DataSource.ranked(rows, activity: byPath).map(\.displayName)
     }
 
-    /// The reason the window is hard rather than a decayed sum: a project with
-    /// a big enough past would otherwise sit near the top forever. The whole of
-    /// this user's session history currently fits inside one month, so this case
-    /// cannot be observed on live data and only a test pins it.
-    func testAFewRecentSessionsBeatALargeOldPile() {
-        XCTAssertEqual(ranked(["ancient", "fresh"],
+    private func byPath(_ activity: [String: ProjectActivity]) -> [String: ProjectActivity] {
+        var result: [String: ProjectActivity] = [:]
+        for (name, value) in activity { result["/p/\(name)"] = value }
+        return result
+    }
+
+    private func ranked(_ names: [String], _ activity: [String: ProjectActivity]) -> [String] {
+        DataSource.ranked(rows(names), activity: byPath(activity)).map(\.displayName)
+    }
+
+    /// The case that made the rule change, in the numbers it was caught with:
+    /// `pebble` had 36 sessions in the window and none for eight days, while
+    /// `glazy_solver` had 7 and was being worked in that same day. Ordering by
+    /// the count put the closed project on top of the open one, which is the
+    /// opposite of what the section is opened to find.
+    func testALargePileOfOldSessionsLosesToOneToday() {
+        XCTAssertEqual(ranked(["pebble", "glazy_solver"],
+                              ["pebble": ProjectActivity(recentSessions: 36, lastSession: daysAgo(8)),
+                               "glazy_solver": ProjectActivity(recentSessions: 7, lastSession: daysAgo(0))]),
+                       ["glazy_solver", "pebble"])
+    }
+
+    /// And that is the whole rule: the newest session first, whatever the counts
+    /// say. Handed over in an order that says the opposite.
+    func testTheProjectsAreOrderedByTheNewestSession() {
+        XCTAssertEqual(ranked(["stale", "fresh", "middling"],
+                              ["stale": ProjectActivity(recentSessions: 64, lastSession: daysAgo(9)),
+                               "fresh": ProjectActivity(recentSessions: 1, lastSession: daysAgo(0)),
+                               "middling": ProjectActivity(recentSessions: 31, lastSession: daysAgo(3))]),
+                       ["fresh", "middling", "stale"])
+    }
+
+    /// The activity window no longer bounds the order. A session older than
+    /// `activityWindowDays` still places its project, and places it above one
+    /// whose newest session is older still — the window survives only as the
+    /// count `--dump` prints.
+    func testASessionOlderThanTheWindowStillPlacesItsProject() {
+        XCTAssertEqual(ranked(["ancient", "old", "live"],
                               ["ancient": ProjectActivity(recentSessions: 0, lastSession: daysAgo(200)),
-                               "fresh": ProjectActivity(recentSessions: 3, lastSession: daysAgo(1))]),
-                       ["fresh", "ancient"])
+                               "old": ProjectActivity(recentSessions: 0, lastSession: daysAgo(40)),
+                               "live": ProjectActivity(recentSessions: 3, lastSession: daysAgo(1))]),
+                       ["live", "old", "ancient"])
     }
 
-    func testMoreSessionsInTheWindowWins() {
-        XCTAssertEqual(ranked(["small", "big", "middle"],
-                              ["small": ProjectActivity(recentSessions: 7, lastSession: daysAgo(3)),
-                               "big": ProjectActivity(recentSessions: 64, lastSession: daysAgo(0)),
-                               "middle": ProjectActivity(recentSessions: 31, lastSession: daysAgo(3))]),
-                       ["big", "middle", "small"])
-    }
-
-    func testAnEqualCountGoesToTheFreshestSession() {
-        XCTAssertEqual(ranked(["stale", "recent"],
-                              ["stale": ProjectActivity(recentSessions: 3, lastSession: daysAgo(6)),
-                               "recent": ProjectActivity(recentSessions: 3, lastSession: daysAgo(1))]),
-                       ["recent", "stale"])
-    }
-
-    /// Nothing inside the window sinks below everything that has something, and
-    /// the sunk rows are ordered by the newest session they ever had. A project
-    /// that never hosted one at all goes below those, in the directory-mtime
-    /// order the index handed over.
-    func testProjectsWithNothingInTheWindowSink() {
+    /// A project that never hosted a session has no time at all and sinks below
+    /// every project that has one, keeping the directory-mtime order the index
+    /// handed it over in.
+    func testProjectsWithNoSessionAtAllSink() {
         XCTAssertEqual(ranked(["never-a", "old", "never-b", "older", "live"],
                               ["old": ProjectActivity(recentSessions: 0, lastSession: daysAgo(40)),
                                "older": ProjectActivity(recentSessions: 0, lastSession: daysAgo(90)),
@@ -1664,10 +1681,49 @@ final class ProjectRankingTests: XCTestCase {
                        ["live", "old", "older", "never-a", "never-b"])
     }
 
+    /// Rows the key cannot separate keep the order they arrived in: `sorted` is
+    /// not stable, so without the explicit tiebreak they would be free to swap
+    /// places between two snapshots a second apart. The counts differ here on
+    /// purpose — they are not allowed to break the tie either.
+    func testProjectsWithTheSameLastSessionKeepTheirArrivalOrder() {
+        let same = daysAgo(2)
+        XCTAssertEqual(ranked(["a", "b", "c"],
+                              ["a": ProjectActivity(recentSessions: 1, lastSession: same),
+                               "b": ProjectActivity(recentSessions: 40, lastSession: same),
+                               "c": ProjectActivity(recentSessions: 9, lastSession: same)]),
+                       ["a", "b", "c"])
+    }
+
     /// With no activity known at all — the default the pure `assemble` is called
     /// with in tests — the rows come back exactly as they arrived.
     func testNoActivityLeavesTheOrderAlone() {
         XCTAssertEqual(ranked(["a", "b", "c"], [:]), ["a", "b", "c"])
+    }
+
+    /// The tie-break, asked of the comparison itself rather than through
+    /// `sorted`. The test above goes through `sorted`, and `sorted` cannot show
+    /// this: it is only documented as unstable, while the implementation shipping
+    /// today leaves equal elements where they were — so with the arrival-index
+    /// line deleted the whole ranking suite stays green and the order becomes
+    /// whatever the next standard library feels like. Asked directly, the
+    /// comparison has to answer both ways round, and a comparison that has run
+    /// out of keys cannot.
+    func testTheComparisonSeparatesRowsTheStampsCannot() {
+        let pair = rows(["a", "b"])
+        let left = (offset: 0, element: pair[0])
+        let right = (offset: 1, element: pair[1])
+
+        // Neither project ever hosted a session: the real tie, and the one that
+        // happens on this machine — 63 projects of 93 (SPEC §2.2.1).
+        XCTAssertTrue(DataSource.ranksAbove(left, right, activity: [:]))
+        XCTAssertFalse(DataSource.ranksAbove(right, left, activity: [:]))
+
+        // And on stamps that are equal rather than absent.
+        let same = daysAgo(2)
+        let activity = byPath(["a": ProjectActivity(recentSessions: 1, lastSession: same),
+                               "b": ProjectActivity(recentSessions: 40, lastSession: same)])
+        XCTAssertTrue(DataSource.ranksAbove(left, right, activity: activity))
+        XCTAssertFalse(DataSource.ranksAbove(right, left, activity: activity))
     }
 }
 
@@ -1690,9 +1746,10 @@ final class ProjectActivityTests: XCTestCase {
         XCTAssertEqual(activity.lastSession?.timeIntervalSince(now) ?? 0, -0.5 * 86_400, accuracy: 1)
     }
 
-    /// The count is cached against the directory's mtime, and starting a session
-    /// writes a new file into it — which is exactly what moves that mtime.
-    func testANewSessionInvalidatesTheCachedCount() throws {
+    /// The listing is cached against the directory's mtime, and starting a
+    /// session writes a new file into it — which is exactly what moves that
+    /// mtime.
+    func testANewSessionInvalidatesTheCachedListing() throws {
         let root = try makeTemporaryDirectory()
         let path = "/Users/x/Data/Projects/glazy_solver"
         let now = Date()

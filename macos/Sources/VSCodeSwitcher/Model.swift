@@ -135,13 +135,18 @@ struct ProjectInfo: Sendable, Codable, Identifiable, Hashable {
     var mtime: Date
 }
 
-/// How much Claude Code work a project has seen, which is what orders the
-/// projects that have no window of their own.
+/// The Claude Code work a project has seen: when it last happened, and how much
+/// of it fell inside the activity window.
 struct ProjectActivity: Sendable, Equatable {
     /// Sessions whose transcript was last written inside the activity window.
+    /// Reported by `--dump` and used nowhere else, so only
+    /// `ClaudeSessions.activity` fills it; the snapshot path builds this value
+    /// from the stamp alone and leaves the count at zero. It stays part of the
+    /// type all the same: the tests that hold "the count orders nothing" have to
+    /// be able to hand `ranked` a large count next to an old stamp.
     var recentSessions: Int = 0
     /// When the newest session of this project was last written, of any age.
-    /// Breaks ties, and orders the projects with nothing inside the window.
+    /// This is what orders the projects that have no window of their own.
     var lastSession: Date?
 }
 
