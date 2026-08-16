@@ -51,9 +51,37 @@ final class SwitcherViewModel: ObservableObject {
     /// for the rest of the appearance and the list went back to the live order
     /// from the data layer, reshuffling under the pointer at every click.
     @Published private var windowOrder: [String]?
-    /// Set when the panel appears: the order above came from the cache and is
-    /// provisional until a snapshot whose sources were read after this instant
-    /// arrives. Cleared by that snapshot, and by the first click.
+    /// The same for the "projects" section, frozen at the same instants.
+    ///
+    /// That section moves under the pointer too, and for the same reason: it is
+    /// ordered by the time of the last session (SPEC §2.2.1), which is the mtime
+    /// of a transcript an agent writes to several times a minute. Two projects
+    /// with no editor window and a working agent in each — the ordinary shape of
+    /// "Accessibility not granted", where every live agent is in this section —
+    /// swapped places about once a second while the panel was up.
+    ///
+    /// Newcomers are woven in by `merged` rather than appended, which is where
+    /// this parts company with the windows above. An orphan `cwd:` row belongs
+    /// at the head of the section (SPEC §2.2.1) — it exists only because an
+    /// agent is running in that directory — and appending it would drop a live
+    /// agent to position 93 of 93, the exact defect that put orphans on top in
+    /// the first place. `merged` places it by the fresh ranking, which has the
+    /// orphans first, so the invariant holds without a rule of its own.
+    ///
+    /// `merged`'s divergence branch — where the two sides disagree about the
+    /// known rows — is reachable here in ordinary use, unlike above: this key
+    /// only moves forward, so rows overtake each other while the panel is up,
+    /// and a newcomer ranked third can land first. Its ceiling is the position
+    /// just under the orphans, which stay anchored by the frozen order.
+    ///
+    /// That one rule runs from the very first snapshot after the show, stale or
+    /// fresh, so this order has no provisional stage and needs no re-freeze of
+    /// its own the way the windows do.
+    @Published private var projectOrder: [String]?
+    /// Set when the panel appears: the *window* order above came from the cache
+    /// and is provisional until a snapshot whose sources were read after this
+    /// instant arrives. Cleared by that snapshot, and by the first click. The
+    /// project order has no provisional stage — see `projectOrder`.
     private var orderPendingSince: Date?
 
     /// A row was clicked: focus that window or open that project.
@@ -88,6 +116,10 @@ final class SwitcherViewModel: ObservableObject {
         // and the slide-in 140 ms, so this lands exactly when the panel has
         // arrived and become worth aiming at. Replacing the whole order there
         // reshuffled the list under a pointer already on its way to a row.
+        //
+        // Only the windows are redone here. The projects have no provisional
+        // stage to redo: the rule below is not held back by the wait and has
+        // been weaving newcomers in by the fresh ranking since the show.
         if let pendingSince = orderPendingSince, snapshot.generatedAt >= pendingSince {
             windowOrder = Self.merged(windowOrder ?? [], with: snapshot.openWindows.map(\.id))
             orderPendingSince = nil
@@ -112,15 +144,44 @@ final class SwitcherViewModel: ObservableObject {
             }
             if order.count != frozen.count { windowOrder = order }
         }
+        // The same for the projects, with two differences. A newcomer goes where
+        // the fresh ranking puts it instead of at the end — see `projectOrder` —
+        // and the rule is not held back while the window re-freeze is pending,
+        // so it does duty as that re-freeze too — on the first snapshot after
+        // the show, whatever the age of it.
+        //
+        // The wait exists so that a stale cache cannot pin a newcomer to the
+        // bottom until the panel closes; here it did that very thing. The cache
+        // is up to two seconds old, so an agent started a second before the panel
+        // was summoned is missing from the frozen order, and while the wait was
+        // on, a row the frozen order had never heard of fell through to the tail
+        // `ordered` appends — for the ~1 s until a snapshot read after the show
+        // arrives. For an orphan `cwd:` row the tail is the one place it must
+        // never be (SPEC §2.2.1): that is a live agent at position 93 of 93.
+        // Nothing is risked by acting on a stale snapshot either, because there
+        // is no wholesale replacement here to get wrong — `merged` only ever
+        // inserts rows the frozen order does not have, and the ranking that
+        // places them is the one that reported the row in the first place.
+        //
+        // Only when there is a newcomer at all: `merged` walks the fresh order
+        // looking each id up in the frozen one, and this section is a hundred
+        // rows long.
+        if let frozen = projectOrder {
+            let known = Set(frozen)
+            if snapshot.projects.contains(where: { !known.contains($0.id) }) {
+                projectOrder = Self.merged(frozen, with: snapshot.projects.map(\.id))
+            }
+        }
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         if let id = Self.frontmostWindowID(in: snapshot, frontmostPID: pid) { frontmostRowID = id }
     }
 
     /// Called when the panel opens, so every appearance starts on a clean list
-    /// and a freshly frozen window order.
+    /// and freshly frozen section orders.
     func panelDidShow() {
         query = ""
         windowOrder = snapshot.openWindows.map(\.id)
+        projectOrder = snapshot.projects.map(\.id)
         orderPendingSince = Date()
         panelVisible = true
     }
@@ -150,6 +211,14 @@ final class SwitcherViewModel: ObservableObject {
     /// project. Settling an empty order there cancelled the re-freeze that was
     /// the one thing left to fix it, and every window opened from the panel
     /// afterwards was ordered by the live order again.
+    ///
+    /// Only the windows are written down. The projects have been frozen since
+    /// the panel appeared — `panelDidShow` records them from the cache, and
+    /// there is no raw order for them to fall through to — and every row that
+    /// has turned up since was woven into that same order by the newcomer rule
+    /// as it appeared, whatever the age of the snapshot that brought it. The
+    /// displayed order and the frozen one are therefore the same list, and the
+    /// click has nothing left to settle there.
     func rowActivated(_ row: SwitcherRow) {
         if orderPendingSince != nil {
             let settled = Self.ordered(snapshot.openWindows, by: windowOrder).map(\.id)
@@ -174,40 +243,49 @@ final class SwitcherViewModel: ObservableObject {
             result.append(SwitcherSection(title: "Открытые окна", rows: windows))
         }
 
-        // Every project, in the order `DataSource.ranked` put them in. There was
-        // a cap of thirty here, and it cost more than it saved: the section had
-        // to be read as "the top of the list" rather than "the list", and the
-        // rows it dropped were exactly the ones the ranking is now good at
-        // finding. `LazyVStack` builds only the rows on screen, so the length is
-        // not what the list costs.
-        let projects = snapshot.projects.filter { Self.matches($0, needle) }
+        // Every project, in the order frozen when the panel appeared — the one
+        // `DataSource.ranked` gave until then. There was a cap of thirty here,
+        // and it cost more than it saved: the section had to be read as "the top
+        // of the list" rather than "the list", and the rows it dropped were
+        // exactly the ones the ranking is now good at finding. `LazyVStack`
+        // builds only the rows on screen, so the length is not what the list
+        // costs.
+        let projects = Self.ordered(snapshot.projects, by: projectOrder)
+            .filter { Self.matches($0, needle) }
         if !projects.isEmpty {
             result.append(SwitcherSection(title: "Проекты", rows: projects))
         }
         return result
     }
 
-    /// Puts the open windows back into the order frozen at the last show.
+    /// Puts a section's rows back into the order frozen at the last show. Used
+    /// by both sections; the data layer ranks each of them by a stamp an agent
+    /// moves several times a minute.
     ///
-    /// `DataSource` hands them over newest-message-first, which is correct of it
-    /// and unusable live: the list would move whenever an agent said something,
-    /// and raising a window — exactly what the panel is for — used to do the same
-    /// back when the order was the z-order. Either way the next snapshot, one
-    /// second later at most, shifted rows under the pointer, and stepping through
-    /// several windows meant chasing a list that reshuffled after each click.
-    /// Only the sequence is frozen; the contents of the rows keep updating.
+    /// `DataSource` hands the windows over newest-message-first and the projects
+    /// last-session-first, which is correct of it and unusable live: the list
+    /// would move whenever an agent said something, and raising a window —
+    /// exactly what the panel is for — used to do the same back when the order
+    /// was the z-order. Either way the next snapshot, one second later at most,
+    /// shifted rows under the pointer, and stepping through several rows meant
+    /// chasing a list that reshuffled after each click. Only the sequence is
+    /// frozen; the contents of the rows keep updating.
     ///
-    /// Matching is by `row.id`, which carries the `CGWindowID`, so a window that
-    /// was closed simply drops out and leaves no hole, and one opened while the
-    /// panel is up is appended rather than wedged into the middle. The order is
-    /// taken afresh at every show — from the first snapshot read after that show
-    /// (see `update(snapshot:)`) — so the list is fresh again, the window with the
-    /// last message on top, as soon as the panel is reopened.
+    /// Matching is by `row.id` — the `CGWindowID` for a window, the path for a
+    /// project — so a row that went away simply drops out and leaves no hole.
+    /// One that turned up is appended here, but it rarely gets that far:
+    /// `update(snapshot:)` records newcomers into the frozen order as they
+    /// appear, appending windows and weaving projects in by the fresh ranking.
+    /// The order is taken afresh at every show — from the first snapshot read
+    /// after that show (see `update(snapshot:)`) — so the list is fresh again,
+    /// the window with the last message and the project worked in last on top,
+    /// as soon as the panel is reopened.
     ///
     /// `nil` means no order has been frozen yet, and only then is the data
-    /// layer's own order handed back untouched. An order frozen while no window was open is `[]`,
-    /// which is a frozen order like any other: its rows are all newcomers and
-    /// keep the sequence `update(snapshot:)` recorded them in.
+    /// layer's own order handed back untouched. An order frozen while the
+    /// section was empty is `[]`, which is a frozen order like any other: its
+    /// rows are all newcomers and keep the sequence `update(snapshot:)` recorded
+    /// them in.
     static func ordered(_ rows: [SwitcherRow], by order: [String]?) -> [SwitcherRow] {
         guard let order else { return rows }
         var position: [String: Int] = [:]
@@ -223,9 +301,10 @@ final class SwitcherViewModel: ObservableObject {
     }
 
     /// Folds a fresh order into an order already frozen, by inserting only the
-    /// windows the frozen one has never heard of.
+    /// rows the frozen one has never heard of.
     ///
-    /// This runs once per appearance, at the worst possible moment: the panel
+    /// For the windows this runs once per appearance, at the worst possible
+    /// moment: the panel
     /// has just finished sliding in and the pointer is already travelling
     /// towards a row. Taking the fresh order wholesale moved every row that had
     /// moved since the cached snapshot was read — for the sake of the one window
@@ -256,6 +335,13 @@ final class SwitcherViewModel: ObservableObject {
     /// the next show re-freezes from scratch, and the alternative — dropping the
     /// second side — sends a window with genuinely fresh activity to the bottom
     /// in the far commoner case above.
+    ///
+    /// For the projects this is also the standing newcomer rule, not just the
+    /// re-freeze: a row appearing there is an agent starting up outside the scan
+    /// roots or a project whose window has just closed, and both have a place in
+    /// the fresh ranking that the end of the list is not. It is what keeps
+    /// orphan `cwd:` rows at the head of that section (SPEC §2.2.1) — they lead
+    /// the fresh order, so they are inserted at the front.
     static func merged(_ order: [String], with fresh: [String]) -> [String] {
         var result = order
         var anchor: Int?
