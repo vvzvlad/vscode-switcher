@@ -1762,6 +1762,41 @@ final class ProjectActivityTests: XCTestCase {
                                                projectsDirectory: root).recentSessions, 2)
     }
 
+    /// Working on in a session that is already open moves that transcript's
+    /// mtime and nothing else: the directory's own mtime and size stay put,
+    /// because no entry was added or removed. So the timestamps must be read
+    /// fresh every time — cached alongside the listing they froze at the moment
+    /// the last session was *started*, and since `lastSession` is what orders
+    /// the section (§2.2.1), the project being worked in right now would sit
+    /// where it stood hours ago. The gap is 1.7 h at the median on the owner's
+    /// machine and 222 h at the worst.
+    func testWritingIntoAnOpenSessionMovesLastSessionWithoutANewFile() throws {
+        let root = try makeTemporaryDirectory()
+        let path = "/Users/x/Data/Projects/pebble"
+        let now = Date()
+        try makeSessions(in: root, forPath: path, mtimes: [now.addingTimeInterval(-8 * 86_400)])
+        let directory = root.appendingPathComponent(ClaudeSessions.slug(forPath: path))
+        let before = try FileManager.default.attributesOfItem(atPath: directory.path)[.modificationDate] as? Date
+        // Unwrapped rather than defaulted: a `nil` here has to fail the test, and
+        // any default value stands a chance of landing inside the tolerance of
+        // the number it is compared against.
+        let stale = try XCTUnwrap(ClaudeSessions.activity(forPath: path, windowDays: 30, now: now,
+                                                          projectsDirectory: root).lastSession)
+        XCTAssertEqual(stale.timeIntervalSince(now), -8 * 86_400, accuracy: 1)
+
+        let transcript = try XCTUnwrap(try FileManager.default
+            .contentsOfDirectory(atPath: directory.path).first { $0.hasSuffix(".jsonl") })
+        try FileManager.default.setAttributes([.modificationDate: now],
+                                              ofItemAtPath: directory.appendingPathComponent(transcript).path)
+
+        // The directory itself did not move, which is the whole point.
+        XCTAssertEqual(try FileManager.default
+            .attributesOfItem(atPath: directory.path)[.modificationDate] as? Date, before)
+        let last = try XCTUnwrap(ClaudeSessions.activity(forPath: path, windowDays: 30, now: now,
+                                                         projectsDirectory: root).lastSession)
+        XCTAssertEqual(last.timeIntervalSince(now), 0, accuracy: 1)
+    }
+
     /// A project that never hosted a session has no directory here at all, and
     /// some directories that do exist hold no transcript — worktree snapshots,
     /// sessions since deleted. Both are ordinary.
