@@ -651,7 +651,7 @@ final class StatusBadgeTests: XCTestCase {
 @MainActor
 final class RowTitleTests: XCTestCase {
 
-    private func row(working: Int, subagents: Int) -> SwitcherRow {
+    private func row(working: Int, subagents: Int, name: String = "vscode-switcher") -> SwitcherRow {
         var sessions = (0..<max(working, 1)).map {
             TestFixtures.session(id: "s\($0)", cwd: "/tmp/p", state: working > 0 ? .working : .idle)
         }
@@ -659,7 +659,7 @@ final class RowTitleTests: XCTestCase {
         let aggregate = DataSource.aggregate(sessions)
         return SwitcherRow(id: "project:/tmp/p",
                            kind: .project,
-                           displayName: "vscode-switcher",
+                           displayName: name,
                            colorHex: "#000000",
                            project: nil,
                            window: nil,
@@ -720,6 +720,12 @@ final class RowLayoutTests: XCTestCase {
         }
         func span(leftOf x: Double) -> ClosedRange<Double>? {
             let columns = ink.filter { $0 < x }
+            return columns.isEmpty ? nil : columns.min()!...columns.max()!
+        }
+        /// Ink inside a band, so a measurement can leave out both the colour bar
+        /// on the left and the indicator on the right.
+        func span(from: Double, to: Double) -> ClosedRange<Double>? {
+            let columns = ink.filter { $0 >= from && $0 <= to }
             return columns.isEmpty ? nil : columns.min()!...columns.max()!
         }
         /// True when nothing at all is drawn between the two points.
@@ -827,6 +833,32 @@ final class RowLayoutTests: XCTestCase {
             .padding(.horizontal, 6)
             .frame(width: width))
     }
+
+    /// Where the colour bar's ink sits in a rendered row: 4 pt of bar behind the
+    /// list's 6 pt of padding and the row's own 7. Measured 13.00…16.75.
+    ///
+    /// It is worth a constant because it is in front of the name in *every* row
+    /// and never moves: a span taken from the left edge of the row is the bar's
+    /// whatever the name does, which is how "the name is not a stump" once
+    /// passed on a row that had no name at all.
+    private static let colourBar: ClosedRange<Double> = 13.0...16.75
+
+    /// The longest real project name on this machine, 36 characters and no
+    /// spaces in it — the row where the name and the count fight for the line.
+    private static let longestName = "wirenboard/node-red-contrib-wirenboard"
+
+    /// The least ink the name may be left with while the count is still drawn.
+    ///
+    /// Not the width of four glyphs, because that is not what a span across the
+    /// name measures: the ellipsis is inside the span too, and so is the gap in
+    /// front of it. At the floor the name renders `wire…` — 37.00 pt in all,
+    /// 25.75 of them glyphs, 1.75 the gap, 9.50 the three dots. One character
+    /// less is `wir…`, 29.25 pt in the row. The threshold sits between those two
+    /// with 3.75 pt of slack either way: enough to fail a floor that has dropped
+    /// a character, enough to survive the half-point of glyph drift an OS update
+    /// can bring. Asserting the glyphs' own 25.75 instead let `wir…` through, so
+    /// every floor from 31 pt up passed a check that promises four characters.
+    private static let nameSpanFloor: Double = 33
 
     /// Where the badge lands in a whole row: the last box-width before the row's
     /// trailing padding, with the list's own padding outside that.
@@ -986,38 +1018,146 @@ final class RowLayoutTests: XCTestCase {
     /// takes any value above zero — the name is at its floor and the count is
     /// still whole, which is the middle rung of the ladder doing its job: 40 pt
     /// answers the fit question, the rest of the line is still drawn in, and at
-    /// least 25 pt of ink (four characters) survives.
+    /// least `nameSpanFloor` of the name survives — 33 pt, which is four
+    /// characters and their ellipsis. Measured without the colour bar in front
+    /// of it: the bar's own 13.00…16.75 is in every row and would carry any such
+    /// assertion on its own.
     ///
     /// Where that rung gives out was measured by sweeping the width a point at a
     /// time against the longest real name: the count is drawn down to 188 pt with
     /// one digit, 193 with two, 201 with three. Hence the pairs — 200 pt is
-    /// below the three-digit line, and the far side of it is the test after this
-    /// one. (A short name keeps its count further down still, 156 pt for a
-    /// single character: the first rung fits where the second does not.)
+    /// below the three-digit line. The two tests below take it from here: the
+    /// sweep walks every width down to where the rung gives out, and the
+    /// narrow-panel one stands on the far side of it. (A short name keeps its
+    /// count further down still, 156 pt for a single character: the first rung
+    /// fits where the second does not.)
     func testALongNameGivesWayBeforeTheCountDoes() throws {
-        let longest = "wirenboard/node-red-contrib-wirenboard"
-
         for (width, count) in [(Config.default.panelWidth, 5), (Config.default.panelWidth, 123),
                                (240.0, 5), (240.0, 123), (200.0, 5)] {
-            let slot = badgeSlot(inRowOfWidth: width)
-            let labelWidth = try inkWidthOfLabel(count: count)
-            let rendered = try renderRow(status: .blocked,
-                                         count: count,
-                                         name: longest,
-                                         topic: nil,
-                                         width: width)
-            let text = try XCTUnwrap(rendered.span(leftOf: slot.lowerBound - 3), "no title drawn")
-            // Half a point of slack: the label starts at a fractional x in the
-            // row and the antialiasing of its first stem can fall either side of
-            // a quarter-point column.
-            let labelStart = text.upperBound - labelWidth - 0.5
-            XCTAssertTrue(rendered.isBlank(from: labelStart - 2.5, to: labelStart - 0.5),
-                          "the name ran into the label — width=\(width) count=\(count)")
-            let name = try XCTUnwrap(rendered.span(leftOf: labelStart - 2.5),
-                                     "no name drawn — width=\(width) count=\(count)")
-            XCTAssertGreaterThanOrEqual(name.upperBound - name.lowerBound, 25,
-                                        "the name is down to a stump — width=\(width) count=\(count)")
+            let drawn = try countIsDrawnAboveTheNameFloor(width: width,
+                                                         count: count,
+                                                         name: Self.longestName,
+                                                         labelWidth: try inkWidthOfLabel(count: count))
+            XCTAssertTrue(drawn, "the count went away already at \(width) pt — count=\(count)")
         }
+    }
+
+    /// The top rung, which neither the test above nor the sweep below ever
+    /// reaches: both are run against the longest real name, which has not fitted
+    /// whole since 380 pt, so both of them land on the middle rung and a build
+    /// with the top rung deleted passes them all.
+    ///
+    /// A short name is where the top rung is the one that fits, and it fits
+    /// further down than the middle one can: the middle rung asks for 40 pt of
+    /// name whatever the name is, the top rung asks for the name's own width.
+    /// Measured against `p`, the count survives down to 156 pt with one digit,
+    /// 162 with two, 170 with three; the longest name loses a one-digit count
+    /// already at 188. So the width here is between those two, halfway, with
+    /// 16 pt of drift in either direction before the test stops meaning what it
+    /// says — and both halves are asserted, because "the count is drawn" alone
+    /// would also pass if the middle rung had somehow reached down here.
+    func testAShortNameKeepsItsCountWhereTheFloorWouldNotFit() throws {
+        let width = 172.0
+        let labelWidth = try inkWidthOfLabel(count: 5)
+        let short = try nameInkBesideTheCount(width: width, count: 5, name: "p", labelWidth: labelWidth)
+        XCTAssertNotNil(short, "a one-character name lost its count at \(width) pt")
+        let long = try nameInkBesideTheCount(width: width,
+                                             count: 5,
+                                             name: Self.longestName,
+                                             labelWidth: labelWidth)
+        XCTAssertNil(long, "the middle rung reached \(width) pt, so the count there proves nothing")
+    }
+
+    /// And the floor holds all the way down to where the rung gives out, not
+    /// merely at the widths named above.
+    ///
+    /// This is the assertion that pins `nameFloorWidth` to a number. At 200 pt
+    /// and up the floor is not binding — the name is offered the rest of the
+    /// line and takes 44.75 pt of ink or more — so those widths draw the same
+    /// row whatever the floor is set to, and a floor of 5 pt passed them all.
+    /// What a lower floor really does is keep the count alive further down, on
+    /// rows where the name is already a stump: measured at 20 pt, the count
+    /// still draws at 178 pt beside 24.25 pt of name (`wi…`) and at 169 pt
+    /// beside 9.50 pt (the ellipsis alone, no name at all). Sweeping every
+    /// width down to the narrow panel of the next test is what catches that.
+    ///
+    /// One digit, because the shortest label is the one that survives furthest
+    /// down and squeezes the name hardest.
+    func testTheNameKeepsItsFloorWhereverTheCountIsDrawn() throws {
+        // From just above the three-digit line — the widths above it are the
+        // test before this one — down to the panel of the narrow-panel test.
+        var width = 205.0
+        var widthsWithACount = 0
+        let labelWidth = try inkWidthOfLabel(count: 5)
+        while width >= 150 {
+            if try countIsDrawnAboveTheNameFloor(width: width,
+                                                 count: 5,
+                                                 name: Self.longestName,
+                                                 labelWidth: labelWidth) {
+                widthsWithACount += 1
+            }
+            width -= 1
+        }
+        // And the sweep is not a sweep over rows that all dropped the count,
+        // which would assert nothing at all. One digit reaches 188 pt, so
+        // eighteen of these widths draw it — and the assertion is deliberately
+        // far below that. Like the badge-slot check (§4) this is a canary rather
+        // than the requirement itself, and there the resemblance ends: that one
+        // is deliberately tight, a quarter of a point, so that glyph drift is
+        // what trips it. This one is deliberately loose. What it guards against
+        // is a sweep gone empty (a floor of 60 pt draws no count at any of these
+        // widths at all), not the exact place the rung gives out, which an OS
+        // metrics change may move by a point or two on its own.
+        XCTAssertGreaterThanOrEqual(widthsWithACount, 8)
+    }
+
+    /// One rung of the ladder at one width: is the count still drawn whole, and
+    /// if it is, how much ink is the name in front of it left with? `nil` when
+    /// the row dropped the count altogether.
+    ///
+    /// Whether the count is drawn is decided against the same row without one,
+    /// because a row that dropped it draws exactly what a count-less row draws.
+    /// The name is measured between the colour bar and the label, so that what
+    /// the floor promises — the *name*, not the row — is what is counted.
+    ///
+    /// The label's own ink is passed in rather than measured here: it does not
+    /// depend on the width, and rendering it again at every step of the sweep
+    /// was a third of the whole suite's running time.
+    private func nameInkBesideTheCount(width: Double,
+                                       count: Int,
+                                       name: String,
+                                       labelWidth: Double) throws -> Double? {
+        let rendered = try renderRow(status: .blocked, count: count, name: name, topic: nil, width: width)
+        let bare = try renderRow(status: .blocked, count: 0, name: name, topic: nil, width: width)
+        guard rendered.ink != bare.ink else { return nil }
+
+        let slot = badgeSlot(inRowOfWidth: width)
+        let text = try XCTUnwrap(rendered.span(leftOf: slot.lowerBound - 3), "no title drawn")
+        // Half a point of slack: the label starts at a fractional x in the row
+        // and the antialiasing of its first stem can fall either side of a
+        // quarter-point column.
+        let labelStart = text.upperBound - labelWidth - 0.5
+        XCTAssertTrue(rendered.isBlank(from: labelStart - 2.5, to: labelStart - 0.5),
+                      "the name ran into the label — width=\(width) count=\(count)")
+        let nameInk = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
+                                                  to: labelStart - 2.5),
+                                    "no name drawn — width=\(width) count=\(count)")
+        return nameInk.upperBound - nameInk.lowerBound
+    }
+
+    /// The same thing where the floor is what is being asked about: the count is
+    /// drawn *and* the name in front of it is not a stump.
+    private func countIsDrawnAboveTheNameFloor(width: Double,
+                                               count: Int,
+                                               name: String,
+                                               labelWidth: Double) throws -> Bool {
+        guard let nameInk = try nameInkBesideTheCount(width: width,
+                                                      count: count,
+                                                      name: name,
+                                                      labelWidth: labelWidth) else { return false }
+        XCTAssertGreaterThanOrEqual(nameInk, Self.nameSpanFloor,
+                                    "the name is down to a stump — width=\(width) count=\(count)")
+        return true
     }
 
     /// Below that floor the count is what goes, and it goes whole.
@@ -1034,17 +1174,24 @@ final class RowLayoutTests: XCTestCase {
     /// would fail it too: `fixedSize` alone pushed the colour bar 5.5 pt out of
     /// the row's own frame here.
     func testANarrowPanelDropsTheCountAndKeepsTheName() throws {
-        let longest = "wirenboard/node-red-contrib-wirenboard"
         let width = 150.0
-        let bare = try renderRow(status: .blocked, count: 0, name: longest, topic: nil, width: width)
-        let bareSpan = try XCTUnwrap(bare.span)
-        // Not two empty rows being compared: the name has most of the line.
-        XCTAssertGreaterThan(bareSpan.upperBound - bareSpan.lowerBound, 60)
+        let bare = try renderRow(status: .blocked, count: 0, name: Self.longestName, topic: nil, width: width)
+        // Not two empty rows being compared — and the row's own span cannot say
+        // so, because the colour bar and the indicator hold both its ends: with
+        // no name at all it measures the same 121.50 pt (13.00…134.50) as with
+        // the longest one. So the name's own ink is what is asked for, between
+        // the bar and the badge: 68.25 pt of it here, 26.25…94.50, which is the
+        // name truncated to `wirenboa…` (68.25 pt rendered on its own). The
+        // whole `wirenboard/node-…` would be 123.50 pt and has no room here.
+        let bareName = try XCTUnwrap(bare.span(from: Self.colourBar.upperBound + 0.25,
+                                               to: badgeSlot(inRowOfWidth: width).lowerBound - 3),
+                                     "the bare row drew no name to compare against")
+        XCTAssertGreaterThan(bareName.upperBound - bareName.lowerBound, 60)
 
         for count in [5, 123] {
             let rendered = try renderRow(status: .blocked,
                                          count: count,
-                                         name: longest,
+                                         name: Self.longestName,
                                          topic: nil,
                                          width: width)
             XCTAssertEqual(rendered.ink, bare.ink, "count=\(count) still drew something at 150 pt")
@@ -1057,6 +1204,28 @@ final class RowLayoutTests: XCTestCase {
                                             to: text.upperBound - labelWidth - 0.5),
                            "there is a label-shaped gap in the title — count=\(count)")
         }
+    }
+
+    /// Every measurement above starts its band at the right-hand edge of
+    /// `colourBar`, a range written down by hand, and reads whatever is left of
+    /// the badge as the name. Both halves of that are worth one cheap render: a
+    /// row with no name at all draws the bar exactly where the constant says,
+    /// and nothing whatever between it and the indicator. If a future row grows
+    /// something in that band — a second bar, a leading icon — the assertions
+    /// that ask "is the name still there" would start passing on its ink
+    /// instead, which is the very hole this constant was introduced to close.
+    func testNothingButTheNameLivesBetweenTheBarAndTheSlot() throws {
+        let width = 150.0
+        let rendered = try renderRow(status: .blocked, count: 0, name: "", topic: nil, width: width)
+        let bar = try XCTUnwrap(rendered.span(leftOf: Self.colourBar.upperBound + 3),
+                                "the row drew no colour bar")
+        XCTAssertEqual(bar.lowerBound, Self.colourBar.lowerBound, accuracy: 0.01)
+        XCTAssertEqual(bar.upperBound, Self.colourBar.upperBound, accuracy: 0.01)
+        // Measured: the bar ends at 16.75 and the next ink in the row is the
+        // indicator at 125.75.
+        XCTAssertNil(rendered.span(from: Self.colourBar.upperBound + 0.25,
+                                   to: badgeSlot(inRowOfWidth: width).lowerBound - 3),
+                     "a nameless row drew something between the bar and the slot")
     }
 
     /// The count's own ink, rendered on its own in the font the row draws it in.

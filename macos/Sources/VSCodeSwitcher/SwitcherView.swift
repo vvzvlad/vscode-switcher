@@ -536,7 +536,11 @@ struct SwitcherRowView: View {
     /// 5.5 pt to the left of where it belongs. Giving the name a minimum width
     /// instead keeps the name but truncates the count, and a truncated count is a
     /// lie: measured at 150 pt it is the same 25.75 pt stump for 5 as for 124.
-    /// `RowLayoutTests` renders 380, 200 and 150.
+    /// `RowLayoutTests` renders 380, 240 and 200 with the count still there, 150
+    /// with it gone, and sweeps every width in between: taking the middle rung
+    /// out is caught at all three of the first ones alike — the top rung has not
+    /// fitted the longest name since 380 — while lowering the floor changes
+    /// nothing at any of them and is caught only in the sweep.
     @ViewBuilder private var titleLine: some View {
         if let countLabel = Self.countLabel(for: row) {
             ViewThatFits(in: .horizontal) {
@@ -583,11 +587,18 @@ struct SwitcherRowView: View {
 
     /// The narrowest the name may be squeezed to while the count is still drawn.
     /// Measured, not guessed: in the row's own font a 40 pt frame renders four
-    /// characters and the ellipsis (25.75 pt of glyph, 5.75 of ellipsis); 30 pt
-    /// renders two. Four is the least that still says *which* project this is,
-    /// so below this the count is what goes.
+    /// characters and the ellipsis — `wire…`, 37.00 pt of ink in all: 25.75 of
+    /// glyphs, then 1.75 of gap, then 9.50 of the three dots. 30 pt renders two,
+    /// `wi…`. Four is the least that still says *which* project this is, so
+    /// below this the count is what goes.
+    ///
+    /// Two points of room under it, and measured in the row rather than on the
+    /// frame alone: swept against the floor assertion, 38 pt still keeps four
+    /// characters at every width, 37.5 loses them at one and 36 at two. The
+    /// frame on its own answers differently, because `idealWidth` only settles
+    /// whether the pair fits and the real proposal passes through afterwards —
+    /// so a number measured there does not carry over to here.
     static let nameFloorWidth: CGFloat = 40
-
 
     /// The count as the title line carries it, or `nil` when there is nothing
     /// running: at zero the brackets go away entirely and the row is just its
