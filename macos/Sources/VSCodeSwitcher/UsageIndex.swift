@@ -1,77 +1,81 @@
 import Foundation
 
-/// Where each Claude Code session ran, and how the gateway's per-session figures
-/// fold onto those directories.
+/// Which directories hold each Claude Code session's transcript, and how the
+/// gateway's per-session figures fold onto those directories.
 ///
 /// The gateway accounts by `session_id` and knows nothing about projects — it
 /// never sees a working directory. The join is done here, against what Claude
-/// Code leaves on disk: `~/.claude/projects/<slug>/<sessionId>.jsonl`.
+/// Code leaves on disk: `~/.claude/projects/<slug>/<sessionId>.jsonl`. Nothing
+/// in this file opens a transcript; the *name of the directory* is the whole
+/// signal, and the directories are listed, never read.
+///
+/// That is a deliberate retreat from reading the file, and it is worth spelling
+/// out why, because the head of a transcript looks like a better answer and is
+/// not one. `cwd` is a field of every record rather than a property of the
+/// session: a session walks between directories while it runs — 28 of the 30
+/// local sessions in the live 7-day window touched more than one, median 4 and
+/// maximum 18 (measured 2026-08-17). Worse, when a session is *resumed* in
+/// another directory Claude Code keeps the identifier, opens a file under the
+/// new slug and seeds it with a copy of the old history: both copies then begin
+/// with the same record, to the millisecond, and neither the first record nor
+/// the last of the new copy need name the directory it sits in. On the live pair
+/// `65f9afa1` the copy under the `research-mcp` slug opens on `home-network` and
+/// ends on `ukuetis_site`. A head read would have answered `home-network` for a
+/// file that belongs to `research-mcp` — confidently, and wrongly.
+///
+/// The slug cannot be wrong that way: Claude Code writes the file under the slug
+/// of the directory the session was started in, so the directory name *is* the
+/// record of where this life of the session began. It is a one-way function
+/// (`ClaudeSessions.slug(forPath:)` replaces every character outside
+/// `[A-Za-z0-9-]`, not just the separator), so it is never decoded — the match
+/// runs forwards, from each known project to its slug (`DataSource`).
+///
+/// So the promise every figure downstream makes is exactly this: **the spend of
+/// the sessions started in a project**, where "started" means this life of the
+/// session began there. Not the spend incurred inside it — the gateway reports
+/// one aggregate per session and offers nothing to split it by, and dividing it
+/// by record counts would be inventing data.
 enum UsageIndex {
 
-    /// How much of a transcript's head is read looking for the working
-    /// directory. Transcripts reach tens of megabytes and are never read whole;
-    /// `cwd` is written into the records themselves, so the first few kilobytes
-    /// carry it.
-    static let headBytes = 64 * 1024
-
     private static let listingCache = FileDerivedCache<[String]>()
-    private static let cwdCache = CwdCache()
 
-    /// Absolute working directory of each of the given sessions.
+    /// The slug directories that hold a transcript of each of the given
+    /// sessions — distinct and sorted.
     ///
-    /// Sessions with no local transcript are simply absent from the result: the
+    /// Usually one, and the list is the point: a `session_id` is **not** unique
+    /// across `~/.claude/projects/`. Five identifiers on this machine sit in two
+    /// slug directories each, and those are not two sessions that collided but
+    /// one session resumed in another directory. Taking whichever copy the walk
+    /// reached first attributed the spend to whichever project won a race nobody
+    /// was watching, and the winner could change between two polls.
+    ///
+    /// Sessions with no transcript here are simply absent from the result: the
     /// agent nodes run their own Claude Code elsewhere and report to the same
     /// gateway, which is ordinary rather than an error.
     ///
-    /// The directory *listings* are cached against directory mtime, which moves
-    /// exactly when a session file appears or disappears — that is, exactly when
-    /// a listing changes. Timestamps are never cached that way (appending to an
-    /// open transcript moves neither), but nothing here reads a timestamp: only
-    /// names.
-    static func cwdBySessionId(for sessionIds: Set<String>,
-                               projectsDirectory: URL = ClaudeSessions.projectsDirectory) -> [String: String] {
+    /// The listings are cached against directory mtime, which moves exactly when
+    /// a session file appears or disappears — that is, exactly when a listing
+    /// changes. Timestamps are never cached that way (appending to an open
+    /// transcript moves neither), but nothing here reads a timestamp: only names.
+    static func slugsBySessionId(for sessionIds: Set<String>,
+                                 projectsDirectory: URL = ClaudeSessions.projectsDirectory) -> [String: [String]] {
         guard !sessionIds.isEmpty else { return [:] }
 
-        var result: [String: String] = [:]
-        var wanted: Set<String> = []
-        for sessionId in sessionIds {
-            // A resolved session needs no file at all on later polls: its
-            // working directory was fixed when it started.
-            if let cwd = cwdCache.value(for: sessionId) {
-                result[sessionId] = cwd
-            } else {
-                wanted.insert(sessionId)
-            }
-        }
-        guard !wanted.isEmpty else { return result }
-
-        for (sessionId, path) in transcriptPaths(for: wanted, projectsDirectory: projectsDirectory) {
-            guard let cwd = cwd(fromTranscriptAtPath: path) else { continue }
-            cwdCache.store(cwd, for: sessionId)
-            result[sessionId] = cwd
-        }
-        return result
-    }
-
-    /// Transcript path of each wanted session, by walking the slug directories.
-    ///
-    /// The slug is a working directory with every character outside `[A-Za-z0-9-]`
-    /// replaced by `-`, which is not reversible — two directories can share one
-    /// slug and nothing can be read back out of it. So the directories are only
-    /// ever used to *find* files, and the working directory comes from inside
-    /// the transcript.
-    ///
-    /// Subagent transcripts sit one level below, in `<sessionId>/subagents/`, so
-    /// a flat listing of each slug directory sees sessions and nothing else.
-    private static func transcriptPaths(for sessionIds: Set<String>,
-                                        projectsDirectory: URL) -> [String: String] {
         let root = projectsDirectory.path
         let slugs = listingCache.value(atPath: root) {
             (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []
         }
 
-        var found: [String: String] = [:]
-        for slug in slugs {
+        var found: [String: [String]] = [:]
+        // Every slug directory is walked, always. The walk used to stop as soon
+        // as it had one directory per wanted session, which is exactly what made
+        // a duplicated identifier resolve to whichever copy came first. There is
+        // no count at which it may stop early — the next directory can always
+        // hold another copy — so the answer is only complete once the listing is
+        // exhausted. Subagent transcripts sit one level below, in
+        // `<sessionId>/subagents/`, so a flat listing sees sessions and nothing
+        // else.
+        for slug in slugs.sorted() {
             let directory = root + "/" + slug
             let names = listingCache.value(atPath: directory) {
                 let listed = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
@@ -79,118 +83,65 @@ enum UsageIndex {
             }
             for name in names {
                 let sessionId = String(name.dropLast(".jsonl".count))
-                guard sessionIds.contains(sessionId), found[sessionId] == nil else { continue }
-                found[sessionId] = directory + "/" + name
+                guard sessionIds.contains(sessionId) else { continue }
+                found[sessionId, default: []].append(slug)
             }
-            if found.count == sessionIds.count { break }
         }
         return found
     }
 
-    /// The working directory a transcript records for itself, read from its
-    /// head.
+    /// Folds per-session figures onto the directories the sessions started in.
     ///
-    /// Every record carries `cwd`, but the very first line can be a `summary`
-    /// record that does not, so the head is scanned line by line until one does.
-    /// The last line of a full window is dropped rather than parsed — the window
-    /// may have cut it in half, and a line that merely ends there looks exactly
-    /// the same from inside.
+    /// Several sessions start in one directory routinely — different chats in
+    /// the same project — so this is a sum, and a sum that keeps track of what
+    /// the gateway left unnamed (`TokenCounts.isComplete`). Sessions with no
+    /// transcript here go to `unmatched`, which is spend with no owner on this
+    /// machine rather than spend to be dropped.
     ///
-    /// That drop needs a line to fall back on, so it does not fire when the
-    /// window holds only one: a first line longer than the whole window is
-    /// parsed, truncated as it is, and rejected by `JSONSerialization` — the
-    /// prefix of a JSON object is an unterminated object and never a valid one.
-    /// Two different reasons, one answer: such a transcript comes back `nil`.
-    /// Accepted rather than fixed. The session lands in
-    /// `fold`'s `unmatched` — spend with no owner on this machine, shown as
-    /// such — which is the honest outcome; the alternatives are growing the
-    /// window until some transcript exceeds that one too, or parsing a truncated
-    /// record and attributing the spend to whatever path the cut left behind.
-    /// It has not been seen in the wild: the first records of a transcript are
-    /// short, and the megabyte-sized lines are tool results far down the file.
-    ///
-    /// Internal, and with `headBytes` a parameter, so that the window can be
-    /// made small enough for a test to straddle it: the behaviour that matters
-    /// here is what happens at the far edge of a file that is never read whole
-    /// (transcripts reach tens of megabytes), and a test that fits inside the
-    /// window tests nothing.
-    static func cwd(fromTranscriptAtPath path: String,
-                    headBytes: Int = UsageIndex.headBytes) -> String? {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
-        defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: headBytes), !data.isEmpty else { return nil }
-
-        // Split on the 0x0A byte rather than on Characters: a CRLF file would
-        // otherwise come back as one line, and a cut in the middle of a UTF-8
-        // sequence would be a decoding problem instead of a dropped line.
-        var lines = data.split(separator: 0x0A)
-        // `lines.count > 1`: with a single line there is nothing left to read
-        // after dropping it, so it is handed to the parser instead — which
-        // rejects it, because a cut JSON object is not a JSON object.
-        if data.count >= headBytes, lines.count > 1 { lines.removeLast() }
-
-        for line in lines {
-            guard line.count > 2,
-                  let object = try? JSONC.parse(String(decoding: line, as: UTF8.self)),
-                  let record = object as? [String: Any],
-                  let cwd = record["cwd"] as? String,
-                  !cwd.isEmpty
-            else { continue }
-            return cwd
-        }
-        return nil
-    }
-
-    /// Folds per-session figures into per-directory ones.
-    ///
-    /// Several sessions share a working directory routinely — different chats in
-    /// the same project, and worktrees of it — so this is a sum, and a sum that
-    /// keeps track of what the gateway left unnamed (`TokenCounts.isComplete`).
-    /// Sessions with no local transcript go to `unmatched`, which is spend with
-    /// no owner on this machine rather than spend to be dropped.
-    static func fold(sessions: [GatewaySession], cwdBySessionId: [String: String])
-        -> (tokensByCwd: [String: TokenCounts], unmatched: TokenCounts, unmatchedSessions: Int) {
-        var tokensByCwd: [String: TokenCounts] = [:]
+    /// A session found under more than one slug goes to `contested` whole, and
+    /// is deliberately *not* summed into anything: the gateway reports one
+    /// aggregate for the whole session and there is nothing to divide it between
+    /// its lives, so picking a directory here would be the silent
+    /// misattribution this split exists to stop. Whether the disagreement
+    /// matters at all is decided one level up, where the project list is known —
+    /// a project and a worktree of it are two slugs and one answer
+    /// (`DataSource.settle`).
+    static func fold(sessions: [GatewaySession], slugsBySessionId: [String: [String]])
+        -> (tokensBySlug: [String: TokenCounts],
+            contested: [ContestedSpend],
+            unmatched: TokenCounts,
+            unmatchedSessions: Int) {
+        var tokensBySlug: [String: TokenCounts] = [:]
+        var contested: [ContestedSpend] = []
         var unmatched = TokenCounts.zero
         var unmatchedSessions = 0
 
         for session in sessions {
-            guard let cwd = cwdBySessionId[session.sessionId] else {
+            let slugs = slugsBySessionId[session.sessionId] ?? []
+            guard let slug = slugs.first else {
                 unmatched = unmatched + session.tokens
                 unmatchedSessions += 1
                 continue
             }
-            tokensByCwd[cwd] = (tokensByCwd[cwd] ?? .zero) + session.tokens
+            guard slugs.count == 1 else {
+                contested.append(ContestedSpend(slugs: slugs, tokens: session.tokens))
+                continue
+            }
+            tokensBySlug[slug] = (tokensBySlug[slug] ?? .zero) + session.tokens
         }
-        return (tokensByCwd, unmatched, unmatchedSessions)
+        return (tokensBySlug, contested, unmatched, unmatchedSessions)
     }
 }
 
-/// `sessionId → cwd`, kept for the life of the process.
+/// The spend of one session whose transcript sits under more than one slug —
+/// one session that was resumed in another directory.
 ///
-/// A session's working directory is written into its first records and cannot
-/// change afterwards, so an entry never goes stale. Failures are deliberately
-/// not remembered: a transcript that could not be read this minute — being
-/// written, not yet flushed, on a volume that went away — may well be readable
-/// the next.
-///
-/// Unbounded on purpose: the working set is the sessions the gateway reports for
-/// its window, a couple of hundred short strings at most.
-///
-/// `@unchecked Sendable`: the dictionary is only ever touched under the lock.
-private final class CwdCache: @unchecked Sendable {
-    private let lock = NSLock()
-    private var values: [String: String] = [:]
-
-    func value(for sessionId: String) -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return values[sessionId]
-    }
-
-    func store(_ cwd: String, for sessionId: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        values[sessionId] = cwd
-    }
+/// Kept per session rather than summed by slug list: the count of such sessions
+/// is one of the two numbers `--dump` reports about them, and the slugs are what
+/// decides where the tokens end up.
+struct ContestedSpend: Sendable, Equatable {
+    /// The distinct slug directories holding a copy, sorted. Two or more by
+    /// construction — one is not contested and none is unmatched.
+    let slugs: [String]
+    let tokens: TokenCounts
 }

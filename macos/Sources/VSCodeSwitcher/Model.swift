@@ -215,13 +215,20 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     var contextLimitTokens: Int?
     var lastActivity: Date?
 
-    /// Tokens the gateway accounted for this row's working directories over its
-    /// window, or `nil` when it reported none for them. Last in the list on
-    /// purpose: the memberwise initialiser is called from a dozen places and a
-    /// field with a default at the end leaves every one of them alone.
+    /// Tokens the gateway accounted for the sessions **started** in this row's
+    /// project over its window, or `nil` when it reported none.
     ///
-    /// The panel does not draw it yet — the number is here for `--dump` and for
-    /// the view that comes next.
+    /// "Started in", not "spent in", and the difference is not pedantry: `cwd`
+    /// is a field of every transcript record, a session walks between
+    /// directories while it runs, and the gateway reports one aggregate per
+    /// session with nothing to divide it by (`UsageIndex`). On the live 7-day
+    /// window 28 of the 30 local sessions touched more than one directory —
+    /// median 4, maximum 18 — so this number answers "how much did the work
+    /// that began here cost", not "how much was spent inside this project".
+    ///
+    /// Last in the list on purpose: the memberwise initialiser is called from a
+    /// dozen places and a field with a default at the end leaves every one of
+    /// them alone.
     var usage: TokenCounts? = nil
 
     var contextFraction: Double? {
@@ -321,6 +328,17 @@ struct SwitcherSnapshot: Sendable, Codable {
     /// When the sources were read, not when the assembly finished — the two are
     /// 40–180 ms apart and this is the age of the data.
     var generatedAt: Date
+
+    /// Spend the assembly refused to put on any row: sessions filed under more
+    /// than one slug whose slugs claim different projects (`DataSource.settle`).
+    /// Reported by `--dump` rather than drawn — a bucket nobody can see is the
+    /// silent loss the split exists to prevent, and a number handed to one of
+    /// two projects by guesswork is the silent gain.
+    ///
+    /// Last in the list, with defaults, so the memberwise initialiser stays
+    /// callable unchanged from everywhere that has nothing to say about spend.
+    var ambiguousUsage: TokenCounts = .zero
+    var ambiguousUsageSessions: Int = 0
 
     var rows: [SwitcherRow] { openWindows + projects }
 }

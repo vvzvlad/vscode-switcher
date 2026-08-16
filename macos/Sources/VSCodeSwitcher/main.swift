@@ -92,7 +92,7 @@ enum ConsoleDump {
         print("  accessibility:    \(snapshot.accessibilityTrusted ? "granted" : "NOT GRANTED — window list will be empty")")
         print("")
 
-        printUsage(usage)
+        printUsage(usage, snapshot: snapshot)
 
         print("Open windows (last message first): \(snapshot.openWindows.count)")
         for (position, row) in snapshot.openWindows.enumerated() {
@@ -147,8 +147,16 @@ enum ConsoleDump {
     ///
     /// Printed even when the poll failed: the line that says why is the point of
     /// the section on the machine where the relay is down.
-    private static func printUsage(_ usage: UsageSnapshot) {
-        print("Usage (claude_gw)")
+    ///
+    /// The assembled snapshot comes in alongside it because one of these figures
+    /// is only known once the projects are: whether two copies of one session
+    /// disagree about which *project* it started in cannot be answered by the
+    /// poll, which has never seen a project (`DataSource.settle`).
+    private static func printUsage(_ usage: UsageSnapshot, snapshot: SwitcherSnapshot) {
+        // The header carries the promise every figure below it makes, because
+        // the figures themselves cannot: a session's tokens are counted against
+        // the project it was *started* in, not the ones it spent them in.
+        print("Usage (claude_gw) — a session's spend counts against the project it was started in")
         // Both halves in one line: each reason names its own endpoint already,
         // and the dump acts on neither.
         if let failure = usage.failureText {
@@ -164,9 +172,26 @@ enum ConsoleDump {
         }
         print("  accounts:         \(accounts.isEmpty ? "-" : accounts.joined(separator: "   "))")
         print("  total:            \(formatTokens(usage.total))")
-        print("  directories:      \(usage.tokensByCwd.count)")
+        print("  start dirs:       \(usage.tokensBySlug.count)")
         print("  no local session: \(usage.unmatchedSessions) sessions, \(formatTokens(usage.unmatched))")
+        print("  \(ambiguousLine(sessions: snapshot.ambiguousUsageSessions, tokens: snapshot.ambiguousUsage))")
         print("")
+    }
+
+    /// The line that names the spend nothing may claim: sessions filed under two
+    /// slugs that belong to two different projects.
+    ///
+    /// Printed whether or not there are any, exactly like `no local session`
+    /// above it. A bucket that appears only when it is non-empty teaches nobody
+    /// it exists, and this one is empty most weeks — the duplicated identifiers
+    /// on this machine are all older than the gateway's window — while the
+    /// misattribution it replaced was invisible by construction.
+    ///
+    /// Internal so a test can hold the text: `printUsage` prints whatever the
+    /// gateway said about the machine the dump runs on, and a machine with a
+    /// contested session is not a state a test run can arrange for itself.
+    static func ambiguousLine(sessions: Int, tokens: TokenCounts) -> String {
+        "ambiguous:        \(sessions) sessions, \(formatTokens(tokens))"
     }
 
     private static func percent(_ value: Double?) -> String {

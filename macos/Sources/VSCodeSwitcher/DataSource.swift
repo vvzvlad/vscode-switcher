@@ -93,6 +93,10 @@ final class DataSource: @unchecked Sendable {
         let activity = Dictionary(projects.map {
             ($0.path, ProjectActivity(lastSession: ClaudeSessions.sessionTimes(forPath: $0.path).max()))
         }, uniquingKeysWith: { first, _ in first })
+        // Read once: two reads of the lock-guarded value can straddle a poll and
+        // hand `assemble` a directory table from one pass and a contested list
+        // from the next, which is one session counted twice or not at all.
+        let usageSnapshot = usage.snapshot
         return Self.assemble(projects: projects,
                              windows: VSCodeWindows.listWindows(bundleID: config.editorBundleID),
                              sessions: ClaudeSessions.liveSessions(config: config),
@@ -101,9 +105,60 @@ final class DataSource: @unchecked Sendable {
                              // that fills it lives in `UsageStore`, on its own
                              // minute-long timer, and nothing on this path
                              // waits for a network.
-                             tokensByCwd: usage.snapshot.tokensByCwd,
+                             tokensBySlug: usageSnapshot.tokensBySlug,
+                             contested: usageSnapshot.contested,
+                             worktrees: Self.worktrees(of: projects),
                              accessibilityTrusted: VSCodeWindows.isAccessibilityTrusted(),
                              generatedAt: readAt)
+    }
+
+    private static let worktreeListings = FileDerivedCache<[String]>()
+
+    /// The worktree directories of each project: `<project>/.claude/worktrees/*`.
+    ///
+    /// Read here rather than inside `assemble` because `assemble` is pure and
+    /// this is the disk. It exists at all because a slug cannot be decoded: the
+    /// only way to know that
+    /// `-Users-x-switcher--claude-worktrees-usage-ui` belongs to `switcher` is to
+    /// have computed that slug from a directory that is there. Matching slug
+    /// *prefixes* instead would look equivalent and is not — the separator is
+    /// gone, so `-Users-x-portainer-` prefixes the slug of `portainer-agent`,
+    /// which is the sibling trap `prefixes(of:)` exists to avoid, one alphabet
+    /// down.
+    ///
+    /// The consequence to know about: a worktree that has been deleted is a slug
+    /// nothing can claim, and the spend of the sessions started in it lands on no
+    /// row. Four such slugs sit in `~/.claude/projects` today. Accepted — the
+    /// alternative is guessing from a name — and visible, because those sessions
+    /// still count under `start dirs:` in `--dump` while appearing on no row.
+    ///
+    /// One `stat(2)` per project, and only the projects that have the directory
+    /// are listed; the listing itself is cached against its own mtime, which
+    /// moves exactly when a worktree is added or removed. The guard is not
+    /// optional politeness: `FileDerivedCache` never caches a path that does not
+    /// exist, so without it every project would run a `contentsOfDirectory` that
+    /// could only fail, once or twice a second, and building those `NSError`s is
+    /// the cost §2.2.1 already caught once.
+    ///
+    /// Measured 2026-08-17 over the live 104 projects and their 44 worktrees,
+    /// `swiftc -O -whole-module-optimization`, best of 25 passes: 0.104 ms as it
+    /// stands, 0.727 ms with the guard gone and the listing re-read every pass.
+    /// For scale, the `stat(2)` walk over the transcripts in the same build is
+    /// 1.25 ms and the whole snapshot spends 40–180 ms on disk (SPEC §6).
+    static func worktrees(of projects: [ProjectInfo]) -> [String: [String]] {
+        var result: [String: [String]] = [:]
+        for project in projects {
+            let directory = project.path + "/.claude/worktrees"
+            guard fileStamp(atPath: directory) != nil else { continue }
+            let names = worktreeListings.value(atPath: directory) {
+                (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+            }
+            guard !names.isEmpty else { continue }
+            // Not filtered to directories: that would be one `stat(2)` per entry
+            // for a `.DS_Store` whose slug matches nothing anyway.
+            result[project.path] = names.map { directory + "/" + $0 }
+        }
+        return result
     }
 
     /// The join itself, with the three sources already read. Pure, so the row
@@ -112,7 +167,9 @@ final class DataSource: @unchecked Sendable {
                          windows: [VSCodeWindowInfo],
                          sessions: [ClaudeSessionInfo],
                          activity: [String: ProjectActivity] = [:],
-                         tokensByCwd: [String: TokenCounts] = [:],
+                         tokensBySlug: [String: TokenCounts] = [:],
+                         contested: [ContestedSpend] = [],
+                         worktrees: [String: [String]] = [:],
                          accessibilityTrusted: Bool,
                          generatedAt: Date = Date()) -> SwitcherSnapshot {
         let projectsByRootName = Dictionary(grouping: projects, by: \.rootName)
@@ -120,21 +177,32 @@ final class DataSource: @unchecked Sendable {
         // directory it has against every project there is.
         let projectPrefixes = Self.prefixes(of: projects)
 
-        // Spend arrives keyed by working directory and is attributed to projects
-        // by the same rule as the sessions below — exact match, otherwise the
-        // deepest project the path sits inside. That second half is what makes
-        // a worktree count: an agent working in
-        // `<project>/.claude/worktrees/<name>` spends the project's tokens, and
-        // keying the number by its own directory would hide it in a row nobody
-        // has open.
+        // Spend arrives keyed by the slug directory Claude Code filed each
+        // session under, which is the directory the session was *started* in.
+        // The slug is matched forwards — the slug of each project, and of each
+        // worktree of one — never decoded, because it cannot be
+        // (`ClaudeSessions.slug(forPath:)` is not injective).
+        //
+        // "Started in" is the whole claim a row's number makes, and it is not
+        // "spent in": a session moves between directories while it runs, and the
+        // gateway hands back one aggregate per session with nothing to split it
+        // by (`UsageIndex`).
+        let projectPathsBySlug = Self.projectPathsBySlug(projects: projects, worktrees: worktrees)
         var usageByProjectPath: [String: TokenCounts] = [:]
-        var usageOutsideProjects: [String: TokenCounts] = [:]
-        for (cwd, tokens) in tokensByCwd {
-            guard let project = Self.project(for: cwd, in: projects, prefixes: projectPrefixes) else {
-                usageOutsideProjects[cwd] = tokens
+        var usageBySlugOutsideProjects: [String: TokenCounts] = [:]
+        for (slug, tokens) in tokensBySlug {
+            guard let path = projectPathsBySlug[slug] else {
+                usageBySlugOutsideProjects[slug] = tokens
                 continue
             }
-            usageByProjectPath[project.path] = (usageByProjectPath[project.path] ?? .zero) + tokens
+            usageByProjectPath[path] = (usageByProjectPath[path] ?? .zero) + tokens
+        }
+
+        // The sessions filed under more than one slug. Settled here and nowhere
+        // earlier, because settling them needs the project list.
+        let settled = Self.settle(contested: contested, projectPathsBySlug: projectPathsBySlug)
+        for (path, tokens) in settled.tokensByProjectPath {
+            usageByProjectPath[path] = (usageByProjectPath[path] ?? .zero) + tokens
         }
 
         var sessionsByProjectPath: [String: [ClaudeSessionInfo]] = [:]
@@ -242,19 +310,99 @@ final class DataSource: @unchecked Sendable {
                                           contextUsedTokens: active?.contextUsedTokens,
                                           contextLimitTokens: active?.contextLimitTokens,
                                           lastActivity: group.compactMap(\.lastActivity).max(),
-                                          // Matched on the exact directory: an
-                                          // orphan row *is* a directory, and
-                                          // anything below it that the gateway
-                                          // knows about would be a row of its
-                                          // own if an agent were running there.
-                                          usage: usageOutsideProjects[cwd]))
+                                          // The row's own directory, slugged the
+                                          // same way Claude Code slugged it when
+                                          // it filed the transcript. Forwards
+                                          // again, and exact: an orphan row *is*
+                                          // a directory, and anything below it
+                                          // the gateway knows about would be a
+                                          // row of its own if an agent were
+                                          // running there.
+                                          usage: usageBySlugOutsideProjects[ClaudeSessions.slug(forPath: cwd)]))
         }
 
         return SwitcherSnapshot(openWindows: Self.rankedWindows(openWindows),
                                 projects: Self.rankedOrphans(orphanRows)
                                     + Self.ranked(projectRows, activity: activity),
                                 accessibilityTrusted: accessibilityTrusted,
-                                generatedAt: generatedAt)
+                                generatedAt: generatedAt,
+                                ambiguousUsage: settled.ambiguous,
+                                ambiguousUsageSessions: settled.ambiguousSessions)
+    }
+
+    /// `slug → project path`, for every project and every worktree of one.
+    ///
+    /// The only direction the slug can be travelled in. Worktrees are entered
+    /// first and the projects' own directories second, so that a project always
+    /// wins its own slug: two projects can slug alike (the replacement is not
+    /// injective — `a_b` and `a.b` both give `a-b`), and a project's own
+    /// directory is a better claim on its slug than somebody's worktree.
+    static func projectPathsBySlug(projects: [ProjectInfo],
+                                   worktrees: [String: [String]]) -> [String: String] {
+        var index: [String: String] = [:]
+        for project in projects {
+            for worktree in worktrees[project.path] ?? [] {
+                index[ClaudeSessions.slug(forPath: worktree)] = project.path
+            }
+        }
+        for project in projects {
+            index[ClaudeSessions.slug(forPath: project.path)] = project.path
+        }
+        return index
+    }
+
+    /// Decides what to do with the sessions filed under more than one slug:
+    /// attribute them, or admit that nothing here knows.
+    ///
+    /// A `session_id` is not unique across `~/.claude/projects/`, and the copies
+    /// under two slugs are one session rather than two. Resuming a session in
+    /// another directory keeps its identifier, opens a file under the new slug
+    /// and seeds it with a copy of the old history — which is why both copies
+    /// begin with the same record, to the millisecond, and why the head of the
+    /// new one names the *old* directory. So there is one aggregate to place and
+    /// two directories with a claim on it, and only the project list can say
+    /// whether that is a disagreement at all: `<project>` and
+    /// `<project>/.claude/worktrees/<name>` are two slugs and one project, which
+    /// is an answer.
+    ///
+    /// Two projects is not an answer, and nothing here tries to make one. The
+    /// tempting tie-breaks are the file's mtime and its size, and both are
+    /// coin-flips with a straight face: the live pair `83804075` has its two
+    /// copies written one minute apart, and the bigger copy of `65f9afa1` is the
+    /// one whose records mostly name the *other* project's directory. Comparing
+    /// the records themselves would mean reading transcripts whole — 31 MB at
+    /// the top end, which is the one thing the transcript layer must never do.
+    /// So such spend goes to `ambiguous`: counted, reported by `--dump`, and put
+    /// on no row.
+    ///
+    /// Also `ambiguous` when the slugs claim *no* project between them — two
+    /// directories outside every scan root are two different orphan rows, and
+    /// the spend belongs to neither more than the other — and when one slug is a
+    /// project and the other is not, which is the same "one aggregate, two
+    /// lives" with one of the lives simply unrecognised.
+    ///
+    /// Pure, and separate from `assemble`, so the rule can be asked directly:
+    /// through the assembly a wrong answer surfaces as a number missing from a
+    /// row, which is also what a dozen unrelated mistakes look like.
+    static func settle(contested: [ContestedSpend],
+                       projectPathsBySlug: [String: String])
+        -> (tokensByProjectPath: [String: TokenCounts], ambiguous: TokenCounts, ambiguousSessions: Int) {
+        var tokensByProjectPath: [String: TokenCounts] = [:]
+        var ambiguous = TokenCounts.zero
+        var ambiguousSessions = 0
+
+        for entry in contested {
+            let claimants = Set(entry.slugs.map { projectPathsBySlug[$0] })
+            // One claimant, and a real one: `[nil]` is "no slug matched
+            // anything", which is agreement about nothing.
+            guard claimants.count == 1, let path = claimants.first ?? nil else {
+                ambiguous = ambiguous + entry.tokens
+                ambiguousSessions += 1
+                continue
+            }
+            tokensByProjectPath[path] = (tokensByProjectPath[path] ?? .zero) + entry.tokens
+        }
+        return (tokensByProjectPath, ambiguous, ambiguousSessions)
     }
 
     private static func makeWindowRow(window: VSCodeWindowInfo,

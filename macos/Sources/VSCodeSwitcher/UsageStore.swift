@@ -128,10 +128,11 @@ final class UsageStore: ObservableObject {
             let report = try await client.sessions(since: now.addingTimeInterval(-windowSeconds))
             let identifiers = Set(report.sessions.map(\.sessionId))
             let folded = UsageIndex.fold(sessions: report.sessions,
-                                         cwdBySessionId: UsageIndex.cwdBySessionId(for: identifiers))
+                                         slugsBySessionId: UsageIndex.slugsBySessionId(for: identifiers))
             result.since = report.since
             result.truncated = report.truncated
-            result.tokensByCwd = folded.tokensByCwd
+            result.tokensBySlug = folded.tokensBySlug
+            result.contested = folded.contested
             result.unmatched = folded.unmatched
             result.unmatchedSessions = folded.unmatchedSessions
             result.sessionsFailure = nil
