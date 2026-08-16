@@ -766,7 +766,7 @@ struct SwitcherRowView: View {
         return (row.usageIsLowerBound ? "≥" : "") + compactTokens(value)
     }
 
-    /// `21.3M`, `914k`, `512`: the coarsest unit that still tells two numbers
+    /// `21.30M`, `914k`, `512`: the coarsest unit that still tells two numbers
     /// apart at a glance. Shared with `--dump` so the panel and the dump cannot
     /// come to describe the same row differently, and `nonisolated` for the same
     /// reason `countLabel` is — the dump runs outside the main actor.

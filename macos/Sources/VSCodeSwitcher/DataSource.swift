@@ -370,8 +370,9 @@ final class DataSource: @unchecked Sendable {
     /// coin-flips with a straight face: the live pair `83804075` has its two
     /// copies written one minute apart, and the bigger copy of `65f9afa1` is the
     /// one whose records mostly name the *other* project's directory. Comparing
-    /// the records themselves would mean reading transcripts whole — 31 MB at
-    /// the top end, which is the one thing the transcript layer must never do.
+    /// the records themselves would mean reading transcripts whole — up to
+    /// 40 MB on this machine (measured 2026-08-17), which is the one thing the
+    /// transcript layer must never do.
     /// So such spend goes to `ambiguous`: counted, reported by `--dump`, and put
     /// on no row.
     ///
@@ -686,10 +687,14 @@ final class DataSource: @unchecked Sendable {
     /// deepest prefix is a running maximum: the `filter` built an array per
     /// working directory to take one element out of it.
     ///
-    /// That rewrite is what makes the answer depend on the order the projects
-    /// arrive in — the exact match short-circuits the walk, the deepest prefix
-    /// accumulates through it — so `ProjectMatchingTests` asks both cases with
-    /// the project list both ways round.
+    /// That rewrite is what makes the *walk* depend on the order the projects
+    /// arrive in — the exact match short-circuits it, the deepest prefix
+    /// accumulates through it. The answer must not depend on that order, and
+    /// that is precisely what `ProjectMatchingTests` holds: both cases are
+    /// asked with the project list both ways round, because a mutation of the
+    /// rule can answer one of the two orders correctly by luck — taking the
+    /// first containing project instead of the deepest passes "deep first" and
+    /// fails only the other way round.
     static func project(for cwd: String,
                         in projects: [ProjectInfo],
                         prefixes: [String]) -> ProjectInfo? {

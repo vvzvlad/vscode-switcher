@@ -909,7 +909,7 @@ final class UsageJoinTests: XCTestCase {
 /// assembly every case needs a fixture of several projects and comes back as a
 /// figure missing from a row rather than as the wrong match. The suite exists
 /// because none of this was held by anything — deleting the `+ "/"` that
-/// `prefixes(of:)` is entirely made of left all 308 tests green.
+/// `prefixes(of:)` is entirely made of left the whole suite green.
 final class ProjectMatchingTests: XCTestCase {
 
     private func match(_ cwd: String, in paths: [String]) -> String? {
@@ -928,10 +928,15 @@ final class ProjectMatchingTests: XCTestCase {
     /// entire spend, and every session running in it, is attributed to the older
     /// project's row.
     ///
-    /// Checked by deleting the `+ "/"`: this test fails and the other 310 pass.
-    /// Note which assertions do the work — the two with both projects in the
-    /// list are green either way, because the deeper prefix wins the sibling
-    /// back. The separator only shows up when the sibling is not in the list.
+    /// Checked by deleting the `+ "/"`: this test is the only one that fails,
+    /// every other test in the suite passes (re-checked 2026-08-17, when the
+    /// suite was 409 tests: three assertions here, 408 others green).
+    /// Note which assertions do the work — three of the five below, and the two
+    /// that stay green stay green for two different reasons. The one with both
+    /// projects in the list is green either way because the deeper prefix wins
+    /// the sibling back; the control is green either way because it is genuine
+    /// containment, which matches with the separator and without it. The
+    /// separator only shows up when the sibling is not in the list.
     func testASiblingWhoseNameStartsWithAnothersIsNotInsideIt() {
         XCTAssertNil(match("/a/bc", in: ["/a/b"]),
                      "half a path component is not containment")
@@ -968,7 +973,9 @@ final class ProjectMatchingTests: XCTestCase {
     /// "the first one wins".
     ///
     /// Checked by keeping the first containing project instead of the deepest:
-    /// this test fails and the other 310 pass — and only the `shallow first`
+    /// this test is the only one that fails, every other test in the suite
+    /// passes (re-checked 2026-08-17, when the suite was 409 tests: this one,
+    /// 408 others green) — and only the `shallow first`
     /// half of it fails, since with the deep project first the broken rule
     /// happens to answer correctly. Which is the whole reason for asking both
     /// orders.

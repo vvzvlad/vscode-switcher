@@ -394,11 +394,14 @@ final class PanelController {
     /// promise; this closes the gap instead of stepping over it.
     ///
     /// Dropping the flag the moment tracking begins — a third writer, in
-    /// `didBeginTracking` — was removed rather than kept: from that moment
-    /// until `menuOpeningDidFinish` the tracking count answers no on its own,
-    /// in the same conjunction, so the only interval the early clear could
-    /// change is the sliver between `didEndTracking` and the call below, where
-    /// it *permits* a hide this flag would otherwise postpone.
+    /// `didBeginTracking` — was removed rather than kept. The tracking count
+    /// answers no on its own only from that moment until `didEndTracking`, not
+    /// until the call below, and it is not a count this path may lean on
+    /// anyway: the retry tick zeroes it before every attempt
+    /// (`scheduleKeyboardReleaseRetry`). So the one interval the early clear
+    /// would change is the sliver between `didEndTracking` and
+    /// `menuOpeningDidFinish`, where it *permits* a hide this flag exists to
+    /// postpone.
     func menuWillOpen() {
         menuOpening = true
     }
