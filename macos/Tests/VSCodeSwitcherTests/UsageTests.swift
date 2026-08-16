@@ -823,7 +823,7 @@ final class UsageWiringTests: XCTestCase {
 
         let cache = UsageCache()
         var polled = UsageSnapshot.empty
-        polled.fetchedAt = Date()
+        polled.checkedAt = Date()
         polled.tokensByCwd = [project.path: TokenCounts(input: 10, output: 2,
                                                         cacheCreation: 0, cacheRead: 0)]
         cache.store(polled)
@@ -878,35 +878,71 @@ final class UsageStoreTests: XCTestCase {
     }
 
     func testAGoodPassFillsInEverythingAndReportsNoFailure() async {
-        let snapshot = await UsageStore.poll(client: client(transport()), previous: .empty)
-        XCTAssertNil(snapshot.failure)
+        let now = Date()
+        let snapshot = await UsageStore.poll(client: client(transport()), previous: .empty, now: now)
+        XCTAssertNil(snapshot.failureText)
         XCTAssertEqual(snapshot.since, Date(timeIntervalSince1970: 1_786_761_516))
         XCTAssertEqual(snapshot.fleetSevenDayMean, 58.667)
         XCTAssertEqual(snapshot.accounts.map(\.label), ["acc2"])
+        XCTAssertEqual(snapshot.checkedAt, now)
+        XCTAssertEqual(snapshot.quotaFetchedAt, now)
     }
 
     /// A gateway that is not there is ordinary: the numbers from the pass before
-    /// stay put and only `failure` changes. Blinking to blank would be worse.
-    func testAFailedPassKeepsThePreviousNumbers() async {
+    /// stay put and only the blame changes. Blinking to blank would be worse.
+    ///
+    /// And the stamp stays with the numbers it belongs to. Moving it along with
+    /// the attempt is what had the popover describing hour-old figures as
+    /// fetched a moment ago, with the reason they were not standing right
+    /// underneath.
+    func testAFailedPassKeepsThePreviousNumbersAndTheirStamps() async {
+        let earlier = Date(timeIntervalSince1970: 1_786_700_000)
         var previous = UsageSnapshot.empty
         previous.tokensByCwd = ["/x": TokenCounts(input: 1, output: 2, cacheCreation: 3, cacheRead: 4)]
         previous.fleetSevenDayMean = 42
+        previous.quotaFetchedAt = earlier
 
+        let now = Date()
         let snapshot = await UsageStore.poll(client: client(transport(usage: nil, sessions: nil)),
-                                             previous: previous)
+                                             previous: previous,
+                                             now: now)
         XCTAssertEqual(snapshot.tokensByCwd, previous.tokensByCwd)
         XCTAssertEqual(snapshot.fleetSevenDayMean, 42)
-        XCTAssertEqual(snapshot.failure?.contains("/gw/usage"), true)
-        XCTAssertEqual(snapshot.failure?.contains("/gw/sessions"), true)
+        XCTAssertEqual(snapshot.quotaFailure?.contains("/gw/usage"), true)
+        XCTAssertEqual(snapshot.sessionsFailure?.contains("/gw/sessions"), true)
+        XCTAssertEqual(snapshot.checkedAt, now, "the attempt is what just happened")
+        XCTAssertEqual(snapshot.quotaFetchedAt, earlier, "the figures did not change hands")
     }
 
     /// The two halves fail separately, so one arriving must not be held back by
-    /// the other.
+    /// the other — and neither may the other's stamp or the other's blame.
     func testOneHalfCanArriveWithoutTheOther() async {
-        let snapshot = await UsageStore.poll(client: client(transport(usage: nil)), previous: .empty)
-        XCTAssertEqual(snapshot.failure?.contains("/gw/usage"), true)
-        XCTAssertEqual(snapshot.failure?.contains("/gw/sessions"), false)
+        let earlier = Date(timeIntervalSince1970: 1_786_700_000)
+        var previous = UsageSnapshot.empty
+        previous.quotaFetchedAt = earlier
+        let now = Date()
+
+        let snapshot = await UsageStore.poll(client: client(transport(usage: nil)),
+                                             previous: previous, now: now)
+        XCTAssertEqual(snapshot.quotaFailure?.contains("/gw/usage"), true)
+        XCTAssertNil(snapshot.sessionsFailure)
         XCTAssertEqual(snapshot.since, Date(timeIntervalSince1970: 1_786_761_516))
+        XCTAssertEqual(snapshot.quotaFetchedAt, earlier)
+    }
+
+    /// And a half that comes back after a failure clears its own blame without
+    /// touching the other's: two passes, the first with nothing listening, the
+    /// second with the quota endpoint answering again.
+    func testAHalfThatRecoversClearsOnlyItsOwnBlame() async {
+        let first = await UsageStore.poll(client: client(transport(usage: nil, sessions: nil)),
+                                          previous: .empty)
+        XCTAssertNotNil(first.quotaFailure)
+        XCTAssertNotNil(first.sessionsFailure)
+
+        let second = await UsageStore.poll(client: client(transport(sessions: nil)), previous: first)
+        XCTAssertNil(second.quotaFailure, "the quota half answered and is still blamed")
+        XCTAssertNotNil(second.sessionsFailure, "the sessions half still is not answering")
+        XCTAssertNotNil(second.quotaFetchedAt)
     }
 
     /// The bridge `--dump` uses, against a port nothing listens on: a gateway
@@ -930,7 +966,7 @@ final class UsageStoreTests: XCTestCase {
         let snapshot = UsageStore.pollOnce(config: config)
         let elapsed = Date().timeIntervalSince(started)
 
-        let failure = try XCTUnwrap(snapshot.failure)
+        let failure = try XCTUnwrap(snapshot.failureText)
         XCTAssertTrue(failure.contains("/gw/usage: unreachable"), "got \(failure)")
         XCTAssertTrue(failure.contains("/gw/sessions: unreachable"), "got \(failure)")
         XCTAssertLessThan(elapsed, 5,

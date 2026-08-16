@@ -60,7 +60,9 @@ struct UsageClient: Sendable {
 
     /// Utilisation over time for one account.
     ///
-    /// Nothing calls this yet: it is the series the account popup will draw.
+    /// The series the popover's chart draws. Called from `UsageHistoryModel.load`
+    /// — once per account per pass, and only while the popover is open, which is
+    /// the reason it is not part of the once-a-minute poll.
     func history(label: String, since: Date) async throws -> HistorySeries {
         try await fetch(pathSegments: ["gw", "usage", label, "history"], since: since)
     }

@@ -757,9 +757,15 @@ final class StatusBadgeTests: XCTestCase {
     /// A name SF Symbols does not know draws nothing at all — an empty slot
     /// where the one indicator of the row should be. There is no compiler check
     /// for these strings.
+    ///
+    /// Every symbol the app names anywhere goes through here, not just the row's
+    /// four: the menu bar's fallback glyph and the popover's failure mark are
+    /// the same kind of unchecked string, and a picture drawing nothing at all
+    /// is the same silent failure wherever it happens.
     func testEverySymbolNameActuallyResolves() {
-        for status in RowStatus.allCases {
-            let name = StatusBadge.symbol(for: status)
+        let names = RowStatus.allCases.map { StatusBadge.symbol(for: $0) }
+            + [MenuBarIcon.fallbackSymbolName, UsagePopoverView.failureSymbolName]
+        for name in names {
             XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
                             "\(name) is not an SF Symbol")
         }
@@ -977,7 +983,8 @@ final class RowLayoutTests: XCTestCase {
     private func makeRow(status: RowStatus,
                          count: Int,
                          name: String = "проект с длинным именем, которое не влезает",
-                         topic: String? = "тема чата, тоже подлиннее строки") -> SwitcherRow {
+                         topic: String? = "тема чата, тоже подлиннее строки",
+                         usage: TokenCounts? = nil) -> SwitcherRow {
         let state: AgentState = switch status {
         case .blocked: .question
         case .done: .waiting
@@ -1004,7 +1011,8 @@ final class RowLayoutTests: XCTestCase {
                               model: nil,
                               contextUsedTokens: nil,
                               contextLimitTokens: nil,
-                              lastActivity: nil)
+                              lastActivity: nil,
+                              usage: usage)
         XCTAssertEqual(row.status, status, "the fixture does not fold to \(status)")
         XCTAssertEqual(row.activeCount, count)
         return row
@@ -1014,8 +1022,9 @@ final class RowLayoutTests: XCTestCase {
                            count: Int,
                            name: String = "проект с длинным именем, которое не влезает",
                            topic: String? = "тема чата, тоже подлиннее строки",
+                           usage: TokenCounts? = nil,
                            width: Double) throws -> Rendered {
-        let row = makeRow(status: status, count: count, name: name, topic: topic)
+        let row = makeRow(status: status, count: count, name: name, topic: topic, usage: usage)
         return try measure(SwitcherRowView(row: row, isFrontmost: false, panelVisible: false)
             .padding(.horizontal, 6)
             .frame(width: width))
@@ -1415,6 +1424,156 @@ final class RowLayoutTests: XCTestCase {
                      "a nameless row drew something between the bar and the slot")
     }
 
+    // MARK: - Spend on the second line
+
+    /// The spend the tests are run against: complete, and 3.40M
+    /// input-equivalent — 1M in, 200k out at five times, 400k of cache writes at
+    /// 1.25 and 9M of cache reads at a tenth.
+    private static let spend = TokenCounts(input: 1_000_000,
+                                           output: 200_000,
+                                           cacheCreation: 400_000,
+                                           cacheRead: 9_000_000)
+
+    /// A row whose title line draws nothing, so that every column of ink between
+    /// the colour bar and the indicator belongs to the second line.
+    ///
+    /// The columns of a render are collapsed over the whole height of the row,
+    /// so the name and the topic would otherwise be measured as one thing —
+    /// which is the same reason `testNothingButTheNameLivesBetweenTheBarAndTheSlot`
+    /// renders a nameless row.
+    private func renderSecondLine(topic: String?,
+                                  usage: TokenCounts?,
+                                  width: Double) throws -> Rendered {
+        try renderRow(status: .blocked, count: 0, name: "", topic: topic, usage: usage, width: width)
+    }
+
+    /// The number's own ink, rendered alone in the font the second line draws it
+    /// in.
+    private func inkWidthOfSpend(_ label: String) throws -> Double {
+        let alone = try measure(Text(label)
+            .font(.system(size: 11))
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .padding(Self.pad))
+        let ink = try XCTUnwrap(alone.span)
+        return ink.upperBound - ink.lowerBound
+    }
+
+    /// The spend is at the right-hand end of the second line, not wherever the
+    /// topic happens to stop. Measured against a topic short enough that the two
+    /// cannot be confused: if the number simply followed the topic it would be
+    /// tens of points to the left of where it is.
+    func testTheSpendStandsAtTheRightEndOfTheSecondLine() throws {
+        let width = Config.default.panelWidth
+        let label = try XCTUnwrap(SwitcherRowView.usageLabel(for: makeRow(status: .blocked,
+                                                                         count: 0,
+                                                                         usage: Self.spend)))
+        XCTAssertEqual(label, "3.40M")
+        let labelWidth = try inkWidthOfSpend(label)
+
+        let rendered = try renderSecondLine(topic: "тема", usage: Self.spend, width: width)
+        let slot = badgeSlot(inRowOfWidth: width)
+        let line = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
+                                               to: slot.lowerBound - 3),
+                                 "the second line drew nothing")
+        // The line ends where the text block ends, which is 24 pt short of the
+        // indicator: 9 pt of `HStack` spacing on either side of the 6 pt spacer.
+        XCTAssertEqual(line.upperBound, slot.lowerBound - 24, accuracy: 1.5,
+                       "the number is not flush with the end of the line")
+        // And what stands there is the whole number: that much ink, with blank
+        // in front of it where the 6 pt gap is.
+        let start = line.upperBound - labelWidth - 0.5
+        XCTAssertTrue(rendered.isBlank(from: start - 3.5, to: start - 1),
+                      "the topic ran into the number")
+        let number = try XCTUnwrap(rendered.span(from: start, to: line.upperBound))
+        XCTAssertEqual(number.upperBound - number.lowerBound, labelWidth, accuracy: 0.5)
+
+        // The topic is where it always was, at the left-hand end of the line.
+        let topic = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
+                                                to: start - 3.5),
+                                  "the topic went away")
+        // Measured: the topic's first glyph starts at 26.25, which is the bar's
+        // 16.75 plus the 9 pt of `HStack` spacing behind it.
+        XCTAssertLessThan(topic.lowerBound, Self.colourBar.upperBound + 11)
+    }
+
+    /// The number never gives way; the topic does. `fixedSize` is what says so,
+    /// and 150 pt is where it starts to matter — the panel width is a setting,
+    /// and at the default there is room for both.
+    ///
+    /// Held by measurement rather than by belief: the number's ink is compared
+    /// against the same string rendered on its own, so a truncated `3.4…` fails
+    /// even though it is still "drawn". Proved by removing the modifier — the
+    /// number came out 12.75 pt narrower at 150 pt, and this fails.
+    func testTheSpendIsNeverCutWhileTheTopicIs() throws {
+        let label = try XCTUnwrap(SwitcherRowView.usageLabel(for: makeRow(status: .blocked,
+                                                                         count: 0,
+                                                                         usage: Self.spend)))
+        let labelWidth = try inkWidthOfSpend(label)
+        var topicWidths: [Double] = []
+
+        for width in [Config.default.panelWidth, 240.0, 150.0] {
+            let rendered = try renderSecondLine(topic: "тема чата, тоже подлиннее строки",
+                                                usage: Self.spend,
+                                                width: width)
+            let slot = badgeSlot(inRowOfWidth: width)
+            let line = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
+                                                   to: slot.lowerBound - 3),
+                                     "nothing drawn at \(width) pt")
+            let start = line.upperBound - labelWidth - 0.5
+            let number = try XCTUnwrap(rendered.span(from: start, to: line.upperBound),
+                                       "no number at \(width) pt")
+            XCTAssertEqual(number.upperBound - number.lowerBound, labelWidth, accuracy: 0.5,
+                           "the number was cut at \(width) pt")
+            XCTAssertTrue(rendered.isBlank(from: start - 3.5, to: start - 1),
+                          "the topic ran into the number at \(width) pt")
+            let topic = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
+                                                    to: start - 3.5),
+                                      "the topic vanished entirely at \(width) pt")
+            topicWidths.append(topic.upperBound - topic.lowerBound)
+        }
+        // The topic is what shrank, all the way down.
+        XCTAssertGreaterThan(topicWidths[0], topicWidths[1])
+        XCTAssertGreaterThan(topicWidths[1], topicWidths[2])
+    }
+
+    /// A row with spend and no chat is the number alone, still on the right.
+    func testARowWithSpendAndNoTopicIsJustTheNumber() throws {
+        let width = Config.default.panelWidth
+        let label = try XCTUnwrap(SwitcherRowView.usageLabel(for: makeRow(status: .blocked,
+                                                                         count: 0,
+                                                                         usage: Self.spend)))
+        let labelWidth = try inkWidthOfSpend(label)
+        let rendered = try renderSecondLine(topic: nil, usage: Self.spend, width: width)
+        let slot = badgeSlot(inRowOfWidth: width)
+        let line = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
+                                               to: slot.lowerBound - 3),
+                                 "the number went away with the topic")
+        XCTAssertEqual(line.upperBound - line.lowerBound, labelWidth, accuracy: 0.5,
+                       "something other than the number is on the line")
+        XCTAssertEqual(line.upperBound, slot.lowerBound - 24, accuracy: 1.5)
+    }
+
+    /// And a row with neither grows no second line at all — the row keeps the
+    /// single-line height it has always had, which is what "looks exactly like
+    /// today" means for the ninety-odd rows of the projects section.
+    func testARowWithNeitherTopicNorSpendGrowsNoSecondLine() throws {
+        let width = Config.default.panelWidth
+        let bare = try renderRow(status: .blocked, count: 0, name: "имя",
+                                 topic: nil, usage: nil, width: width)
+        XCTAssertEqual(bare.size.height, 38, accuracy: 0.01,
+                       "a row with nothing to say is not the minimum height any more")
+        let variants: [(topic: String?, usage: TokenCounts?)] = [
+            ("тема", nil), (nil, Self.spend), ("тема", Self.spend)
+        ]
+        for second in variants {
+            let rendered = try renderRow(status: .blocked, count: 0, name: "имя",
+                                         topic: second.topic, usage: second.usage, width: width)
+            XCTAssertGreaterThan(rendered.size.height, bare.size.height,
+                                 "no second line for topic=\(second.topic as Any)")
+        }
+    }
+
     /// The count's own ink, rendered on its own in the font the row draws it in.
     private func inkWidthOfLabel(count: Int) throws -> Double {
         let label = try XCTUnwrap(SwitcherRowView.countLabel(for: makeRow(status: .blocked, count: count)))
@@ -1532,5 +1691,1242 @@ final class RowTooltipTests: XCTestCase {
     func testARowWithNoChatsHasNoChatSection() {
         let text = SwitcherRowView.tooltipText(for: row([]))
         XCTAssertFalse(text.contains("Чаты:"), text)
+    }
+}
+
+/// The picture in the menu bar, measured off the bitmap it actually draws —
+/// the same technique as `RowLayoutTests`, because the requirement is the same
+/// kind: a column that does not hold still.
+@MainActor
+final class MenuBarIconTests: XCTestCase {
+
+    /// One drawn icon, read back as ink.
+    private struct Rendered {
+        var width: Double
+        /// Columns carrying ink, in points from the left edge.
+        var ink: [Double]
+        /// How much was drawn, in pixels — the fill of a bar is an area, not a
+        /// span, so a proportion has to be counted rather than measured.
+        var coverage: [Double: Int]
+
+        func span(from: Double, to: Double) -> ClosedRange<Double>? {
+            let columns = ink.filter { $0 >= from && $0 <= to }
+            return columns.isEmpty ? nil : columns.min()!...columns.max()!
+        }
+
+        func pixels(from: Double, to: Double) -> Int {
+            coverage.filter { $0.key >= from && $0.key <= to }.values.reduce(0, +)
+        }
+    }
+
+    private static let scale = 4.0
+
+    private func render(_ percent: Int?) throws -> Rendered {
+        let image = MenuBarIcon.image(forPercent: percent)
+        XCTAssertTrue(image.isTemplate, "the status item picture is not a template")
+
+        let width = Int(image.size.width * Self.scale)
+        let height = Int(image.size.height * Self.scale)
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let context = try XCTUnwrap(CGContext(data: &pixels,
+                                              width: width,
+                                              height: height,
+                                              bitsPerComponent: 8,
+                                              bytesPerRow: width * 4,
+                                              space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let graphics = NSGraphicsContext(cgContext: context, flipped: false)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = graphics
+        image.draw(in: NSRect(x: 0, y: 0, width: Double(width), height: Double(height)))
+        NSGraphicsContext.restoreGraphicsState()
+
+        var ink: [Double] = []
+        var coverage: [Double: Int] = [:]
+        for x in 0..<width {
+            var drawn = 0
+            for y in 0..<height where pixels[(y * width + x) * 4 + 3] > 8 { drawn += 1 }
+            guard drawn > 0 else { continue }
+            let point = Double(x) / Self.scale
+            ink.append(point)
+            coverage[point, default: 0] += drawn
+        }
+        return Rendered(width: image.size.width, ink: ink, coverage: coverage)
+    }
+
+    /// The whole point of a fixed column: the item never changes width, so the
+    /// items to the left of it never shuffle. Not just across digits — across
+    /// the presence of a figure at all, which is the second way a status item
+    /// can be made to twitch, once a minute, whenever a tunnel goes down.
+    func testThePictureIsTheSameWidthWhateverTheFigure() throws {
+        let widths = try [nil, 0, 5, 42, 100].map { try render($0).width }
+        for width in widths {
+            XCTAssertEqual(width, widths[0], accuracy: 0.001, "widths: \(widths)")
+        }
+        // And that width is the one the column arithmetic says, not whatever a
+        // 5% string happened to need.
+        XCTAssertEqual(widths[0], Double(MenuBarIcon.width), accuracy: 0.001)
+        XCTAssertEqual(MenuBarIcon.numberColumnWidth,
+                       ceil(NSAttributedString(string: "100%",
+                                               attributes: [.font: MenuBarIcon.font]).size().width),
+                       accuracy: 0.001)
+    }
+
+    /// The number sits flush with the right edge of its column, so the `%` stays
+    /// in one place while the digits in front of it come and go — and a
+    /// three-digit figure still fits inside the column it was measured for.
+    func testEveryFigureEndsAtTheSameEdgeAndFitsItsColumn() throws {
+        let column = MenuBarIcon.numberColumn
+        var rightEdges: [Double] = []
+        for percent in [0, 5, 42, 100] {
+            let rendered = try render(percent)
+            let number = try XCTUnwrap(rendered.span(from: Double(column.lowerBound) - 1,
+                                                     to: Double(column.upperBound)),
+                                       "nothing drawn for \(percent)%")
+            XCTAssertGreaterThanOrEqual(number.lowerBound, Double(column.lowerBound) - 1,
+                                        "\(percent)% overflows its column on the left")
+            rightEdges.append(number.upperBound)
+        }
+        for edge in rightEdges {
+            XCTAssertEqual(edge, rightEdges[0], accuracy: 0.5, "right edges: \(rightEdges)")
+        }
+    }
+
+    /// No reading, no number. Not `0%` — a poll that failed carries the previous
+    /// figures and a percentage in the menu bar has no room to say "as of a
+    /// while ago" (§2.4: a confidently wrong figure is worse than a missing
+    /// one). A genuine zero *is* drawn, which is the other half of the same
+    /// rule: the two states have to look different.
+    func testWithoutAReadingNoNumberIsDrawnAtAll() throws {
+        let column = MenuBarIcon.numberColumn
+        let blank = try render(nil)
+        XCTAssertNil(blank.span(from: Double(column.lowerBound) - 1, to: Double(column.upperBound)),
+                     "something was drawn in the number's column with no reading")
+        let zero = try render(0)
+        XCTAssertNotNil(zero.span(from: Double(column.lowerBound) - 1, to: Double(column.upperBound)),
+                        "a genuine 0% drew no number")
+    }
+
+    /// And what decides that is the snapshot, not the drawing: a failed poll
+    /// keeps its previous numbers on purpose, so `fleetSevenDayMean` alone is
+    /// not enough to say there is a reading.
+    ///
+    /// The half that failed is what decides it, though — the figure comes from
+    /// `/gw/usage` and from nowhere else. Blanking it on any failure meant that
+    /// `/gw/sessions`, which feeds the per-project spend and has nothing to do
+    /// with quotas, wiped a quota reading that had arrived in the same pass,
+    /// intact and a second old.
+    func testOnlyAFailureOfTheQuotaHalfTakesTheFigureAway() {
+        var snapshot = UsageSnapshot.empty
+        snapshot.fleetSevenDayMean = 47.4
+        XCTAssertEqual(MenuBarIcon.percent(for: snapshot), 47)
+        snapshot.sessionsFailure = "/gw/sessions: unreachable"
+        XCTAssertEqual(MenuBarIcon.percent(for: snapshot), 47,
+                       "the sessions endpoint knows nothing about quotas")
+        snapshot.quotaFailure = "/gw/usage: unreachable"
+        XCTAssertNil(MenuBarIcon.percent(for: snapshot))
+        snapshot.quotaFailure = nil
+        snapshot.fleetSevenDayMean = nil
+        XCTAssertNil(MenuBarIcon.percent(for: snapshot))
+    }
+
+    /// The bar says the same thing the number does. Measured as area, because
+    /// the outline spans the whole bar in every state and a span would not tell
+    /// an empty bar from a full one.
+    func testTheBarFillsUpWithTheFigure() throws {
+        let bar = MenuBarIcon.barRect
+        let inked = try [nil, 0, 50, 100].map {
+            try render($0).pixels(from: Double(bar.minX), to: Double(bar.maxX))
+        }
+        // Dashed and empty is the least ink of all; a bar drawn 0% full is a
+        // solid outline and already more.
+        XCTAssertLessThan(inked[0], inked[1], "the dashed empty bar is not the emptiest: \(inked)")
+        XCTAssertLessThan(inked[1], inked[2], "0% is not emptier than 50%: \(inked)")
+        XCTAssertLessThan(inked[2], inked[3], "50% is not emptier than 100%: \(inked)")
+    }
+
+    /// Above the top of the scale the quota is spent, and the picture says so
+    /// rather than growing a column for a fourth digit.
+    func testAFigureAboveTheScaleIsDrawnAsAFullBar() throws {
+        let full = try render(100)
+        let over = try render(140)
+        XCTAssertEqual(over.width, full.width, accuracy: 0.001)
+        XCTAssertEqual(MenuBarIcon.label(forPercent: 140).string, "100%")
+        XCTAssertEqual(MenuBarIcon.label(forPercent: -20).string, "0%")
+    }
+}
+
+/// `NSApp.hide` has four states of this app's own that make it destructive
+/// (§4). Two of them were found by probing; the third arrived with the popover
+/// and the fourth with the menu the popover has to make room for.
+@MainActor
+final class HideSafetyTests: XCTestCase {
+
+    func testHidingIsSafeOnlyWhenNothingOfOursIsUp() {
+        XCTAssertTrue(PanelController.canHideApp(modal: false, menuTrackingDepth: 0,
+                                                 menuOpening: false, popoverOpen: false))
+        XCTAssertFalse(PanelController.canHideApp(modal: true, menuTrackingDepth: 0,
+                                                  menuOpening: false, popoverOpen: false))
+        XCTAssertFalse(PanelController.canHideApp(modal: false, menuTrackingDepth: 1,
+                                                  menuOpening: false, popoverOpen: false))
+        // `hide` takes every window of the app down, the popover among them, and
+        // the auto-hide fires 400 ms after the pointer leaves the panel — with
+        // the popover still open under the menu bar.
+        XCTAssertFalse(PanelController.canHideApp(modal: false, menuTrackingDepth: 0,
+                                                  menuOpening: false, popoverOpen: true))
+    }
+
+    /// The fourth state is the only one that is not about what is on screen but
+    /// about what is one instruction away from it.
+    ///
+    /// Putting the status menu up begins by closing the popover, and that close
+    /// hands the keyboard back: with the menu asked for but not yet tracked,
+    /// nothing answered no, and the hide landed in the gap — cancelling a
+    /// tracking that had not started, so the menu collapsed under the pointer
+    /// that asked for it. The order of the two lines is not a defence; it holds
+    /// only while AppKit delivers the close synchronously, which is nobody's
+    /// promise.
+    func testAMenuOnItsWayUpCountsAsAMenuAlreadyUp() {
+        XCTAssertFalse(PanelController.canHideApp(modal: false, menuTrackingDepth: 0,
+                                                  menuOpening: true, popoverOpen: false))
+        // And it is the flag alone that says so: nothing else about that instant
+        // is different from the safe state above.
+        XCTAssertTrue(PanelController.canHideApp(modal: false, menuTrackingDepth: 0,
+                                                 menuOpening: false, popoverOpen: false))
+    }
+
+    /// The rule above is a pure function and was held as one; the pair of calls
+    /// that puts it into that state was held by nothing. Both halves were probed
+    /// by breaking them, and either break went green through the whole suite as
+    /// it then stood.
+    ///
+    /// The clearing half is the dangerous one, and it is the one state of
+    /// `canHideApp` with no way back: the tracking count is reconciled with
+    /// reality before every retry and a modal is asked of the system anew, but a
+    /// flag left set answers "no, do not hide" for the rest of the run. The
+    /// keyboard is then never handed back again — §4's "typing into nowhere",
+    /// silently and permanently — while the retry timer goes on waking the
+    /// process five times a second forever.
+    ///
+    /// No AppKit state of any kind is needed for it, which is the other half of
+    /// why it went unheld: it looked like it would.
+    func testTheMenuFlagIsBothSetAndCleared() {
+        let controller = PanelController(config: .default, store: SnapshotStore(config: .default))
+        XCTAssertFalse(controller.menuOpening, "a fresh controller is already standing in for a menu")
+        controller.menuWillOpen()
+        XCTAssertTrue(controller.menuOpening, "the gap before the tracking begins is not covered")
+        controller.menuOpeningDidFinish()
+        XCTAssertFalse(controller.menuOpening, "the flag stuck: the keyboard is never handed back again")
+    }
+}
+
+/// The left click on the status item, and the press it must not answer twice.
+@MainActor
+final class StatusItemClickTests: XCTestCase {
+
+    private let closed = Date(timeIntervalSince1970: 1_786_800_000)
+
+    /// A transient popover is dismissed on the mouse-*down*, while the status
+    /// item's action is sent on the mouse-*up* of the same press — so the click
+    /// that closed it could open it again, and the user would see a blink where
+    /// they had asked for a close. Nothing identifies the two halves as one
+    /// press; what marks them is that the button was still down at the close.
+    func testTheClickThatDismissedThePopoverDoesNotReopenIt() {
+        var dismissal = PopoverDismissal()
+        dismissal.popoverClosed(at: closed, midPress: true)
+        XCTAssertTrue(dismissal.shouldIgnoreClick(at: closed.addingTimeInterval(0.01)),
+                      "the second half of the press that closed it opened it again")
+    }
+
+    /// And what the window measures is not the length of that press. On the
+    /// measured path the dismissing press never reaches the action at all (see
+    /// `toggleUsagePopover`), so the mark it leaves is spent by the *next*
+    /// click — which makes the interval bounded here the pause between two
+    /// clicks, and the window's price a deliberate second click swallowed.
+    ///
+    /// An ordinary double click on the status item is `down#1 → up#2`, 200–350
+    /// ms end to end. At the 0.4 s this window used to be, the whole of that
+    /// range was inside it: the popover closed on the first click and did not
+    /// come back on the second.
+    func testADeliberateDoubleClickIsAnswered() {
+        var dismissal = PopoverDismissal()
+        dismissal.popoverClosed(at: closed, midPress: true)
+        XCTAssertFalse(dismissal.shouldIgnoreClick(at: closed.addingTimeInterval(0.3)),
+                       "the second click of an ordinary double click was swallowed")
+    }
+
+    /// One press, one answer. Asking spends the mark, so the click after it —
+    /// however soon — is somebody's first half and gets its popover.
+    ///
+    /// Which is what bounds the cost of the window to a single click: on the
+    /// measured path the mark is spent by the next click rather than by the
+    /// press that left it, and that one click is the whole of what a window set
+    /// too wide can swallow.
+    func testTheMarkIsSpentByTheClickItAnswersFor() {
+        var dismissal = PopoverDismissal()
+        dismissal.popoverClosed(at: closed, midPress: true)
+        XCTAssertTrue(dismissal.shouldIgnoreClick(at: closed.addingTimeInterval(0.01)))
+        XCTAssertFalse(dismissal.shouldIgnoreClick(at: closed.addingTimeInterval(0.02)),
+                       "the same close was answered for twice")
+    }
+
+    /// A close with no button down is not a press at all: Esc, a click that
+    /// landed elsewhere and finished there, `showStatusMenu`'s own
+    /// `performClose`. Nothing is armed, so the very next click opens the
+    /// popover — the old window swallowed it if it came quickly enough.
+    func testACloseThatWasNotAPressArmsNothing() {
+        var dismissal = PopoverDismissal()
+        dismissal.popoverClosed(at: closed, midPress: false)
+        XCTAssertFalse(dismissal.shouldIgnoreClick(at: closed.addingTimeInterval(0.01)),
+                       "a dismissal by Esc swallowed the click after it")
+    }
+
+    /// And it does more than arm nothing: it disarms. A close with no button
+    /// down clears a mark an earlier press left, rather than leaving it to be
+    /// spent by a click that has nothing to do with it.
+    ///
+    /// Unreachable in practice, and pinned all the same. Two closes with no
+    /// click between them need the popover reopened in between, and reopening it
+    /// *is* a click — the one that spends the mark. But the type takes the state
+    /// directly, so holding the `: nil` half costs three lines, and every other
+    /// clause of this rule is held by name rather than by a comment saying it
+    /// cannot happen.
+    func testACloseThatWasNotAPressClearsAMarkAlreadyArmed() {
+        var dismissal = PopoverDismissal()
+        dismissal.popoverClosed(at: closed, midPress: true)
+        dismissal.popoverClosed(at: closed.addingTimeInterval(0.01), midPress: false)
+        XCTAssertFalse(dismissal.shouldIgnoreClick(at: closed.addingTimeInterval(0.02)),
+                       "a mark left by an earlier press outlived the close that should have cleared it")
+    }
+
+    /// The window is the backstop for a second half that never arrives, and both
+    /// its sides are the constant's.
+    ///
+    /// A millisecond off either edge rather than on it: a `Date` this far from
+    /// its epoch resolves to a fraction of a microsecond, so the difference of
+    /// two of them a nominal window apart comes back a hair short of it (0.4 s
+    /// measured as 0.39999997, while that was the constant) — the exact boundary
+    /// is not a thing a test can stand on, and standing on it made this
+    /// assertion fail while the rule was right.
+    func testBothSidesOfTheWindow() {
+        let window = PopoverDismissal.suppressionWindow
+        var inside = PopoverDismissal()
+        inside.popoverClosed(at: closed, midPress: true)
+        XCTAssertTrue(inside.shouldIgnoreClick(at: closed.addingTimeInterval(window - 0.001)))
+
+        var outside = PopoverDismissal()
+        outside.popoverClosed(at: closed, midPress: true)
+        XCTAssertFalse(outside.shouldIgnoreClick(at: closed.addingTimeInterval(window + 0.001)))
+
+        // And the constant is bounded on the side the measurement moved it to.
+        // What it bounds is the pause between two clicks, so its cost is a
+        // second click swallowed — and an ordinary double click on the icon has
+        // its two ends 200–350 ms apart. At the 0.4 s it used to be, all of
+        // that was inside; the band left has to be narrower than the gesture it
+        // can eat.
+        XCTAssertLessThan(window, 0.35, "an ordinary double click is swallowed whole")
+        // Not nothing, either: the case it stands for is a press whose action
+        // does arrive, and a window shorter than a brisk press catches none.
+        XCTAssertGreaterThan(window, 0.2, "the window is too short for the press it stands for")
+    }
+
+    /// Never closed, nothing to suppress: the first click of all opens it.
+    func testTheFirstClickOfAllOpensIt() {
+        var dismissal = PopoverDismissal()
+        XCTAssertFalse(dismissal.shouldIgnoreClick(at: closed))
+    }
+}
+
+/// The other half of §4's hand-back: not *may* the app hide, but *does it owe*
+/// anyone the keyboard. Every step below is a call the app makes in that order.
+final class ActivationDebtTests: XCTestCase {
+
+    /// The sequence the popover's activation used to be lost in, and the reason
+    /// the debt is one account rather than one flag per activator.
+    ///
+    /// Reachable by hand in seconds: click the status item (the app activates
+    /// for the popover), take the pointer to the left edge (the panel comes up),
+    /// dismiss the popover with Esc. The popover's own hand-back declines —
+    /// rightly, the panel is on screen — and the panel's hand-back used to know
+    /// nothing about an activation it had not performed itself. The panel then
+    /// slid away and left the app frontmost with no window at all: §4's defect,
+    /// the one where the user's typing goes nowhere until they click something.
+    func testAnActivationForThePopoverIsHandedBackWhenThePanelGoesAway() {
+        var debt = ActivationDebt()
+        debt.activated()
+        XCTAssertEqual(debt.settle(panelVisible: true, appActive: true, canHide: true), .nothing,
+                       "the panel is up: the app is in front for its sake")
+        XCTAssertTrue(debt.isOwed, "the debt was written off while the panel stood in for it")
+        XCTAssertEqual(debt.settle(panelVisible: false, appActive: true, canHide: true), .hide)
+        XCTAssertEqual(debt.settle(panelVisible: false, appActive: true, canHide: true), .nothing,
+                       "hidden twice for one activation")
+    }
+
+    /// Nothing owed, nothing given back — the panel that never activated (no
+    /// search, no popover) must not hide the app when it goes away.
+    func testAPanelThatNeverActivatedOwesNothing() {
+        var debt = ActivationDebt()
+        XCTAssertFalse(debt.isOwed)
+        XCTAssertEqual(debt.settle(panelVisible: false, appActive: true, canHide: true), .nothing)
+    }
+
+    /// A row click hands the front slot to the editor by itself. Hiding after
+    /// that would be hiding somebody else's window, so the debt is written off
+    /// instead of being paid.
+    func testTheFrontSlotGoneElsewhereSettlesTheDebtWithoutHiding() {
+        var debt = ActivationDebt()
+        debt.activated()
+        XCTAssertEqual(debt.settle(panelVisible: false, appActive: false, canHide: true), .nothing)
+        XCTAssertFalse(debt.isOwed)
+    }
+
+    /// Something of ours in the way — a modal, a menu being tracked, the popover
+    /// itself — postpones the hand-back rather than dropping it. Dropped, the
+    /// app stays frontmost with nothing to type into and nothing left to notice.
+    func testAnObstacleOnlyPostponesTheHandBack() {
+        var debt = ActivationDebt()
+        debt.activated()
+        XCTAssertEqual(debt.settle(panelVisible: false, appActive: true, canHide: false), .retry)
+        XCTAssertTrue(debt.isOwed)
+        XCTAssertEqual(debt.settle(panelVisible: false, appActive: true, canHide: true), .hide)
+    }
+}
+
+/// The row's second number: what it says, and what it says when it does not
+/// know. The layout of it is `RowLayoutTests`; this is the text.
+@MainActor
+final class RowSpendTests: XCTestCase {
+
+    private func row(_ usage: TokenCounts?, topic: String? = "тема") -> SwitcherRow {
+        SwitcherRow(id: "project:/tmp/p",
+                    kind: .project,
+                    displayName: "vscode-switcher",
+                    colorHex: "#000000",
+                    project: nil,
+                    window: nil,
+                    sessions: [],
+                    state: nil,
+                    activeSubagents: 0,
+                    subagentDescriptions: [],
+                    chatTopic: topic,
+                    model: nil,
+                    contextUsedTokens: nil,
+                    contextLimitTokens: nil,
+                    lastActivity: nil,
+                    usage: usage)
+    }
+
+    /// The same figure the dump prints, rounded the same way — one formatter,
+    /// because a dump that rounds differently describes a row the panel does not
+    /// draw.
+    func testTheNumberIsTheOneTheDumpPrints() {
+        let complete = TokenCounts(input: 1_000_000, output: 200_000,
+                                   cacheCreation: 400_000, cacheRead: 9_000_000)
+        XCTAssertEqual(SwitcherRowView.usageLabel(for: row(complete)), "3.40M")
+        XCTAssertEqual(ConsoleDump.usageCell(for: row(complete)), "3.40M")
+        XCTAssertEqual(SwitcherRowView.usageLabel(for: row(TokenCounts(input: 900, output: 0,
+                                                                      cacheCreation: 0,
+                                                                      cacheRead: 0))), "900")
+    }
+
+    /// A number with an unnamed counter behind it is a lower bound, and the row
+    /// has to say so — `≥` here, `>=` in the dump, the same fact either way.
+    func testALowerBoundWearsItsMark() {
+        let partial = TokenCounts(input: 1_000_000, output: nil, cacheCreation: nil, cacheRead: nil)
+        XCTAssertEqual(SwitcherRowView.usageLabel(for: row(partial)), "≥1.00M")
+        XCTAssertTrue(ConsoleDump.usageCell(for: row(partial)).hasPrefix(">="))
+        // And a complete one does not wear it.
+        let complete = TokenCounts(input: 1_000_000, output: 0, cacheCreation: 0, cacheRead: 0)
+        XCTAssertEqual(SwitcherRowView.usageLabel(for: row(complete)), "1.00M")
+    }
+
+    /// No figure at all, and a figure in which the gateway named nothing, both
+    /// draw nothing. The second is the one worth a test: `weighted()` folds an
+    /// unnamed counter in as zero, so such a row would otherwise show a
+    /// confident `0` where the honest answer is "no idea" (§2.4).
+    func testNothingKnownDrawsNothingRatherThanAZero() {
+        XCTAssertNil(SwitcherRowView.usageLabel(for: row(nil)))
+        let blank = TokenCounts(input: nil, output: nil, cacheCreation: nil, cacheRead: nil)
+        XCTAssertNil(SwitcherRowView.usageLabel(for: row(blank)))
+        XCTAssertEqual(SwitcherRowView.usageLabel(for: row(.zero)), nil)
+    }
+
+    /// The one number in the row is input-equivalent — four counters folded at
+    /// four different prices — so the tooltip carries the four the gateway
+    /// actually named. An unnamed one is `?`, never 0.
+    func testTheTooltipBreaksTheNumberIntoTheFourCounters() {
+        let text = SwitcherRowView.tooltipText(for: row(TokenCounts(input: 1_000_000,
+                                                                   output: 200_000,
+                                                                   cacheCreation: 400_000,
+                                                                   cacheRead: 9_000_000)))
+        XCTAssertTrue(text.contains("Токены (input-equivalent): 3.40M"), text)
+        XCTAssertTrue(text.contains("• in 1.00M"), text)
+        XCTAssertTrue(text.contains("• out 200k"), text)
+        XCTAssertTrue(text.contains("• cache write 400k"), text)
+        XCTAssertTrue(text.contains("• cache read 9.00M"), text)
+
+        let partial = SwitcherRowView.tooltipText(for: row(TokenCounts(input: 50, output: nil,
+                                                                      cacheCreation: nil,
+                                                                      cacheRead: 5_401_028)))
+        XCTAssertTrue(partial.contains("• out ?"), partial)
+        XCTAssertTrue(partial.contains("• cache write ?"), partial)
+        XCTAssertTrue(partial.contains("Токены (input-equivalent): ≥540k"), partial)
+    }
+
+    /// And a row with no spend says nothing about spend, rather than saying zero.
+    func testTheTooltipSaysNothingWhenThereIsNothingToSay() {
+        XCTAssertFalse(SwitcherRowView.tooltipText(for: row(nil)).contains("Токены"))
+        let blank = TokenCounts(input: nil, output: nil, cacheCreation: nil, cacheRead: nil)
+        XCTAssertFalse(SwitcherRowView.tooltipText(for: row(blank)).contains("Токены"))
+    }
+
+    /// The path stays the last line of a project row (§4) — the counters go in
+    /// front of it, not after.
+    func testThePathIsStillTheLastLine() {
+        var built = row(TokenCounts(input: 10, output: 10, cacheCreation: 10, cacheRead: 10))
+        built.project = TestFixtures.project(path: "/tmp/home-network", rootName: "home-network")
+        let lines = SwitcherRowView.tooltipText(for: built).split(separator: "\n")
+        XCTAssertEqual(lines.last, "/tmp/home-network")
+    }
+}
+
+/// The popover's chart: what it fetches, when it fetches it, and what it does
+/// with a hole in the data.
+@MainActor
+final class UsageHistoryTests: XCTestCase {
+
+    /// Counts the requests a stub transport was handed, and remembers their URLs.
+    private final class RequestCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [URL] = []
+        var urls: [URL] {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+
+        func record(_ url: URL?) {
+            guard let url else { return }
+            lock.lock()
+            stored.append(url)
+            lock.unlock()
+        }
+    }
+
+    /// One suite for the whole class, wiped around every test.
+    ///
+    /// A suite name is a file in the user's preferences, and a fresh name per
+    /// test would leave one behind on every run — the machine these tests are
+    /// written on is somebody's working machine. Wiping the domain is what makes
+    /// each test start clean.
+    ///
+    /// It does not make the run leave nothing behind, and the promise was
+    /// trimmed to what it actually keeps: `removePersistentDomain` empties the
+    /// domain, and `~/Library/Preferences/<suite>.plist` stays as an empty
+    /// 42-byte file. Deleting the file here would be writing behind `cfprefsd`'s
+    /// back, which holds the domain in memory and may write it out again after
+    /// the last test — so one empty file per machine is the cost, and no value
+    /// of ours survives in it.
+    private static let suiteName = "xyz.vvzvlad.vscode-switcher.tests"
+
+    override func setUp() {
+        super.setUp()
+        UserDefaults.standard.removePersistentDomain(forName: Self.suiteName)
+    }
+
+    override func tearDown() {
+        UserDefaults.standard.removePersistentDomain(forName: Self.suiteName)
+        super.tearDown()
+    }
+
+    /// Whether the stub gateway is answering at the moment. The interesting
+    /// cases here are all changes of that partway through: a gateway is not up
+    /// or down for a whole test, it goes away under an open popover.
+    private final class Gateway: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored = true
+        var answers: Bool {
+            get {
+                lock.lock()
+                defer { lock.unlock() }
+                return stored
+            }
+            set {
+                lock.lock()
+                stored = newValue
+                lock.unlock()
+            }
+        }
+    }
+
+    /// Answers every history request from the fixture, and counts them.
+    private func client(_ counter: RequestCounter, gateway: Gateway = Gateway()) -> UsageClient {
+        UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            counter.record(request.url)
+            guard gateway.answers else { throw UsageError.unreachable("the gateway is not there") }
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            return (Data(UsageFixtures.history.utf8), response)
+        }
+    }
+
+    private func model(_ counter: RequestCounter,
+                       defaults: UserDefaults) -> UsageHistoryModel {
+        UsageHistoryModel(client: client(counter), defaults: defaults)
+    }
+
+    private func freshDefaults() -> UserDefaults {
+        UserDefaults(suiteName: Self.suiteName) ?? .standard
+    }
+
+    /// The whole reason this schedule is separate from `UsageStore`'s: a closed
+    /// popover costs nothing. Not "almost nothing" — no request at all, whatever
+    /// is poked at it.
+    ///
+    /// Poked *after* an open, on purpose. A model that has never been opened
+    /// knows no accounts, so it asks for nothing however broken its guard is:
+    /// the first version of this test passed with the guard deleted. The
+    /// accounts have to be in hand for the guard to be the only thing stopping
+    /// the requests.
+    func testAClosedPopoverAsksForNothing() async {
+        let counter = RequestCounter()
+        let history = model(counter, defaults: freshDefaults())
+        // Nothing before the first open either.
+        history.fetch()
+        await history.fetchTask?.value
+        XCTAssertEqual(counter.urls.count, 0, "asked before ever being opened: \(counter.urls)")
+
+        history.open(labels: ["acc1", "acc2"])
+        await history.fetchTask?.value
+        let asked = counter.urls.count
+        XCTAssertEqual(asked, 2)
+
+        history.close()
+        history.fetch()
+        history.update(labels: ["acc1", "acc2", "acc3"])
+        history.period = .month
+        await history.fetchTask?.value
+        XCTAssertEqual(counter.urls.count, asked, "asked while closed: \(counter.urls)")
+    }
+
+    /// Opening asks once for each account, on the account's own endpoint, for
+    /// the chosen window.
+    func testOpeningAsksOnceForEveryAccount() async {
+        let counter = RequestCounter()
+        let history = model(counter, defaults: freshDefaults())
+        history.period = .hour
+        history.open(labels: ["acc1", "acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        XCTAssertEqual(Set(counter.urls.map(\.path)),
+                       ["/gw/usage/acc1/history", "/gw/usage/acc2/history"])
+        XCTAssertEqual(counter.urls.count, 2)
+        XCTAssertEqual(history.series.map(\.label), ["acc1", "acc2"])
+        // The window asked for is the period, to the second.
+        let since = try? XCTUnwrap(counter.urls.first?.query?
+            .split(separator: "=").last.flatMap { Double($0) })
+        XCTAssertEqual(Date().timeIntervalSince1970 - (since ?? 0),
+                       HistoryPeriod.hour.seconds, accuracy: 5)
+    }
+
+    /// And closing it stops the schedule: a tick after the close asks for
+    /// nothing more.
+    func testClosingStopsTheSchedule() async {
+        let counter = RequestCounter()
+        let history = model(counter, defaults: freshDefaults())
+        history.open(labels: ["acc1"])
+        await history.fetchTask?.value
+        let asked = counter.urls.count
+        history.close()
+        history.fetch()
+        await history.fetchTask?.value
+        XCTAssertEqual(counter.urls.count, asked)
+        XCTAssertFalse(history.isOpen)
+    }
+
+    /// A new period is a new chart, so it is asked for at once — and remembered,
+    /// because the popover is not the panel: its state is a preference, not a
+    /// fresh question at every appearance (§4).
+    func testThePeriodIsRefetchedAndRemembered() async {
+        let counter = RequestCounter()
+        let defaults = freshDefaults()
+        let history = model(counter, defaults: defaults)
+        XCTAssertEqual(history.period, .day, "the default period is not the documented one")
+        history.open(labels: ["acc1"])
+        await history.fetchTask?.value
+        history.period = .month
+        await history.fetchTask?.value
+        history.close()
+
+        XCTAssertEqual(counter.urls.count, 2, "changing the period did not refetch")
+        XCTAssertEqual(UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL),
+                                         defaults: defaults).period,
+                       .month,
+                       "the period did not outlive the model")
+    }
+
+    /// The pass must not need the main thread — the same rule as
+    /// `UsageStore.poll` (§6) and the same trap under it: everything `load`
+    /// touches is declared on a `@MainActor` class, so one read of a `static let`
+    /// that lost its `nonisolated`, or the loss of `nonisolated` on `load`
+    /// itself, silently moves the whole thing onto the main thread. There is no
+    /// diagnostic for it under `-strict-concurrency=complete`; it was found in
+    /// the store by sampling a `--dump` that never returned.
+    ///
+    /// Here it would be quieter still: two to five HTTP requests, each up to five
+    /// seconds, run from a popover that is open at that very moment — the app
+    /// would simply stop redrawing while the user looked at it.
+    ///
+    /// A timed wait rather than an open one, so a regression is a failed test
+    /// and not a run that hangs. Checked by breaking: reading
+    /// `UsageHistoryModel.refreshSeconds` (a `static let` on the `@MainActor`
+    /// class) inside `load` fails it after the timeout instead of passing in
+    /// milliseconds.
+    func testLoadDoesNotNeedTheMainThread() {
+        let counter = RequestCounter()
+        let client = client(counter)
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            _ = await UsageHistoryModel.load(client: client, labels: ["acc1", "acc2"],
+                                             since: Date().addingTimeInterval(-3600))
+            semaphore.signal()
+        }
+        XCTAssertEqual(semaphore.wait(timeout: .now() + 5), .success,
+                       "the pass waited for a main thread that is standing right here")
+        XCTAssertEqual(counter.urls.count, 2, "the pass finished without asking for anything")
+    }
+
+    /// A `null` sample is a hole, not a reading of zero: the line breaks there.
+    /// Joining across it — which is what dropping the sample does — draws a
+    /// straight line through a stretch nobody measured.
+    func testAHoleBreaksTheLineInsteadOfBeingJoinedAcross() throws {
+        // Decoded rather than constructed: `HistoryPoint` has only the wire
+        // format's initialiser, and the wire format is where a hole comes from.
+        func points(_ readings: [Double?]) throws -> [HistoryPoint] {
+            let body = readings.enumerated().map { index, value in
+                "{\"ts\": \(1_786_700_000 + index * 60), \"util_7d\": \(value.map { "\($0)" } ?? "null")}"
+            }
+            return try UsageFixtures.decode("[\(body.joined(separator: ","))]", as: [HistoryPoint].self)
+        }
+        let series = AccountSeries.make(label: "acc1", points: try points([10, 12, nil, 20, 22]))
+        XCTAssertEqual(series.segments.count, 2, "the hole did not break the line")
+        XCTAssertEqual(series.segments.map(\.readings.count), [2, 2])
+        XCTAssertEqual(Set(series.segments.map(\.id)).count, 2, "two runs share a series key")
+        XCTAssertFalse(series.isEmpty)
+
+        // A series of nothing but holes has nothing to draw, and says so rather
+        // than drawing a flat line at zero.
+        XCTAssertTrue(AccountSeries.make(label: "acc1", points: try points([nil, nil])).isEmpty)
+    }
+
+    /// A pass that finished and a pass that brought lines are two facts, and the
+    /// chart is entitled to be told which one happened.
+    ///
+    /// One stamp for both said "the answer is in" after a pass in which every
+    /// account failed, and the chart then announced that the period held no
+    /// data — a statement the gateway had not made and could not have, having
+    /// made none. The schedule still needs the other fact, or a first pass that
+    /// failed would stop the refresh dead for as long as the popover stays open.
+    func testAPassNobodyAnsweredIsNotAnAnswer() async throws {
+        let counter = RequestCounter()
+        let gateway = Gateway()
+        gateway.answers = false
+        let history = UsageHistoryModel(client: client(counter, gateway: gateway),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc1", "acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        XCTAssertEqual(counter.urls.count, 2, "the pass never reached the gateway")
+        XCTAssertNil(history.fetchedAt, "a pass nobody answered dated the lines all the same")
+        XCTAssertNotNil(history.checkedAt, "the attempt left no clock for the refresh to run on")
+        XCTAssertNotNil(history.failure)
+
+        // And this is what the popover then writes under the empty plot.
+        var snapshot = UsageSnapshot.empty
+        snapshot.quotaFetchedAt = Date()
+        snapshot.accounts = try UsageFixtures.decode(UsageFixtures.usage, as: UsageReport.self).accounts
+        XCTAssertEqual(UsagePopoverView.plotEmptyLabel(snapshot: snapshot,
+                                                       seriesFetchedAt: history.fetchedAt,
+                                                       seriesPeriod: history.seriesPeriod,
+                                                       period: history.period,
+                                                       historyFailure: history.failure),
+                       "Шлюз не ответил")
+    }
+
+    /// The other side of it: a failed pass leaves the lines it did not replace
+    /// exactly as they were, stamp included. Slightly stale beats blank — but a
+    /// stamp that moved would call them fresh.
+    func testAFailedPassKeepsTheLinesAndTheirAge() async {
+        let counter = RequestCounter()
+        let gateway = Gateway()
+        let history = UsageHistoryModel(client: client(counter, gateway: gateway),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc1"])
+        await history.fetchTask?.value
+        let landed = history.fetchedAt
+        XCTAssertNotNil(landed)
+
+        gateway.answers = false
+        history.fetch()
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        XCTAssertEqual(history.series.map(\.label), ["acc1"], "the failed pass blanked the chart")
+        XCTAssertEqual(history.fetchedAt, landed, "the failed pass re-dated lines it did not bring")
+        XCTAssertNotNil(history.failure)
+    }
+
+    /// And it goes on asking. The refresh is keyed on the attempt, not on the
+    /// lines: keyed on the lines it would stop dead precisely when the gateway
+    /// is down — the first failed pass leaves none — and the chart would then
+    /// sit unrefreshed for as long as the popover is open, a transient failure
+    /// quietly becoming a permanent one.
+    func testTheRefreshGoesOnAskingAfterAPassThatBroughtNothing() async {
+        let counter = RequestCounter()
+        let gateway = Gateway()
+        gateway.answers = false
+        let history = UsageHistoryModel(client: client(counter, gateway: gateway),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc1"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        let asked = counter.urls.count
+        XCTAssertEqual(asked, 1)
+        XCTAssertNil(history.fetchedAt, "the failed pass dated lines that never came")
+
+        // Not on every tick, though: the clock behind the wording runs four
+        // times a minute, the pass once.
+        history.tick(now: Date().addingTimeInterval(UsageHistoryModel.refreshSeconds / 2))
+        await history.fetchTask?.value
+        XCTAssertEqual(counter.urls.count, asked, "asked again before the interval was up")
+
+        history.tick(now: Date().addingTimeInterval(UsageHistoryModel.refreshSeconds + 1))
+        await history.fetchTask?.value
+        XCTAssertGreaterThan(counter.urls.count, asked,
+                             "a chart whose first pass failed never asked again")
+    }
+
+    /// Unless the question changed under them. The picker moves first and the
+    /// answer lands after: a pass started for `30d` that fails leaves `1d` lines
+    /// on screen with `30d` selected above them — a chart lying about its own
+    /// axis, and the one case where blank beats stale.
+    func testAFailedPassAfterAChangeOfPeriodDropsTheOldLines() async {
+        let counter = RequestCounter()
+        let gateway = Gateway()
+        let history = UsageHistoryModel(client: client(counter, gateway: gateway),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc1"])
+        await history.fetchTask?.value
+        XCTAssertFalse(history.series.isEmpty)
+        XCTAssertEqual(history.seriesPeriod, .day)
+
+        gateway.answers = false
+        history.period = .month
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        XCTAssertTrue(history.series.isEmpty, "lines from another window survived under the new label")
+        XCTAssertNil(history.fetchedAt, "the footer went on dating lines that are not there")
+        XCTAssertNil(history.seriesPeriod)
+    }
+
+    /// And on the pass that *succeeds*, the same lines are just as wrong for the
+    /// seconds before it lands.
+    ///
+    /// `period.didSet` only refetches; it does not touch the series, and the
+    /// answer is up to five seconds away through the tunnel. So between the tap
+    /// on `30d` and the lines for it there is a whole chart of `1d` data sitting
+    /// under the `30d` tab — the same picture lying about its own axis that
+    /// `apply` refuses to keep one moment later, shown for as long as the
+    /// gateway takes. The drawing site has to ask `seriesPeriod`, which is the
+    /// only thing that knows.
+    ///
+    /// Held at the request the view makes rather than through the view itself:
+    /// what the chart draws is a `Charts` tree with no ink of its own to count,
+    /// so what is checked is the pair the view branches on and the words it puts
+    /// up instead.
+    func testTheLinesOfTheOldPeriodAreNotDrawnUnderTheNewOne() async throws {
+        let counter = RequestCounter()
+        let gateway = Gateway()
+        let history = UsageHistoryModel(client: client(counter, gateway: gateway),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc1"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        XCTAssertFalse(history.series.isEmpty)
+        XCTAssertEqual(history.seriesPeriod, history.period, "the lines answer the period asked for")
+
+        // The picker moves. Nothing else has happened yet: the request is in
+        // flight and the lines in hand are the previous window's.
+        history.period = .month
+        XCTAssertFalse(history.series.isEmpty, "the model blanked the lines by itself")
+        XCTAssertNotEqual(history.seriesPeriod, history.period,
+                          "the lines on hand answer the period being asked about")
+
+        var snapshot = UsageSnapshot.empty
+        snapshot.quotaFetchedAt = Date()
+        snapshot.accounts = try UsageFixtures.decode(UsageFixtures.usage, as: UsageReport.self).accounts
+        XCTAssertEqual(UsagePopoverView.plotEmptyLabel(snapshot: snapshot,
+                                                       seriesFetchedAt: history.fetchedAt,
+                                                       seriesPeriod: history.seriesPeriod,
+                                                       period: history.period,
+                                                       historyFailure: history.failure),
+                       "Загрузка…",
+                       "the chart answered for a period nobody has asked the gateway about yet")
+
+        // And the footer one row under it must not date lines that are not on
+        // screen. The stamp in hand is the previous window's and has not moved;
+        // told from it alone, the footer wrote "график обновлён N назад"
+        // directly beneath "Загрузка…". Asked of the model rather than of
+        // hand-made arguments, because what is under test here is that the
+        // state is reachable at all — it is, on every change of period.
+        XCTAssertNotNil(history.fetchedAt, "the model left no stamp for the footer to misuse")
+        XCTAssertEqual(UsagePopoverView.chartAgeLabel(fetchedAt: history.fetchedAt,
+                                                      seriesPeriod: history.seriesPeriod,
+                                                      period: history.period,
+                                                      now: history.now),
+                       "график ещё не обновлялся",
+                       "the footer dated the previous window's lines under the new tab")
+
+        // And when the answer lands the pair agrees again, which is what puts
+        // the lines back on screen.
+        await history.fetchTask?.value
+        XCTAssertEqual(history.seriesPeriod, history.period)
+        XCTAssertFalse(history.series.isEmpty)
+    }
+
+    /// The same rule at the place that draws, because that is where it was
+    /// missing: `plotEmptyLabel` had every input it needed and was never asked,
+    /// the chart branching on `series.allSatisfy(\.isEmpty)` alone.
+    ///
+    /// Ink from a bitmap, the way the row's ladder is measured: between the tap
+    /// on `30d` and its answer this section must draw what it draws when it has
+    /// nothing — one short line of text — and not a chart of the window before.
+    func testTheChartItselfDrawsNoLinesUntilTheyAnswerTheNewPeriod() async throws {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(client: client(counter), defaults: freshDefaults())
+        let usage = UsageStore(config: .default, cache: UsageCache())
+        history.open(labels: ["acc1"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        let withLines = try ink(UsagePopoverView(usage: usage, history: history).plot)
+        history.period = .month
+        let midChange = try ink(UsagePopoverView(usage: usage, history: history).plot)
+        await history.fetchTask?.value
+        let answered = try ink(UsagePopoverView(usage: usage, history: history).plot)
+
+        XCTAssertGreaterThan(withLines, 0, "the chart drew nothing at all — the measurement is empty")
+        XCTAssertLessThan(midChange, withLines / 3,
+                          "the lines of the previous window were drawn under the new tab "
+                          + "(\(midChange) inked against \(withLines))")
+        XCTAssertGreaterThan(answered, withLines / 3,
+                             "the lines never came back once they answered the new period")
+    }
+
+    /// Inked pixels, over an area the size the popover gives the plot.
+    private func ink(_ view: some View) throws -> Int {
+        let renderer = ImageRenderer(content: view.frame(width: UsagePopoverView.width, height: 130))
+        renderer.scale = 2
+        let bitmap = try XCTUnwrap(renderer.cgImage, "ImageRenderer produced nothing")
+        var pixels = [UInt8](repeating: 0, count: bitmap.width * bitmap.height * 4)
+        let context = try XCTUnwrap(CGContext(data: &pixels,
+                                              width: bitmap.width,
+                                              height: bitmap.height,
+                                              bitsPerComponent: 8,
+                                              bytesPerRow: bitmap.width * 4,
+                                              space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(bitmap, in: CGRect(x: 0, y: 0, width: bitmap.width, height: bitmap.height))
+        return stride(from: 3, to: pixels.count, by: 4).reduce(into: 0) { total, offset in
+            if pixels[offset] > 8 { total += 1 }
+        }
+    }
+}
+
+/// The popover's words. Every one of them has a "no reading" case, and none of
+/// them is allowed to answer it with a zero.
+@MainActor
+final class UsagePopoverLabelTests: XCTestCase {
+
+    func testAMissingReadingIsADashAndNotAZero() {
+        XCTAssertEqual(UsagePopoverView.percentLabel(58.667), "59%")
+        XCTAssertEqual(UsagePopoverView.percentLabel(0), "0%")
+        XCTAssertEqual(UsagePopoverView.percentLabel(nil), "—")
+    }
+
+    func testTheResetTimeIsCoarseAndAbsentWhenUnknown() {
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        XCTAssertEqual(UsagePopoverView.resetLabel(now.addingTimeInterval(15 * 60), now: now),
+                       "через 15 мин")
+        XCTAssertEqual(UsagePopoverView.resetLabel(now.addingTimeInterval(3 * 3600), now: now),
+                       "через 3 ч")
+        XCTAssertEqual(UsagePopoverView.resetLabel(now.addingTimeInterval(3 * 86_400), now: now),
+                       "через 3 д")
+        XCTAssertEqual(UsagePopoverView.resetLabel(nil, now: now), "")
+    }
+
+    /// The footer says how old the figures are, and is honest about never having
+    /// had any: `nil` is what a snapshot carries before the first answer, and
+    /// "обновлено 20000 д назад" would be a lie with a number in it.
+    func testTheFooterKnowsItHasNeverBeenUpdated() {
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        func label(_ fetchedAt: Date?) -> String {
+            UsagePopoverView.ageLabel(fetchedAt: fetchedAt, checkedAt: now, failed: false, now: now)
+        }
+        XCTAssertEqual(label(nil), "ещё не обновлялось")
+        XCTAssertEqual(label(now.addingTimeInterval(-3)), "обновлено меньше минуты назад")
+        XCTAssertEqual(label(now.addingTimeInterval(-180)), "обновлено 3 мин назад")
+        XCTAssertEqual(label(now.addingTimeInterval(-7200)), "обновлено 2 ч назад")
+        XCTAssertEqual(label(now.addingTimeInterval(-2 * 86_400)), "обновлено 2 д назад")
+    }
+
+    /// The age of the figures and the age of the last attempt are two facts, and
+    /// a failed pass separates them: it keeps the numbers and moves only the
+    /// attempt. Told with one stamp, the footer called hour-old figures fresh
+    /// while the orange line right under it said the gateway was unreachable —
+    /// two statements contradicting each other on one screen.
+    func testAFailedCheckDoesNotMakeTheOldFiguresYoung() {
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        let label = UsagePopoverView.ageLabel(fetchedAt: now.addingTimeInterval(-3600),
+                                              checkedAt: now.addingTimeInterval(-10),
+                                              failed: true,
+                                              now: now)
+        XCTAssertEqual(label, "обновлено 1 ч назад; последняя проверка меньше минуты назад не удалась")
+
+        // Never a figure at all, and the checks keep failing: both halves of the
+        // sentence are still true and still separate.
+        XCTAssertEqual(UsagePopoverView.ageLabel(fetchedAt: nil,
+                                                 checkedAt: now.addingTimeInterval(-120),
+                                                 failed: true,
+                                                 now: now),
+                       "ещё не обновлялось; последняя проверка 2 мин назад не удалась")
+    }
+
+    /// "We have not asked yet" is not "we asked and there is nothing". Before
+    /// the first answer the popover stated things about the gateway that the
+    /// gateway had never said — that it had named no accounts, that a period it
+    /// was never asked about held no data — with the footer beside it truthfully
+    /// saying nothing had been fetched at all.
+    func testNothingYetAskedIsNotNothingFound() {
+        XCTAssertEqual(UsagePopoverView.emptyLabel(landed: false, failed: false,
+                                                   nothing: "Аккаунтов шлюз не назвал"),
+                       "Загрузка…")
+        XCTAssertEqual(UsagePopoverView.emptyLabel(landed: true, failed: false,
+                                                   nothing: "Аккаунтов шлюз не назвал"),
+                       "Аккаунтов шлюз не назвал")
+        XCTAssertEqual(UsagePopoverView.emptyLabel(landed: true, failed: false,
+                                                   nothing: "За этот период данных нет"),
+                       "За этот период данных нет")
+        // And a "loading" that can never end is a lie of its own: a gateway that
+        // was down at launch lands no first answer, ever.
+        XCTAssertEqual(UsagePopoverView.emptyLabel(landed: false, failed: true,
+                                                   nothing: "Аккаунтов шлюз не назвал"),
+                       "Шлюз не ответил")
+        // A failure after an answer has landed changes nothing here: the
+        // accounts are known, and the reason is in the footer.
+        XCTAssertEqual(UsagePopoverView.emptyLabel(landed: true, failed: true,
+                                                   nothing: "Аккаунтов шлюз не назвал"),
+                       "Аккаунтов шлюз не назвал")
+    }
+
+    /// The big number and the menu bar picture are one reading, rounded in one
+    /// place (`UsageSnapshot.fleetSevenDayPercent`): two ways of working it out
+    /// would drift apart the day one of them changed.
+    ///
+    /// They differ in exactly one thing, and it is not the arithmetic. The menu
+    /// bar drops a figure whose last pass failed, because up there is no room to
+    /// say "as of an hour ago" and a bare percentage reads as the truth right
+    /// now (§2.4). The popover keeps it: the footer under it gives the age, and
+    /// the account rows below go on showing their stored percentages — gated the
+    /// same way, the headline was a dash over live numbers, and the dash was the
+    /// false statement of the two.
+    func testTheHeadlineAndTheIconComputeTheSameFigure() {
+        var snapshot = UsageSnapshot.empty
+        snapshot.fleetSevenDayMean = 58.667
+        XCTAssertEqual(snapshot.fleetSevenDayPercent, 59)
+        XCTAssertEqual(UsagePopoverView.headlinePercent(for: snapshot), MenuBarIcon.percent(for: snapshot),
+                       "two surfaces, two figures")
+        XCTAssertEqual(UsagePopoverView.percentLabel(snapshot.fleetSevenDayMean), "59%")
+
+        // The one difference, in both directions.
+        snapshot.quotaFailure = "/gw/usage: unreachable"
+        XCTAssertNil(MenuBarIcon.percent(for: snapshot), "the menu bar showed a figure it cannot caveat")
+        XCTAssertEqual(UsagePopoverView.headlinePercent(for: snapshot), 59,
+                       "the headline blanked a reading it has, over rows that are showing it")
+
+        // And a reading nobody ever took is a dash on both surfaces.
+        XCTAssertNil(UsagePopoverView.headlinePercent(for: .empty))
+        XCTAssertNil(MenuBarIcon.percent(for: .empty))
+    }
+
+    /// The accounts section speaks for the poll it draws — `/gw/usage`, which is
+    /// where the list itself comes from — and for nothing else.
+    func testTheAccountsSectionSpeaksForTheQuotaPollAlone() {
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        func snapshot(fetched: Date? = nil, quota: String? = nil, sessions: String? = nil) -> UsageSnapshot {
+            var value = UsageSnapshot.empty
+            value.quotaFetchedAt = fetched
+            value.quotaFailure = quota
+            value.sessionsFailure = sessions
+            return value
+        }
+        // Both arguments of the call site are load-bearing: the first line moves
+        // with `quotaFetchedAt`, the second with `quotaFailure`.
+        XCTAssertEqual(UsagePopoverView.accountsEmptyLabel(snapshot()), "Загрузка…")
+        XCTAssertEqual(UsagePopoverView.accountsEmptyLabel(snapshot(quota: "/gw/usage: HTTP 500")),
+                       "Шлюз не ответил")
+        XCTAssertEqual(UsagePopoverView.accountsEmptyLabel(snapshot(fetched: now)),
+                       "Аккаунтов шлюз не назвал")
+
+        // And `/gw/sessions` moves nothing here at all — the endpoint has not a
+        // figure on this surface. Pinned as an invariant over the three states
+        // rather than demonstrated in one of them: the only combination in which
+        // reading `failureText` instead would say something different (a
+        // sessions failure while the quota half has neither landed nor been
+        // blamed) is one the poll cannot produce, because every pass either
+        // fills in `quotaFetchedAt` or fills in `quotaFailure`.
+        for state in [snapshot(), snapshot(quota: "/gw/usage: HTTP 500"), snapshot(fetched: now)] {
+            var withSessions = state
+            withSessions.sessionsFailure = "/gw/sessions: HTTP 502"
+            XCTAssertEqual(UsagePopoverView.accountsEmptyLabel(withSessions),
+                           UsagePopoverView.accountsEmptyLabel(state),
+                           "the accounts section answered for an endpoint it does not draw")
+        }
+    }
+
+    /// And the chart speaks for the lines. The whole meaning of its label lives
+    /// in the arguments it is given, which is where the defect sat while the
+    /// function itself was under test: told from the last *finished* pass, the
+    /// chart called a silent gateway an empty period.
+    func testTheChartDoesNotCallSilenceAnEmptyPeriod() throws {
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        let accounts = try UsageFixtures.decode(UsageFixtures.usage, as: UsageReport.self).accounts
+        XCTAssertFalse(accounts.isEmpty)
+        func snapshot(fetched: Date? = nil, quota: String? = nil,
+                      accounts: [AccountUsage] = []) -> UsageSnapshot {
+            var value = UsageSnapshot.empty
+            value.quotaFetchedAt = fetched
+            value.quotaFailure = quota
+            value.accounts = accounts
+            return value
+        }
+        func label(_ snapshot: UsageSnapshot, landed: Date?, failure: String?,
+                   seriesPeriod: HistoryPeriod? = .day, period: HistoryPeriod = .day) -> String {
+            UsagePopoverView.plotEmptyLabel(snapshot: snapshot,
+                                            seriesFetchedAt: landed,
+                                            seriesPeriod: seriesPeriod,
+                                            period: period,
+                                            historyFailure: failure)
+        }
+
+        // The defect: accounts in hand, every history request failed, no lines.
+        XCTAssertEqual(label(snapshot(fetched: now, accounts: accounts),
+                             landed: nil, failure: "acc2: unreachable"),
+                       "Шлюз не ответил")
+        // Which is also where the history's own failure earns its place in
+        // `failed:`: with the quota half perfectly healthy, it is the only thing
+        // that can tell "the gateway said nothing" from "still loading".
+        XCTAssertEqual(label(snapshot(fetched: now, accounts: accounts), landed: nil, failure: nil),
+                       "Загрузка…")
+        // Nothing asked of anybody yet.
+        XCTAssertEqual(label(snapshot(), landed: nil, failure: nil), "Загрузка…")
+        // The quota poll is the chart's supplier of accounts, so its failure is
+        // the chart's reason too.
+        XCTAssertEqual(label(snapshot(quota: "/gw/usage: HTTP 500"), landed: nil, failure: nil),
+                       "Шлюз не ответил")
+        // The lines arrived and have nothing in them: now the period really is
+        // empty, and the popover may say so.
+        XCTAssertEqual(label(snapshot(fetched: now, accounts: accounts), landed: now, failure: nil),
+                       "За этот период данных нет")
+        // Nobody to ask is an answer as well — but only once the poll that names
+        // the accounts has landed. That half of `landed` needs no period of its
+        // own: an empty account list is an empty list for every window.
+        XCTAssertEqual(label(snapshot(fetched: now), landed: nil, failure: nil),
+                       "За этот период данных нет")
+        XCTAssertEqual(label(snapshot(fetched: now), landed: nil, failure: nil,
+                             seriesPeriod: nil, period: .month),
+                       "За этот период данных нет")
+        // But lines that landed for another window are not an answer about this
+        // one: until the pass for it comes back there is nothing landed at all.
+        XCTAssertEqual(label(snapshot(fetched: now, accounts: accounts), landed: now,
+                             failure: nil, seriesPeriod: .day, period: .month),
+                       "Загрузка…",
+                       "the chart called a period empty on the strength of another one's lines")
+    }
+
+    /// The footer explains what this view draws, and both halves of it when both
+    /// failed.
+    ///
+    /// `UsageSnapshot.failureText` is the wrong source here: it also carries
+    /// `/gw/sessions`, whose figures are in the panel's rows and not on this
+    /// surface at all. Standing first, it explained a number the user cannot see
+    /// while the empty chart beside it had its own reason shown nowhere.
+    func testTheFooterExplainsTheHalvesThisViewDraws() {
+        XCTAssertNil(UsagePopoverView.failureText(quota: nil, history: nil))
+        XCTAssertEqual(UsagePopoverView.failureText(quota: "/gw/usage: HTTP 500", history: nil),
+                       "/gw/usage: HTTP 500")
+        XCTAssertEqual(UsagePopoverView.failureText(quota: nil, history: "acc2: unreachable"),
+                       "acc2: unreachable")
+        XCTAssertEqual(UsagePopoverView.failureText(quota: "/gw/usage: HTTP 500",
+                                                    history: "acc2: unreachable"),
+                       "/gw/usage: HTTP 500; acc2: unreachable",
+                       "one reason stood in for the other")
+
+        // The endpoint this view has no figure from is not in it at all — while
+        // the snapshot's own line, which the dump prints, still carries it.
+        var snapshot = UsageSnapshot.empty
+        snapshot.sessionsFailure = "/gw/sessions: HTTP 502"
+        XCTAssertEqual(snapshot.failureText, "/gw/sessions: HTTP 502")
+        XCTAssertNil(UsagePopoverView.failureText(quota: snapshot.quotaFailure,
+                                                  history: nil))
+    }
+
+    /// The chart is dated separately from the quota, because it is fetched
+    /// separately: the lines are only asked for while the popover is open, and
+    /// they survive its closing — so a chart drawn from a pass made three
+    /// popovers ago is the ordinary case, and the footer used to date only the
+    /// quota beside it.
+    func testTheFooterDatesTheChartAsWellAsTheQuota() {
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        func label(_ fetchedAt: Date?) -> String {
+            UsagePopoverView.chartAgeLabel(fetchedAt: fetchedAt, seriesPeriod: .day,
+                                           period: .day, now: now)
+        }
+        XCTAssertEqual(label(nil), "график ещё не обновлялся")
+        XCTAssertEqual(label(now.addingTimeInterval(-3600)), "график обновлён 1 ч назад")
+        XCTAssertEqual(label(now.addingTimeInterval(-20)), "график обновлён меньше минуты назад")
+    }
+
+    /// And it stops dating it the moment the picker moves, on the same pair the
+    /// plot one row above branches on.
+    ///
+    /// Told from the stamp alone, the footer went on dating the *previous*
+    /// window's lines while the plot directly above it said "Загрузка…" — two
+    /// statements about one picture, one row apart, contradicting each other.
+    /// Reachable on every change of period, for as long as the gateway takes to
+    /// answer, and it outlives the popover's closing along with the lines.
+    func testTheFooterDoesNotDateAChartItIsNotDrawing() {
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        let landed = now.addingTimeInterval(-120)
+        XCTAssertEqual(UsagePopoverView.chartAgeLabel(fetchedAt: landed, seriesPeriod: .day,
+                                                      period: .month, now: now),
+                       "график ещё не обновлялся",
+                       "the footer dated lines the chart above it is not drawing")
+        // Lines that landed for nothing at all are the same state one step
+        // earlier, and say the same thing.
+        XCTAssertEqual(UsagePopoverView.chartAgeLabel(fetchedAt: nil, seriesPeriod: nil,
+                                                      period: .month, now: now),
+                       "график ещё не обновлялся")
+        // The pass for the window being asked about landed: now there is
+        // something on screen with an age, and the footer gives it.
+        XCTAssertEqual(UsagePopoverView.chartAgeLabel(fetchedAt: landed, seriesPeriod: .month,
+                                                      period: .month, now: now),
+                       "график обновлён 2 мин назад")
     }
 }

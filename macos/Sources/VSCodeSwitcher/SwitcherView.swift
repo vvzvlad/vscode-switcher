@@ -572,14 +572,24 @@ struct SwitcherRowView: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 titleLine
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+                secondLine
             }
+            // Nothing here to make this block span the row: the `Spacer` inside
+            // the second line already does it. It makes that line greedy, which
+            // makes this `VStack` greedy, and the stack below hands a `Spacer`
+            // what is left over after its other children — so this block gets
+            // the width and the 6 pt spacer keeps its floor.
+            //
+            // `.frame(maxWidth: .infinity)` and `.layoutPriority(1)` were both
+            // written here first, against the fear that two greedy siblings
+            // would split the line in half and squeeze the title's ladder. They
+            // were then measured, which is the rule for a modifier that is
+            // supposed to change something: swept at 380, 300, 240, 200, 172 and
+            // 150 pt, with the longest real name and with a short topic, the ink
+            // is identical to the last quarter-point with them, without the
+            // priority, and without either. All fifteen layout tests pass in all
+            // three builds. A modifier that changes nothing anywhere is one more
+            // thing to explain later, so neither is here.
 
             Spacer(minLength: 6)
             StatusBadge(status: row.status, panelVisible: panelVisible)
@@ -591,6 +601,45 @@ struct SwitcherRowView: View {
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .help(tooltip)
+    }
+
+    /// The chat topic on the left, the row's token spend on the right.
+    ///
+    /// Two things that have nothing to do with each other, on one line because
+    /// there is only one line to spare: the title line above is a ladder of
+    /// three measured rungs (§4) and adding a fourth element to it would have to
+    /// be paid for by one of them.
+    ///
+    /// Neither is compulsory, and the line itself is not either: a row with no
+    /// chat and no spend — most of the "projects" section — draws exactly what
+    /// it drew before, with no empty second line under the name.
+    ///
+    /// When the two compete, the topic gives way. The number is `fixedSize`, so
+    /// the shortfall lands on the topic's ellipsis: a truncated topic is still a
+    /// topic, while a truncated number is a lie about how much was spent — the
+    /// same objection §4 makes to a truncated `(agents: N)`.
+    @ViewBuilder private var secondLine: some View {
+        let usage = Self.usageLabel(for: row)
+        if subtitle != nil || usage != nil {
+            HStack(spacing: 6) {
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 0)
+                if let usage {
+                    Text(usage)
+                        .font(.system(size: 11))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+        }
     }
 
     private var subtitle: String? { Self.rowSubtitle(row) }
@@ -699,6 +748,36 @@ struct SwitcherRowView: View {
         return count > 0 ? "(agents: \(count))" : nil
     }
 
+    /// The row's token spend as the second line writes it, or `nil` when there
+    /// is nothing to write.
+    ///
+    /// `nil` covers both holes `SwitcherRow.usageInputEquivalent` folds together:
+    /// no figure for this row, and a figure in which the gateway named none of
+    /// the four counters. The second would otherwise print a confident `0` for
+    /// "no idea" — the row is where that matters most, because most rows of the
+    /// "projects" section genuinely have no spend and a column of zeroes would
+    /// say they were all measured.
+    ///
+    /// `≥` when the number is only a lower bound, for the same reason `--dump`
+    /// writes `>=`: some counter behind it was never named, and the four are
+    /// billed at different rates, so what is missing cannot be guessed at.
+    nonisolated static func usageLabel(for row: SwitcherRow) -> String? {
+        guard let value = row.usageInputEquivalent else { return nil }
+        return (row.usageIsLowerBound ? "≥" : "") + compactTokens(value)
+    }
+
+    /// `21.3M`, `914k`, `512`: the coarsest unit that still tells two numbers
+    /// apart at a glance. Shared with `--dump` so the panel and the dump cannot
+    /// come to describe the same row differently, and `nonisolated` for the same
+    /// reason `countLabel` is — the dump runs outside the main actor.
+    nonisolated static func compactTokens(_ value: Double) -> String {
+        switch abs(value) {
+        case 1_000_000...: return String(format: "%.2fM", value / 1_000_000)
+        case 1_000...: return String(format: "%.0fk", value / 1_000)
+        default: return String(format: "%.0f", value)
+        }
+    }
+
     /// Hover deepens the frontmost highlight instead of replacing it: swapping
     /// the accent tint for the plain grey one made pointing at the front row
     /// *less* visible than not pointing at it, while §4 asks for the opposite.
@@ -739,6 +818,8 @@ struct SwitcherRowView: View {
             lines.append("Фоновые агенты:")
             lines.append(contentsOf: row.subagentDescriptions.map { "• " + $0 })
         }
+
+        lines.append(contentsOf: usageLines(for: row))
         // An orphan row has no indexed project, only the sessions' working
         // directory — and that is the one thing worth showing about it.
         if row.kind == .project, let path = row.project?.path ?? row.sessions.first?.cwd {
@@ -746,6 +827,28 @@ struct SwitcherRowView: View {
             lines.append(path)
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// The spend behind the row's one number, broken back out into the four
+    /// counters it was folded from.
+    ///
+    /// The row shows one figure because there is room for one, and that figure
+    /// is *input-equivalent*: the four counters are billed at different rates —
+    /// output at five times input, a cache write at 1.25, a cache read at a
+    /// tenth — so their plain sum is a number that appears on no invoice. The
+    /// weights are an arithmetic step the reader cannot see, which is exactly
+    /// why the four raw numbers belong in the tooltip: they are what the gateway
+    /// actually said.
+    ///
+    /// A counter the gateway never named prints as `?` rather than as 0, and the
+    /// total then carries `≥`. Same rule, same symbols and the same rounding as
+    /// the row itself and as `--dump`.
+    static func usageLines(for row: SwitcherRow) -> [String] {
+        guard let total = usageLabel(for: row), let usage = row.usage else { return [] }
+        let counters = [("in", usage.input), ("out", usage.output),
+                        ("cache write", usage.cacheCreation), ("cache read", usage.cacheRead)]
+        return ["", "Токены (input-equivalent): \(total)"]
+            + counters.map { "• \($0.0) \($0.1.map { compactTokens(Double($0)) } ?? "?")" }
     }
 
     /// A chat's state in words. The tooltip is the only place the five states

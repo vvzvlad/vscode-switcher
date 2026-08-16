@@ -103,20 +103,25 @@ final class UsageStore: ObservableObject {
     ///
     /// Each half is kept separately, because they fail separately — the quota
     /// figures can arrive while the session figures time out. Whatever did not
-    /// arrive stays at its previous value and is named in `failure`.
+    /// arrive stays at its previous value and is blamed in its own half of the
+    /// snapshot; the quota half, the only one drawn with its age beside it,
+    /// keeps the stamp it arrived under. Only `checkedAt` moves on every pass: it
+    /// is the age of the attempt, and saying it out loud over unchanged numbers
+    /// is what made the footer call hour-old figures fresh.
     nonisolated static func poll(client: UsageClient,
                                  previous: UsageSnapshot,
                                  now: Date = Date()) async -> UsageSnapshot {
         var result = previous
-        result.fetchedAt = now
-        var failures: [String] = []
+        result.checkedAt = now
 
         do {
             let report = try await client.usage()
             result.fleetSevenDayMean = report.fleet?.sevenDay?.mean
             result.accounts = report.accounts
+            result.quotaFetchedAt = now
+            result.quotaFailure = nil
         } catch {
-            failures.append("/gw/usage: \(error)")
+            result.quotaFailure = "/gw/usage: \(error)"
         }
 
         do {
@@ -129,11 +134,11 @@ final class UsageStore: ObservableObject {
             result.tokensByCwd = folded.tokensByCwd
             result.unmatched = folded.unmatched
             result.unmatchedSessions = folded.unmatchedSessions
+            result.sessionsFailure = nil
         } catch {
-            failures.append("/gw/sessions: \(error)")
+            result.sessionsFailure = "/gw/sessions: \(error)"
         }
 
-        result.failure = failures.isEmpty ? nil : failures.joined(separator: "; ")
         return result
     }
 
@@ -160,8 +165,11 @@ final class UsageStore: ObservableObject {
         // spare.
         guard semaphore.wait(timeout: .now() + 20) == .success else {
             var stalled = UsageSnapshot.empty
-            stalled.fetchedAt = now
-            stalled.failure = "the pass did not finish in 20 s"
+            stalled.checkedAt = now
+            // Neither half answered, so both are blamed: nothing about a pass
+            // that never came back is specific to one endpoint.
+            stalled.quotaFailure = "the pass did not finish in 20 s"
+            stalled.sessionsFailure = "the pass did not finish in 20 s"
             return stalled
         }
         return box.value
