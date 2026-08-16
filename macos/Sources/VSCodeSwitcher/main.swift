@@ -84,9 +84,9 @@ enum ConsoleDump {
         print("  accessibility:    \(snapshot.accessibilityTrusted ? "granted" : "NOT GRANTED — window list will be empty")")
         print("")
 
-        print("Open windows (z-order, front first): \(snapshot.openWindows.count)")
+        print("Open windows (last message first): \(snapshot.openWindows.count)")
         for (position, row) in snapshot.openWindows.enumerated() {
-            print("  \(position + 1). \(row.displayName)  \(row.colorHex)  [\(stateBreakdown(row))]")
+            print("  \(position + 1). \(title(row))  \(row.colorHex)  \(indicator(row))  [\(stateBreakdown(row))]")
             print("      title:     \(shorten(row.window?.title, 90))")
             print("      topic:     \(shorten(row.chatTopic, 90))")
             print("      model:     \(row.model ?? "-")   context: \(formatContext(row))   subagents: \(row.activeSubagents)")
@@ -97,8 +97,8 @@ enum ConsoleDump {
                 print("      sessions:  \(row.sessions.count)")
                 for session in row.sessions {
                     let context = session.contextUsedTokens.map { "\($0 / 1000)k" } ?? "-"
-                    print("        - \(session.state.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))"
-                        + " src=\(session.stateSource.rawValue.padding(toLength: 10, withPad: " ", startingAt: 0))"
+                    print("        - \(column(session.state.rawValue, 10))"
+                        + " src=\(column(session.stateSource.rawValue, 10))"
                         + " pid=\(session.pid) ctx=\(context) sub=\(session.activeSubagents)"
                         + " \(shorten(session.topic, 46))")
                 }
@@ -110,7 +110,7 @@ enum ConsoleDump {
         if !strayed.isEmpty {
             print("Live sessions without a window: \(strayed.count)")
             for row in strayed {
-                print("  - \(row.displayName)  [\(stateBreakdown(row))]  \(shorten(row.chatTopic, 60))")
+                print("  - \(title(row))  \(indicator(row))  [\(stateBreakdown(row))]  \(shorten(row.chatTopic, 60))")
             }
             print("")
         }
@@ -119,9 +119,50 @@ enum ConsoleDump {
         print("Projects section: \(snapshot.projects.count) (showing 15, most active first)")
         for row in snapshot.projects.prefix(15) {
             let workspace = row.project?.workspaceFile == nil ? "git" : "workspace"
-            print("  - \(row.displayName.padding(toLength: 34, withPad: " ", startingAt: 0)) \(row.colorHex)"
-                + "  \(workspace.padding(toLength: 9, withPad: " ", startingAt: 0))  \(activity(row, config: config))")
+            // The indicator is printed here too, because this is where the rule
+            // "no chat, no subagent, no icon" is worth seeing: most of this
+            // section is projects nobody has run an agent in.
+            print("  - \(nameCell(for: row, width: 34)) \(row.colorHex)"
+                + "  \(column(indicator(row), 12))"
+                + "  \(column(workspace, 9))  \(activity(row, config: config))")
         }
+    }
+
+    /// The name column of the "Projects" section: the name, then the count in
+    /// brackets when something is running, padded out to exactly `width`.
+    ///
+    /// The name is what gives way when the pair is too long, as in the panel:
+    /// the brackets stay whole and the name is cut to what is left of the cell.
+    /// Cutting the name to the full width first and appending the brackets
+    /// afterwards made the cell as wide as the two together, on every row where
+    /// the two do not fit in 34 — from 23 characters of name with a one-digit
+    /// count, and 48 against a column of 34 for the longest name with a
+    /// three-digit one. `column` pads without cutting, so every column after it
+    /// shifted right on those rows alone. Which rows can have a count at all is
+    /// worth being exact about: the
+    /// orphan rows `rankedOrphans` puts at the top of the section — they are
+    /// orphans by `id`, `cwd:<path>`, and by name just the last component of
+    /// that path — and, further down the same list, any ordinary project that
+    /// has no window open but does have a live session in it.
+    ///
+    /// Internal rather than private so a test can hold it to that: `printText`
+    /// prints a whole snapshot of the machine it runs on, and the rows that
+    /// carry a count are exactly the rows a test run cannot count on having.
+    static func nameCell(for row: SwitcherRow, width: Int) -> String {
+        let label = SwitcherRowView.countLabel(for: row)
+        let budget = label.map { max(1, width - ($0.count + 1)) } ?? width
+        return column(shorten(row.displayName, budget) + (label.map { " " + $0 } ?? ""), width)
+    }
+
+    /// Pads a cell to the column width, and never cuts it short.
+    ///
+    /// `String.padding(toLength:)` truncates whatever is longer than the length
+    /// it is given, silently: `attention 100` used to print as `attention 10`,
+    /// which is a diagnostic dump lying about the number it exists to report.
+    /// Anything that genuinely has to be cut is cut visibly, by `shorten`.
+    private static func column(_ text: String, _ width: Int) -> String {
+        guard text.count < width else { return text }
+        return text + String(repeating: " ", count: width - text.count)
     }
 
     /// Sessions inside the activity window and the age of the newest one — the
@@ -134,13 +175,31 @@ enum ConsoleDump {
         return "\(activity.recentSessions) in \(config.activityWindowDays)d, last \(days)d ago"
     }
 
-    /// Every state the row's sessions are in, most urgent first — the same
-    /// breakdown the panel draws as chips, so the console can be used to check
-    /// what the row should look like.
+    /// The folded indicator the row draws on its right. A row with no chat and
+    /// no subagent draws none, and prints as `-` here.
+    private static func indicator(_ row: SwitcherRow) -> String {
+        row.status?.rawValue ?? "-"
+    }
+
+    /// The row's title as the panel writes it: the name, then the count in
+    /// brackets when something is running. Same helper the view uses, so the
+    /// dump cannot describe a row the panel does not draw.
+    private static func title(_ row: SwitcherRow) -> String {
+        guard let label = SwitcherRowView.countLabel(for: row) else { return row.displayName }
+        return "\(row.displayName) \(label)"
+    }
+
+    /// Every state the row's chats are in, most urgent first. The row itself
+    /// stopped showing this breakdown — the tooltip and this dump are where it
+    /// lives now, which is why it is counted here rather than carried on the
+    /// row: `sessions` already holds every state, and a second copy of the same
+    /// facts is a second thing that can be wrong.
     private static func stateBreakdown(_ row: SwitcherRow) -> String {
-        guard !row.stateCounts.isEmpty else { return "-" }
-        return row.stateCounts
-            .map { "\($0.state.rawValue)\($0.count > 1 ? " x\($0.count)" : "")" }
+        guard !row.sessions.isEmpty else { return "-" }
+        return AgentState.allCases.reversed()
+            .map { state in (state, row.sessions.filter { $0.state == state }.count) }
+            .filter { $0.1 > 0 }
+            .map { "\($0.0.rawValue)\($0.1 > 1 ? " x\($0.1)" : "")" }
             .joined(separator: " ")
     }
 

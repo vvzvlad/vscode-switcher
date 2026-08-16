@@ -171,7 +171,6 @@ final class DataSource: @unchecked Sendable {
                                           window: nil,
                                           sessions: group,
                                           state: aggregate.state,
-                           stateCounts: aggregate.stateCounts,
                                           activeSubagents: aggregate.activeSubagents,
                                           subagentDescriptions: aggregate.subagentDescriptions,
                                           chatTopic: active?.topic,
@@ -181,7 +180,7 @@ final class DataSource: @unchecked Sendable {
                                           lastActivity: group.compactMap(\.lastActivity).max()))
         }
 
-        return SwitcherSnapshot(openWindows: openWindows,
+        return SwitcherSnapshot(openWindows: Self.rankedWindows(openWindows),
                                 projects: Self.rankedOrphans(orphanRows)
                                     + Self.ranked(projectRows, activity: activity),
                                 accessibilityTrusted: accessibilityTrusted,
@@ -204,7 +203,6 @@ final class DataSource: @unchecked Sendable {
                            window: window,
                            sessions: sessions,
                            state: aggregate.state,
-                           stateCounts: aggregate.stateCounts,
                            activeSubagents: aggregate.activeSubagents,
                            subagentDescriptions: aggregate.subagentDescriptions,
                            chatTopic: active?.topic ?? window.chatTopicPrefix,
@@ -229,7 +227,6 @@ final class DataSource: @unchecked Sendable {
                            window: nil,
                            sessions: sessions,
                            state: aggregate.state,
-                           stateCounts: aggregate.stateCounts,
                            activeSubagents: aggregate.activeSubagents,
                            subagentDescriptions: aggregate.subagentDescriptions,
                            chatTopic: active?.topic,
@@ -239,28 +236,67 @@ final class DataSource: @unchecked Sendable {
                            lastActivity: active?.lastActivity ?? project.mtime)
     }
 
-    /// What a row shows for a group of sessions: every state present with its
-    /// own count, the highest of them, and the running subagents underneath.
+    /// What a row shows for a group of sessions: the highest state among them
+    /// and the subagents running underneath.
     ///
-    /// The breakdown exists because the single top state hid the rest: a window
-    /// with six chats — four answered, two still working — showed `4`, and the
-    /// other two were nowhere. `stateCounts` runs from the most urgent state
-    /// down, which is the order the row draws them in.
+    /// The row folds this into one indicator (`SwitcherRow.status`); the
+    /// per-chat detail it does not draw is read straight off `sessions`, by the
+    /// tooltip and by `--dump`.
     static func aggregate(_ sessions: [ClaudeSessionInfo])
-        -> (state: AgentState?, stateCounts: [StateCount],
-            activeSubagents: Int, subagentDescriptions: [String]) {
-        let state = sessions.map(\.state).max()
-        let counts = AgentState.allCases
-            .map { value in StateCount(state: value, count: sessions.filter { $0.state == value }.count) }
-            .filter { $0.count > 0 }
-            .sorted { $0.state > $1.state }
-        return (state: state,
-                stateCounts: counts,
-                activeSubagents: sessions.reduce(0) { $0 + $1.activeSubagents },
-                subagentDescriptions: sessions.flatMap { $0.subagents.filter(\.isActive).compactMap(\.description) })
+        -> (state: AgentState?, activeSubagents: Int, subagentDescriptions: [String]) {
+        (state: sessions.map(\.state).max(),
+         activeSubagents: sessions.reduce(0) { $0 + $1.activeSubagents },
+         subagentDescriptions: sessions.flatMap { $0.subagents.filter(\.isActive).compactMap(\.description) })
     }
 
     // MARK: - Ranking
+
+    /// Orders the open windows by the last message written in them, newest
+    /// first.
+    ///
+    /// The z-order the Accessibility API reports is the stack of what was
+    /// clicked, not of what is happening: a window untouched since morning sits
+    /// on top merely because it was focused last. The panel is opened to find
+    /// the window something is going on in, so the key is the newest
+    /// `ClaudeSessionInfo.lastActivity` among the row's chats — and that is not
+    /// the transcript mtime alone but the newest of the three stamps a session
+    /// has (`ClaudeSessions.load`): the hook state file, the metrics file and
+    /// the transcript. The hook writes first and by seconds, which is the point:
+    /// a chat that has just been asked a question freezes its transcript while
+    /// the hook records the block, and the window it sits in has to rise anyway.
+    ///
+    /// The row's own `lastActivity` is not that key: it belongs to the *shown*
+    /// chat, and a window whose visible chat is idle can hold another that
+    /// answered a second ago.
+    ///
+    /// A row with no chat has no activity at all and goes to the end in the
+    /// z-order it arrived in. Two consequences worth naming. A window opened by
+    /// hand, with no agent in it, sinks below every window that has one — that
+    /// is the rule working. And a *second* window of a busy project can sink
+    /// there too: `distribute` hands a session to the window whose title prefix
+    /// matches its topic and gives the leftovers to the first window, so a
+    /// sibling window that matched nothing ends up with no sessions. Deliberate:
+    /// such a row already shows no state, no topic and no indicator, because the
+    /// data layer genuinely does not know which chat it is looking at. Ranking
+    /// it by the project's pool instead would hoist an empty row above windows
+    /// whose activity is known — a guess dressed as an answer.
+    static func rankedWindows(_ rows: [SwitcherRow]) -> [SwitcherRow] {
+        // Ties fall back to the arrival index rather than to nothing: `sorted`
+        // is not stable, so windows the activity cannot separate — every
+        // window without a chat, and any two stamped in the same second — would
+        // otherwise be free to swap places between two snapshots a second
+        // apart, which is the reshuffling this ordering exists to stop.
+        rows.enumerated().sorted { left, right in
+            let leftActivity = left.element.sessions.compactMap(\.lastActivity).max()
+            let rightActivity = right.element.sessions.compactMap(\.lastActivity).max()
+            switch (leftActivity, rightActivity) {
+            case let (leftDate?, rightDate?) where leftDate != rightDate: return leftDate > rightDate
+            case (.some, nil): return true
+            case (nil, .some): return false
+            default: return left.offset < right.offset
+            }
+        }.map(\.element)
+    }
 
     /// Orders the orphan `cwd:` rows, which are put ahead of every project row.
     ///

@@ -355,48 +355,268 @@ final class TranscriptQuestionTests: XCTestCase {
     }
 }
 
-/// A row shows every state its chats are in, not just the top one. Showing only
-/// the top one meant a window with six chats — four answered, two working —
-/// displayed `4` and said nothing at all about the other two.
-final class StateBreakdownTests: XCTestCase {
-    private func session(_ id: String, _ state: AgentState) -> ClaudeSessionInfo {
-        TestFixtures.session(id: id, cwd: "/tmp/p", state: state)
-    }
+/// A row shows one indicator for the whole window — I am blocking it, it has
+/// something for me to read, something is moving, or it is all asleep — and one
+/// number beside it. How many chats sit in which state is a question about the
+/// chats, and it is answered in the tooltip.
+final class RowStatusTests: XCTestCase {
 
-    func testEveryStatePresentIsCountedAndOrderedByUrgency() {
-        let sessions = [session("a", .waiting), session("b", .working), session("c", .waiting),
-                        session("d", .question), session("e", .waiting), session("f", .waiting)]
+    private func row(_ states: [AgentState], subagents: Int = 0) -> SwitcherRow {
+        var sessions = states.enumerated().map { index, state in
+            TestFixtures.session(id: "s\(index)", cwd: "/tmp/p", state: state)
+        }
+        // Subagents belong to a chat, so they are hung off the first one.
+        if subagents > 0, !sessions.isEmpty { sessions[0].activeSubagents = subagents }
         let aggregate = DataSource.aggregate(sessions)
-
-        XCTAssertEqual(aggregate.stateCounts,
-                       [StateCount(state: .question, count: 1),
-                        StateCount(state: .waiting, count: 4),
-                        StateCount(state: .working, count: 1)])
-        // The single top state is still what the ordering uses.
-        XCTAssertEqual(aggregate.state, .question)
-        XCTAssertEqual(aggregate.stateCounts.map(\.count).reduce(0, +), sessions.count)
+        return SwitcherRow(id: "project:/tmp/p",
+                           kind: .project,
+                           displayName: "p",
+                           colorHex: "#000000",
+                           project: nil,
+                           window: nil,
+                           sessions: sessions,
+                           state: aggregate.state,
+                           activeSubagents: aggregate.activeSubagents,
+                           subagentDescriptions: aggregate.subagentDescriptions,
+                           chatTopic: nil,
+                           model: nil,
+                           contextUsedTokens: nil,
+                           contextLimitTokens: nil,
+                           lastActivity: nil)
     }
 
-    func testStatesWithNoSessionsAreLeftOut() {
-        let aggregate = DataSource.aggregate([session("a", .idle), session("b", .idle)])
-        XCTAssertEqual(aggregate.stateCounts, [StateCount(state: .idle, count: 2)])
+    /// The two states where the agent stopped mid-task and cannot go on until a
+    /// key is pressed. The user asked for these to be told apart from a
+    /// finished turn: here the bottleneck is the human and the wait is pure
+    /// idle time, there the work is done and the message keeps.
+    func testAStuckChatIsItsOwnAnswer() {
+        for state in [AgentState.question, .permission] {
+            XCTAssertEqual(row([state]).status, .blocked, "\(state)")
+        }
     }
 
-    func testARowWithoutSessionsHasNoBreakdown() {
-        let aggregate = DataSource.aggregate([])
-        XCTAssertTrue(aggregate.stateCounts.isEmpty)
-        XCTAssertNil(aggregate.state)
+    /// A finished turn nobody has read is not the same thing, and no longer
+    /// wears the same icon.
+    func testAFinishedTurnIsDoneNotBlocked() {
+        XCTAssertEqual(row([.waiting]).status, .done)
     }
 
-    /// The breakdown has to reach the row, not just the aggregate.
-    func testTheBreakdownIsOnTheAssembledRow() {
+    /// Being stuck outranks having finished: a window holding both is the one
+    /// to walk to first.
+    func testBeingStuckOutranksHavingFinished() {
+        XCTAssertEqual(row([.waiting, .question]).status, .blocked)
+        XCTAssertEqual(row([.waiting, .permission, .idle]).status, .blocked)
+    }
+
+    /// And it outranks activity too: a chat waiting on a human is the one thing
+    /// that does not keep, however much is running around it.
+    func testBeingStuckOutranksActivity() {
+        XCTAssertEqual(row([.working, .permission]).status, .blocked)
+        XCTAssertEqual(row([.working, .question]).status, .blocked)
+        XCTAssertEqual(row([.working, .permission, .idle]).status, .blocked)
+        XCTAssertEqual(row([.idle, .question], subagents: 4).status, .blocked)
+    }
+
+    /// The mixed window, which is the case the fold exists for: one chat
+    /// answered, another still working. "Done" is a claim about a turn that
+    /// finished, "active" one about right now — and right now something is
+    /// running, so the row says so. Saying "done" over a working window is the
+    /// defect this replaced: the answer to "can I read this yet" was yes while
+    /// the window went on typing.
+    func testAWorkingChatOutranksAnAnsweredOne() {
+        let mixed = row([.waiting, .working])
+        XCTAssertEqual(mixed.status, .active)
+        XCTAssertEqual(mixed.activeCount, 1)
+    }
+
+    /// Caught live, on this very project: the main chat had answered, a
+    /// subagent went on working, and the row showed the green tick over a window
+    /// that was visibly busy. A subagent is running work like any other.
+    func testASubagentUnderAnAnsweredChatKeepsTheRowActive() {
+        let row = row([.waiting], subagents: 1)
+        XCTAssertEqual(row.status, .active)
+        XCTAssertEqual(row.activeCount, 1)
+    }
+
+    func testAWorkingChatIsActivity() {
+        XCTAssertEqual(row([.working]).status, .active)
+        XCTAssertEqual(row([.working, .idle]).status, .active)
+    }
+
+    /// A subagent runs while every chat of the row sits in `idle` — that is
+    /// what a background agent *is*, and it is still something moving.
+    func testASubagentAloneIsActivity() {
+        let row = row([.idle], subagents: 2)
+        XCTAssertEqual(row.status, .active)
+        XCTAssertEqual(row.activeCount, 2)
+    }
+
+    /// A window is "done" only once it has actually gone quiet: the tick means
+    /// nothing is left but the reading. Three subagents grinding away under an
+    /// answered chat is not that.
+    func testTheTickWaitsUntilTheSubagentsAreDoneToo() {
+        let row = row([.waiting], subagents: 3)
+        XCTAssertEqual(row.status, .active)
+        XCTAssertEqual(row.activeCount, 3)
+    }
+
+    /// Everything else is asleep — and "asleep" is a real outcome of four,
+    /// reported about chats that exist and are doing nothing.
+    func testEverythingElseIsAsleep() {
+        XCTAssertEqual(row([.idle]).status, .asleep)
+        XCTAssertEqual(row([.idle, .idle]).status, .asleep)
+        XCTAssertEqual(row([.idle]).activeCount, 0)
+    }
+
+    /// A row with no chat and no subagent draws no indicator at all. Its slot
+    /// stays empty: there is nothing there to be asleep, and an icon saying so
+    /// would be the same mark on ninety-odd project rows that have never seen
+    /// an agent — noise along the longest stretch of the list. The fixed slot
+    /// is what the user asked for, not a mandatory icon.
+    func testARowWithNothingToReportDrawsNoIndicator() {
+        XCTAssertNil(row([]).status)
+        XCTAssertEqual(row([]).activeCount, 0)
+    }
+
+    /// And "no session" is the whole test, because a subagent cannot exist
+    /// without one: the aggregate sums them over the sessions, so an empty pool
+    /// can only ever produce a zero. The `guard` used to check both halves, and
+    /// the second half could not fire — this pins the invariant that makes it
+    /// redundant, instead of the dead branch that hid behind it.
+    func testASubagentCannotOutliveTheChatItRunsUnder() {
+        XCTAssertEqual(DataSource.aggregate([]).activeSubagents, 0)
+        XCTAssertNil(DataSource.aggregate([]).state)
+    }
+
+    /// Half the invariant lives in `aggregate`, the other half in the promise
+    /// that every row's number comes *from* `aggregate` over that row's own
+    /// sessions — and that half used to hold only because all three row
+    /// constructors happen to be written that way. Nothing checked it, and with
+    /// the `guard` gone nothing would notice a fourth constructor filling the
+    /// field from somewhere else. So check it on the assembled snapshot, over
+    /// every row of every kind at once: window rows, project rows and the
+    /// orphan `cwd:` rows.
+    func testEveryAssembledRowTakesItsSubagentsFromItsOwnChats() throws {
+        var busy = TestFixtures.session(id: "s1", cwd: "/p/open", state: .working)
+        busy.activeSubagents = 3
+        // Two chats in one row, carrying different numbers, so that their sum is
+        // neither the larger of them nor the first: 2 + 5 = 7 tells all three
+        // apart. With one chat per row it told none of them apart — measured by
+        // mutation, replacing the sum inside `aggregate` with a maximum passed
+        // the entire suite.
+        var headless = TestFixtures.session(id: "s2", cwd: "/p/headless", state: .idle)
+        headless.activeSubagents = 2
+        var headlessTwin = TestFixtures.session(id: "s4", cwd: "/p/headless", state: .idle)
+        headlessTwin.activeSubagents = 5
+        var orphan = TestFixtures.session(id: "s3", cwd: "/elsewhere/thing", state: .working)
+        orphan.activeSubagents = 1
+
+        let snapshot = DataSource.assemble(
+            projects: [TestFixtures.project(path: "/p/open", rootName: "open"),
+                       TestFixtures.project(path: "/p/quiet", rootName: "quiet"),
+                       TestFixtures.project(path: "/p/headless", rootName: "headless")],
+            // Two windows of one project, and only the second one's title names
+            // the chat: the twin is left with no sessions at all, which is the
+            // row this invariant is really about.
+            windows: [TestFixtures.window(index: 0, title: "\u{0438}\u{043d}\u{0430}\u{044f} \u{0442}\u{0435}\u{043c}\u{0430} \u{2014} open (Workspace)"),
+                      TestFixtures.window(index: 1, title: "topic s1 \u{2014} open (Workspace)")],
+            sessions: [busy, headless, headlessTwin, orphan],
+            accessibilityTrusted: true)
+
+        // `rows` rather than the two lists by hand: a third list would then be
+        // covered too instead of quietly skipped.
+        let rows = snapshot.rows
+        for row in rows {
+            XCTAssertEqual(row.activeSubagents,
+                           DataSource.aggregate(row.sessions).activeSubagents,
+                           "\(row.id)")
+        }
+        // Which for a row with no chats means zero, the case the dead `guard`
+        // was reaching for.
+        for row in rows where row.sessions.isEmpty {
+            XCTAssertEqual(row.activeSubagents, 0, "\(row.id)")
+            XCTAssertNil(row.status, "\(row.id)")
+        }
+        // And the fixture has to hold every row the loops above are for, or they
+        // agree about nothing. The chat-less *window* is the fragile one: it
+        // exists only because `distribute` leaves the twin empty, so if that
+        // ever changes this should say so rather than quietly stop testing it.
+        XCTAssertTrue(snapshot.openWindows.contains { $0.sessions.isEmpty }, "no chat-less window row")
+        XCTAssertTrue(snapshot.projects.contains { $0.sessions.isEmpty }, "no chat-less project row")
+        XCTAssertTrue(snapshot.projects.contains { $0.id.hasPrefix("cwd:") }, "no orphan row")
+        XCTAssertTrue(rows.contains { $0.activeSubagents > 0 }, "no subagents in the snapshot")
+        // And the row with two chats says 7, which is the sum and nothing else.
+        // The loop above compares the row against `aggregate`, so it holds just
+        // as well if both become a maximum; only a literal pins the addition —
+        // and with the number now in the title line, next to the name, it is the
+        // most visible thing on the row.
+        let twoChats = try XCTUnwrap(snapshot.projects.first { $0.displayName == "headless" })
+        XCTAssertEqual(twoChats.sessions.count, 2)
+        XCTAssertEqual(twoChats.activeSubagents, 7)
+        XCTAssertEqual(twoChats.activeCount, 7)
+    }
+
+    /// But a single idle chat is something to report, and it reports "asleep" —
+    /// the criterion is "is there anything to say", not "which section is this".
+    func testASingleIdleChatStillReportsAsleep() {
+        XCTAssertEqual(row([.idle]).status, .asleep)
+    }
+
+    /// The rule as the panel meets it: an open window has chats and shows an
+    /// indicator, a project nobody has worked in shows none, and a project with
+    /// an agent but no window shows one.
+    func testTheAssembledSnapshotDrawsIndicatorsOnlyWhereThereIsSomethingToSay() throws {
+        let projects = [TestFixtures.project(path: "/p/open", rootName: "open"),
+                        TestFixtures.project(path: "/p/quiet", rootName: "quiet"),
+                        TestFixtures.project(path: "/p/headless", rootName: "headless")]
+        let snapshot = DataSource.assemble(
+            projects: projects,
+            windows: [TestFixtures.window(index: 0, title: "topic \u{2014} open (Workspace)")],
+            sessions: [TestFixtures.session(id: "s1", cwd: "/p/open", state: .idle),
+                       TestFixtures.session(id: "s2", cwd: "/p/headless", state: .working)],
+            accessibilityTrusted: true)
+
+        XCTAssertEqual(try XCTUnwrap(snapshot.openWindows.first).status, .asleep)
+        XCTAssertEqual(snapshot.projects.first { $0.displayName == "headless" }?.status, .active)
+        XCTAssertNil(try XCTUnwrap(snapshot.projects.first { $0.displayName == "quiet" }).status)
+    }
+
+    /// The whole fold in one table, so no combination of the five states is
+    /// left to chance. A lone chat folds the same way it always did — there is
+    /// nothing beside it to outrank. The subagent column is where the priority
+    /// shows: anything not blocked reads `active` while work is running under
+    /// it, `waiting` included.
+    func testEveryStateFoldsToItsOwnAnswer() {
+        let alone: [AgentState: RowStatus] = [.question: .blocked,
+                                              .permission: .blocked,
+                                              .waiting: .done,
+                                              .working: .active,
+                                              .idle: .asleep]
+        for state in AgentState.allCases {
+            XCTAssertEqual(row([state]).status, alone[state], "\(state)")
+            let withSubagent: RowStatus = alone[state] == .blocked ? .blocked : .active
+            XCTAssertEqual(row([state], subagents: 1).status, withSubagent, "\(state) + subagent")
+        }
+    }
+
+    /// The number counts chats taking a turn plus the subagents under them —
+    /// one number for "how much is running here", which is what was asked for.
+    func testTheCountIsWorkingChatsPlusSubagents() {
+        XCTAssertEqual(row([.working, .working, .idle]).activeCount, 2)
+        XCTAssertEqual(row([.working, .waiting], subagents: 2).activeCount, 3)
+        XCTAssertEqual(row([.question, .permission]).activeCount, 0)
+    }
+
+    /// And it all has to reach the assembled row, not just the helper above.
+    func testTheStatusIsOnTheAssembledRow() throws {
         let snapshot = DataSource.assemble(projects: [],
                                            windows: [],
-                                           sessions: [session("a", .working), session("b", .question)],
+                                           sessions: [TestFixtures.session(id: "a", cwd: "/tmp/p", state: .working),
+                                                      TestFixtures.session(id: "b", cwd: "/tmp/p", state: .question)],
                                            accessibilityTrusted: false)
-        let row = try? XCTUnwrap(snapshot.projects.first)
-        XCTAssertEqual(row?.stateCounts,
-                       [StateCount(state: .question, count: 1), StateCount(state: .working, count: 1)])
+        let row = try XCTUnwrap(snapshot.projects.first)
+        XCTAssertEqual(row.status, .blocked)
+        XCTAssertEqual(row.activeCount, 1)
     }
 }
 
@@ -1077,7 +1297,7 @@ final class SnapshotAssemblyTests: XCTestCase {
         let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == project.path })
         XCTAssertEqual(row.sessions.map(\.sessionId), ["s1"])
         XCTAssertEqual(row.state, .working)
-        XCTAssertEqual(row.stateCounts, [StateCount(state: .working, count: 1)])
+        XCTAssertEqual(row.status, .active)
         XCTAssertEqual(snapshot.rows.flatMap(\.sessions).count, 1)
     }
 
@@ -1097,7 +1317,7 @@ final class SnapshotAssemblyTests: XCTestCase {
         XCTAssertEqual(snapshot.rows.flatMap(\.sessions).count, 4)
         // The row shows the highest state of the sessions it holds.
         XCTAssertEqual(snapshot.projects.first { $0.project?.path == "/p/a" }?.state, .waiting)
-        XCTAssertEqual(snapshot.projects.first { $0.project?.path == "/p/a" }?.stateCounts.first?.count, 1)
+        XCTAssertEqual(snapshot.projects.first { $0.project?.path == "/p/a" }?.activeCount, 1)
     }
 
     /// Six agents started in the same directory outside every scan root used to
@@ -1118,7 +1338,7 @@ final class SnapshotAssemblyTests: XCTestCase {
         let row = try XCTUnwrap(snapshot.projects.first { $0.displayName == "tool" })
         XCTAssertEqual(row.sessions.map(\.sessionId), ["s1", "s2", "s3"])
         XCTAssertEqual(row.state, .permission)
-        XCTAssertEqual(row.stateCounts.first, StateCount(state: .permission, count: 1))
+        XCTAssertEqual(row.status, .blocked)
         XCTAssertEqual(Set(snapshot.rows.map(\.id)).count, snapshot.rows.count)
         XCTAssertEqual(snapshot.rows.flatMap(\.sessions).count, 4)
     }
@@ -1271,6 +1491,107 @@ enum TestFixtures {
     }
 }
 
+/// The order of the "open windows" section: the last message written in each
+/// window, newest first. The z-order the Accessibility API reports is the stack
+/// of what was clicked, and a window untouched since morning sits on top of it
+/// merely because it was focused last.
+final class WindowOrderingTests: XCTestCase {
+
+    private func minutesAgo(_ minutes: Double) -> Date {
+        Date(timeIntervalSince1970: 1_800_000_000).addingTimeInterval(-minutes * 60)
+    }
+
+    /// One window row holding a chat per stamp given, in the z-order position it
+    /// is passed in.
+    private func row(_ name: String, _ activity: [Date?], shown: Date? = nil) -> SwitcherRow {
+        let sessions = activity.enumerated().map { offset, stamp -> ClaudeSessionInfo in
+            var session = TestFixtures.session(id: "\(name)-\(offset)", cwd: "/p/\(name)", state: .idle)
+            session.lastActivity = stamp
+            return session
+        }
+        return SwitcherRow(id: "window:1:w-\(name)",
+                           kind: .window,
+                           displayName: name,
+                           colorHex: "#000000",
+                           project: nil,
+                           window: nil,
+                           sessions: sessions,
+                           state: sessions.isEmpty ? nil : .idle,
+                           activeSubagents: 0,
+                           subagentDescriptions: [],
+                           chatTopic: nil,
+                           model: nil,
+                           contextUsedTokens: nil,
+                           contextLimitTokens: nil,
+                           lastActivity: shown)
+    }
+
+    private func ordered(_ rows: [SwitcherRow]) -> [String] {
+        DataSource.rankedWindows(rows).map(\.displayName)
+    }
+
+    func testTheWindowWithTheLastMessageComesFirst() {
+        // Handed over in z-order, which says the opposite.
+        XCTAssertEqual(ordered([row("stale", [minutesAgo(90)]),
+                                row("fresh", [minutesAgo(1)]),
+                                row("middling", [minutesAgo(10)])]),
+                       ["fresh", "middling", "stale"])
+    }
+
+    /// The key is the newest chat of the row, not the one the row happens to
+    /// show: a window whose visible chat has been idle for an hour can hold
+    /// another that answered a second ago.
+    func testTheKeyIsTheNewestChatNotTheShownOne() {
+        let mixed = row("mixed", [minutesAgo(90), minutesAgo(1)], shown: minutesAgo(90))
+        XCTAssertEqual(ordered([row("plain", [minutesAgo(10)]), mixed]), ["mixed", "plain"])
+    }
+
+    /// A window with no chat has no activity at all. It goes below every window
+    /// that has one — the accepted price of ordering by activity: a window
+    /// opened by hand, with no agent in it, sinks to the bottom.
+    func testAWindowWithNoChatSinksBelowEveryWindowThatHasOne() {
+        XCTAssertEqual(ordered([row("empty", []), row("ancient", [minutesAgo(10_000)])]),
+                       ["ancient", "empty"])
+    }
+
+    /// And among themselves those keep the z-order they arrived in. `sorted` is
+    /// not stable, so without the arrival index they were free to swap places
+    /// between two snapshots a second apart.
+    func testWindowsWithNoChatKeepTheirZOrder() {
+        XCTAssertEqual(ordered([row("first", []), row("second", []), row("third", [])]),
+                       ["first", "second", "third"])
+    }
+
+    func testEqualStampsKeepTheZOrder() {
+        let same = minutesAgo(5)
+        XCTAssertEqual(ordered([row("a", [same]), row("b", [same]), row("c", [same])]),
+                       ["a", "b", "c"])
+        // A chat with no stamp of its own does not drag its row down when
+        // another chat in the same window has one.
+        XCTAssertEqual(ordered([row("nostamp", [nil]), row("stamped", [same])]),
+                       ["stamped", "nostamp"])
+    }
+
+    /// And the snapshot comes out ordered, not just the helper.
+    func testTheAssembledSnapshotIsOrderedByActivity() {
+        let projects = [TestFixtures.project(path: "/p/stale", rootName: "stale"),
+                        TestFixtures.project(path: "/p/fresh", rootName: "fresh")]
+        // z-order: the stale window is in front, because it was clicked last.
+        let windows = [TestFixtures.window(index: 0, title: "topic \u{2014} stale (Workspace)", windowNumber: 1),
+                       TestFixtures.window(index: 1, title: "topic \u{2014} fresh (Workspace)", windowNumber: 2)]
+        let sessions = [TestFixtures.session(id: "s1", cwd: "/p/stale", state: .idle,
+                                             lastActivity: minutesAgo(90)),
+                        TestFixtures.session(id: "s2", cwd: "/p/fresh", state: .idle,
+                                             lastActivity: minutesAgo(1))]
+
+        let snapshot = DataSource.assemble(projects: projects,
+                                           windows: windows,
+                                           sessions: sessions,
+                                           accessibilityTrusted: true)
+        XCTAssertEqual(snapshot.openWindows.map(\.displayName), ["fresh", "stale"])
+    }
+}
+
 /// The order of the "projects" section: how much Claude Code work happened in
 /// each project inside the activity window. Directory mtime, which this used to
 /// be, does not move when a file inside the project is edited, so the order it
@@ -1294,7 +1615,6 @@ final class ProjectRankingTests: XCTestCase {
                                window: nil,
                                sessions: [],
                                state: nil,
-                               stateCounts: [],
                                activeSubagents: 0,
                                subagentDescriptions: [],
                                chatTopic: nil,

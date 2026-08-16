@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import VSCodeSwitcher
 
@@ -135,7 +136,6 @@ final class ProjectSectionTests: XCTestCase {
                            window: nil,
                            sessions: Array(repeating: session, count: sessions),
                            state: sessions > 0 ? .permission : nil,
-                           stateCounts: sessions > 0 ? [StateCount(state: .permission, count: sessions)] : [],
                            activeSubagents: 0,
                            subagentDescriptions: [],
                            chatTopic: nil,
@@ -195,7 +195,6 @@ final class WindowOrderTests: XCTestCase {
                         window: nil,
                         sessions: [],
                         state: nil,
-                        stateCounts: [],
                         activeSubagents: 0,
                         subagentDescriptions: [],
                         chatTopic: nil,
@@ -271,6 +270,23 @@ final class WindowOrderTests: XCTestCase {
     /// anchors the insertion instead.
     func testTheAnchorInFrontDoesNotSendANewWindowToTheBottom() {
         XCTAssertEqual(SwitcherViewModel.merged(["a", "b", "c"], with: ["c", "new", "a", "b"]),
+                       ["new", "a", "b", "c"])
+    }
+
+    /// The two sides can disagree, and this is the price that was accepted for
+    /// keeping the second one: the newcomer trails `c` (whose slot is the last)
+    /// and leads `a` (whose slot is the first), so it goes above `a` — and thus
+    /// above `b` and `c`, which currently outrank it. One layout on one
+    /// appearance, and the next show re-freezes from scratch.
+    ///
+    /// A twin of the case above rather than a second net: measured by mutation,
+    /// every break it catches that one catches too, and the reverse does not
+    /// hold (`.first` → `.last` fails only the neighbour). It is here as the
+    /// executable form of the example in `merged`'s doc comment — the awkward
+    /// half of the bargain, written down so a later repair of one side cannot
+    /// quietly change what was agreed.
+    func testTheTwoSidesDisagreeAndTheFrontOneWins() {
+        XCTAssertEqual(SwitcherViewModel.merged(["a", "b", "c"], with: ["b", "c", "new", "a"]),
                        ["new", "a", "b", "c"])
     }
 
@@ -355,6 +371,21 @@ final class WindowOrderTests: XCTestCase {
         model.update(snapshot: snapshot(["a", "b", "c"], generatedAt: Date()))
         model.panelDidShow()
 
+        model.update(snapshot: snapshot(["c", "a", "b"], generatedAt: Date()))
+        XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
+    }
+
+    /// The freeze now holds against a second source of movement. The data layer
+    /// orders the windows by the last message written in each, so a row moves
+    /// when an agent says something — no click needed — and that is every bit as
+    /// unwelcome under a pointer already travelling towards a row.
+    func testTheOrderHoldsWhenAnAgentReordersTheWindows() {
+        let model = SwitcherViewModel()
+        model.update(snapshot: snapshot(["a", "b", "c"], generatedAt: Date()))
+        model.panelDidShow()
+        model.update(snapshot: snapshot(["a", "b", "c"], generatedAt: Date()))
+
+        // An agent in "c" answers: the data layer now puts it first.
         model.update(snapshot: snapshot(["c", "a", "b"], generatedAt: Date()))
         XCTAssertEqual(windowIDs(model), ["a", "b", "c"])
     }
@@ -493,7 +524,6 @@ final class SyntheticProjectTests: XCTestCase {
                            window: nil,
                            sessions: [session],
                            state: .working,
-                           stateCounts: [StateCount(state: .working, count: 1)],
                            activeSubagents: 0,
                            subagentDescriptions: [],
                            chatTopic: nil,
@@ -544,49 +574,51 @@ final class SyntheticProjectTests: XCTestCase {
     }
 }
 
-/// The pulse means "working" (§3), so it has to follow the state rather than the
-/// lifetime of the view that draws it.
-final class StateBadgeTests: XCTestCase {
-    func testOnlyWorkAndPermissionAnimate() {
-        XCTAssertTrue(StateBadge.animates(.working))
-        XCTAssertTrue(StateBadge.animates(.permission))
-        XCTAssertFalse(StateBadge.animates(.waiting))
-        XCTAssertFalse(StateBadge.animates(.idle))
+/// The pulse means "something is moving" (§3), so it has to follow the status
+/// rather than the lifetime of the view that draws it.
+final class StatusBadgeTests: XCTestCase {
+    /// Only movement pulses. Both `blocked` and `done` hold for as long as the
+    /// user takes to come back, and a list where half the rows blink is a list
+    /// nothing stands out in — the user chose a separate glyph over a second
+    /// blinking state.
+    func testOnlyActivityAnimates() {
+        XCTAssertTrue(StatusBadge.animates(.active))
+        XCTAssertFalse(StatusBadge.animates(.blocked))
+        XCTAssertFalse(StatusBadge.animates(.done))
+        XCTAssertFalse(StatusBadge.animates(.asleep))
     }
 
-    func testEveryStateHasItsOwnColourAndLabel() {
-        let labels = Set(AgentState.allCases.map { StateBadge.label(for: $0) })
-        XCTAssertEqual(labels.count, AgentState.allCases.count)
-    }
-
-    /// The dot was replaced by an icon because a coloured dot names nothing:
-    /// the user had to remember what the colour meant, and the number beside it
-    /// looked like a count of something unnamed. Two states sharing a shape
-    /// would put that back.
-    func testEveryStateHasItsOwnSymbol() {
-        let symbols = AgentState.allCases.map { StateBadge.symbol(for: $0) }
-        XCTAssertEqual(Set(symbols).count, AgentState.allCases.count)
+    /// Each of the four has to be told apart by shape alone: the colour is a
+    /// second channel, not the only one.
+    func testEveryStatusHasItsOwnSymbol() {
+        let symbols = RowStatus.allCases.map { StatusBadge.symbol(for: $0) }
+        XCTAssertEqual(Set(symbols).count, RowStatus.allCases.count)
         XCTAssertFalse(symbols.contains(where: \.isEmpty))
     }
 
-    /// A name SF Symbols does not know draws nothing at all — the chip would be
-    /// an empty box with a number next to it, which is worse than the dot it
-    /// replaced. There is no compiler check for these strings.
+    /// And the point of splitting the fold: a stuck chat does not look like a
+    /// finished one. Both the shape and the colour differ.
+    func testBeingStuckLooksNothingLikeHavingFinished() {
+        XCTAssertNotEqual(StatusBadge.symbol(for: .blocked), StatusBadge.symbol(for: .done))
+        XCTAssertNotEqual(StatusBadge.color(for: .blocked), StatusBadge.color(for: .done))
+    }
+
+    /// A name SF Symbols does not know draws nothing at all — an empty slot
+    /// where the one indicator of the row should be. There is no compiler check
+    /// for these strings.
     func testEverySymbolNameActuallyResolves() {
-        for state in AgentState.allCases {
-            let name = StateBadge.symbol(for: state)
+        for status in RowStatus.allCases {
+            let name = StatusBadge.symbol(for: status)
             XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
                             "\(name) is not an SF Symbol")
         }
-        XCTAssertNotNil(NSImage(systemSymbolName: "gearshape.2.fill", accessibilityDescription: nil))
     }
 
-    /// The pulse marks "somebody has to do something, now" — plus the agent
-    /// actually moving. An answered chat is neither.
-    func testAQuestionPulsesAndAnAnsweredChatDoesNot() {
-        XCTAssertTrue(StateBadge.animates(.question))
-        XCTAssertFalse(StateBadge.animates(.waiting))
-        XCTAssertFalse(StateBadge.animates(.idle))
+    /// Every chat state still has its own word, because the tooltip is where
+    /// the fold is undone.
+    func testEveryStateHasItsOwnWord() {
+        let labels = Set(AgentState.allCases.map { SwitcherRowView.stateLabel(for: $0) })
+        XCTAssertEqual(labels.count, AgentState.allCases.count)
     }
 
     /// `repeatForever` does not stop when the panel is ordered out, so SwiftUI
@@ -595,10 +627,12 @@ final class StateBadgeTests: XCTestCase {
     /// is what ends the pulse, and the panel's visibility is half of that key.
     @MainActor
     func testThePulseOnlyRunsWhileThePanelIsOnScreen() {
-        XCTAssertEqual(StateBadge(state: .working, count: 1, panelVisible: true).pulseState,
-                       .working)
-        XCTAssertNil(StateBadge(state: .working, count: 1, panelVisible: false).pulseState)
-        XCTAssertNil(StateBadge(state: .waiting, count: 1, panelVisible: true).pulseState)
+        XCTAssertEqual(StatusBadge(status: .active, panelVisible: true).pulseState, .active)
+        XCTAssertNil(StatusBadge(status: .active, panelVisible: false).pulseState)
+        XCTAssertNil(StatusBadge(status: .blocked, panelVisible: true).pulseState)
+        XCTAssertNil(StatusBadge(status: .done, panelVisible: true).pulseState)
+        // An empty slot has nothing to pulse either.
+        XCTAssertNil(StatusBadge(status: nil, panelVisible: true).pulseState)
     }
 
     /// And the flag itself follows the panel.
@@ -610,6 +644,620 @@ final class StateBadgeTests: XCTestCase {
         XCTAssertTrue(model.panelVisible)
         model.panelDidHide()
         XCTAssertFalse(model.panelVisible)
+    }
+}
+
+/// The title line carries the count now, in the wording the user asked for.
+@MainActor
+final class RowTitleTests: XCTestCase {
+
+    private func row(working: Int, subagents: Int, name: String = "vscode-switcher") -> SwitcherRow {
+        var sessions = (0..<max(working, 1)).map {
+            TestFixtures.session(id: "s\($0)", cwd: "/tmp/p", state: working > 0 ? .working : .idle)
+        }
+        sessions[0].activeSubagents = subagents
+        let aggregate = DataSource.aggregate(sessions)
+        return SwitcherRow(id: "project:/tmp/p",
+                           kind: .project,
+                           displayName: name,
+                           colorHex: "#000000",
+                           project: nil,
+                           window: nil,
+                           sessions: sessions,
+                           state: aggregate.state,
+                           activeSubagents: aggregate.activeSubagents,
+                           subagentDescriptions: aggregate.subagentDescriptions,
+                           chatTopic: nil,
+                           model: nil,
+                           contextUsedTokens: nil,
+                           contextLimitTokens: nil,
+                           lastActivity: nil)
+    }
+
+    /// Verbatim, brackets and all: `vscode-switcher (agents: 5)`.
+    func testTheCountReadsTheWayItWasAskedFor() {
+        XCTAssertEqual(SwitcherRowView.countLabel(for: row(working: 1, subagents: 4)), "(agents: 5)")
+        XCTAssertEqual(SwitcherRowView.countLabel(for: row(working: 1, subagents: 0)), "(agents: 1)")
+    }
+
+    /// At zero there are no brackets at all — just the name. Ninety-odd rows of
+    /// the "projects" section have never run an agent, and `(agents: 0)` on
+    /// every one of them would be the noise the empty badge slot already avoids.
+    func testNothingRunningMeansNoBracketsAtAll() {
+        XCTAssertNil(SwitcherRowView.countLabel(for: row(working: 0, subagents: 0)))
+    }
+
+    /// The same pair in `--dump`, where the column has a width to keep to: the
+    /// name is cut to what the brackets leave of the cell, so the cell comes out
+    /// exactly as wide as its column and the count comes out whole.
+    ///
+    /// The rows that have a count are the ones a dump of this machine may or may
+    /// not contain — an orphan session, or a project with a live session and no
+    /// window — so this cannot be left to be noticed in the output. Budgeting
+    /// the name to the full 34 first and appending the brackets afterwards makes
+    /// the cell as wide as the two together — 48 characters for the row below —
+    /// and `column` pads without cutting: every column to the right of it
+    /// shifts, on the rows where name and brackets do not fit in 34 together and
+    /// nowhere else.
+    func testTheDumpCellKeepsTheCountWholeInsideItsColumn() {
+        let longest = "wirenboard/node-red-contrib-wirenboard"
+        let cell = ConsoleDump.nameCell(for: row(working: 1, subagents: 122, name: longest), width: 34)
+        XCTAssertEqual(cell.count, 34, "the cell is not the width of its column: '\(cell)'")
+        XCTAssertTrue(cell.hasSuffix(" (agents: 123)"), "the count did not survive whole: '\(cell)'")
+        // And the name is what was cut, visibly, by `shorten`.
+        XCTAssertTrue(cell.hasPrefix("wirenboard/node-red\u{2026}"), "'\(cell)'")
+    }
+}
+
+/// The requirement this whole round exists for, measured rather than eyeballed:
+/// the indicator keeps the same place in every row, whatever else the row holds.
+/// Now that the count sits in the title line instead of a slot of its own, there
+/// is a second half to it — the count has to survive a name too long for the
+/// row, and it still may not nudge the indicator.
+///
+/// `StatusBadge` and `SwitcherRowView` are rendered for real — what the panel
+/// draws, not a copy of it — and the ink is read back off the bitmap. Everything
+/// is measured in points at scale 4, so a quarter of a point shows.
+@MainActor
+final class RowLayoutTests: XCTestCase {
+
+    /// Padding around the badge, so a glyph that outgrew its box lands as ink
+    /// outside the slot instead of being clipped away by the render bounds.
+    private static let pad: CGFloat = 20
+    /// Where the badge's box sits in an isolated render.
+    private static var badgeSlot: ClosedRange<Double> {
+        Double(pad)...Double(pad + StatusBadge.boxWidth)
+    }
+
+    private struct Rendered {
+        var size: CGSize
+        /// Columns carrying ink, in points from the left edge of the canvas.
+        var ink: [Double]
+
+        var span: ClosedRange<Double>? { ink.isEmpty ? nil : ink.min()!...ink.max()! }
+        func span(rightOf x: Double) -> ClosedRange<Double>? {
+            let columns = ink.filter { $0 >= x }
+            return columns.isEmpty ? nil : columns.min()!...columns.max()!
+        }
+        func span(leftOf x: Double) -> ClosedRange<Double>? {
+            let columns = ink.filter { $0 < x }
+            return columns.isEmpty ? nil : columns.min()!...columns.max()!
+        }
+        /// Ink inside a band, so a measurement can leave out both the colour bar
+        /// on the left and the indicator on the right.
+        func span(from: Double, to: Double) -> ClosedRange<Double>? {
+            let columns = ink.filter { $0 >= from && $0 <= to }
+            return columns.isEmpty ? nil : columns.min()!...columns.max()!
+        }
+        /// True when nothing at all is drawn between the two points.
+        func isBlank(from: Double, to: Double) -> Bool {
+            !ink.contains { $0 >= from && $0 <= to }
+        }
+    }
+
+    private func render(status: RowStatus?) throws -> Rendered {
+        // `panelVisible: false` keeps the pulse out of it: `.task` never runs
+        // under `ImageRenderer`, but an animated opacity would be one more thing
+        // deciding what counts as ink.
+        try measure(StatusBadge(status: status, panelVisible: false)
+            .padding(.horizontal, Self.pad))
+    }
+
+    private func measure(_ view: some View) throws -> Rendered {
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 4
+        let image = try XCTUnwrap(renderer.nsImage, "ImageRenderer produced nothing")
+        let bitmap = try XCTUnwrap(renderer.cgImage)
+
+        let pixelWidth = bitmap.width, pixelHeight = bitmap.height
+        var pixels = [UInt8](repeating: 0, count: pixelWidth * pixelHeight * 4)
+        let context = try XCTUnwrap(CGContext(data: &pixels,
+                                              width: pixelWidth,
+                                              height: pixelHeight,
+                                              bitsPerComponent: 8,
+                                              bytesPerRow: pixelWidth * 4,
+                                              space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(bitmap, in: CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+
+        let scale = Double(pixelWidth) / Double(image.size.width)
+        var columns: [Double] = []
+        for x in 0..<pixelWidth {
+            var drawn = false
+            for y in 0..<pixelHeight {
+                let offset: Int = (y * pixelWidth + x) * 4 + 3
+                // Anything above the antialiasing floor counts as drawn.
+                if pixels[offset] > 8 {
+                    drawn = true
+                    break
+                }
+            }
+            if drawn { columns.append(Double(x) / scale) }
+        }
+        return Rendered(size: image.size, ink: columns)
+    }
+
+    /// A whole row at a given width, laid out the way the list lays it out and
+    /// built the way the data layer builds one: both the status and the count
+    /// come out of real chats and real subagents, and the row is asked to
+    /// confirm it folded to what the test meant.
+    ///
+    /// Not every pair of status and count exists, and the fold is why (§3.1):
+    /// `done` and `asleep` say nothing is running, so their count is zero by
+    /// construction, and `active` says something is, so its count is never zero.
+    /// Only `blocked` is free in both — a chat can hold its hand up while the
+    /// rest of the window keeps working — which is why it is the status the
+    /// count-vs-indicator checks below are run against.
+    private func makeRow(status: RowStatus,
+                         count: Int,
+                         name: String = "проект с длинным именем, которое не влезает",
+                         topic: String? = "тема чата, тоже подлиннее строки") -> SwitcherRow {
+        let state: AgentState = switch status {
+        case .blocked: .question
+        case .done: .waiting
+        // A chat idle in itself, made active by the subagents hung off it, so
+        // that the count is exactly what the test asked for rather than one more
+        // than it.
+        case .active: .idle
+        case .asleep: .idle
+        }
+        var session = TestFixtures.session(id: "s", cwd: "/tmp/p", state: state)
+        session.activeSubagents = count
+        let aggregate = DataSource.aggregate([session])
+        let row = SwitcherRow(id: "window:1:w1",
+                              kind: .window,
+                              displayName: name,
+                              colorHex: "#1857a4",
+                              project: nil,
+                              window: nil,
+                              sessions: [session],
+                              state: aggregate.state,
+                              activeSubagents: aggregate.activeSubagents,
+                              subagentDescriptions: aggregate.subagentDescriptions,
+                              chatTopic: topic,
+                              model: nil,
+                              contextUsedTokens: nil,
+                              contextLimitTokens: nil,
+                              lastActivity: nil)
+        XCTAssertEqual(row.status, status, "the fixture does not fold to \(status)")
+        XCTAssertEqual(row.activeCount, count)
+        return row
+    }
+
+    private func renderRow(status: RowStatus,
+                           count: Int,
+                           name: String = "проект с длинным именем, которое не влезает",
+                           topic: String? = "тема чата, тоже подлиннее строки",
+                           width: Double) throws -> Rendered {
+        let row = makeRow(status: status, count: count, name: name, topic: topic)
+        return try measure(SwitcherRowView(row: row, isFrontmost: false, panelVisible: false)
+            .padding(.horizontal, 6)
+            .frame(width: width))
+    }
+
+    /// Where the colour bar's ink sits in a rendered row: 4 pt of bar behind the
+    /// list's 6 pt of padding and the row's own 7. Measured 13.00…16.75.
+    ///
+    /// It is worth a constant because it is in front of the name in *every* row
+    /// and never moves: a span taken from the left edge of the row is the bar's
+    /// whatever the name does, which is how "the name is not a stump" once
+    /// passed on a row that had no name at all.
+    private static let colourBar: ClosedRange<Double> = 13.0...16.75
+
+    /// The longest real project name on this machine, 36 characters and no
+    /// spaces in it — the row where the name and the count fight for the line.
+    private static let longestName = "wirenboard/node-red-contrib-wirenboard"
+
+    /// The least ink the name may be left with while the count is still drawn.
+    ///
+    /// Not the width of four glyphs, because that is not what a span across the
+    /// name measures: the ellipsis is inside the span too, and so is the gap in
+    /// front of it. At the floor the name renders `wire…` — 37.00 pt in all,
+    /// 25.75 of them glyphs, 1.75 the gap, 9.50 the three dots. One character
+    /// less is `wir…`, 29.25 pt in the row. The threshold sits between those two
+    /// with 3.75 pt of slack either way: enough to fail a floor that has dropped
+    /// a character, enough to survive the half-point of glyph drift an OS update
+    /// can bring. Asserting the glyphs' own 25.75 instead let `wir…` through, so
+    /// every floor from 31 pt up passed a check that promises four characters.
+    private static let nameSpanFloor: Double = 33
+
+    /// Where the badge lands in a whole row: the last box-width before the row's
+    /// trailing padding, with the list's own padding outside that.
+    private func badgeSlot(inRowOfWidth width: Double) -> ClosedRange<Double> {
+        // `LazyVStack` pads the list by 6 and the row pads itself by 7.
+        let slotEnd = width - 6 - 7
+        return (slotEnd - Double(StatusBadge.boxWidth))...slotEnd
+    }
+
+    /// The numbers, in one place, so a change to any of them has to be
+    /// deliberate. One slot on the right, and it is the badge's own box: the
+    /// count that used to have a slot of its own beside it now lives in the
+    /// title line, and there is nothing left outside the badge to set a width
+    /// for.
+    func testTheSlotIsWhatTheSpecSays() {
+        XCTAssertEqual(StatusBadge.boxWidth, 14)
+        XCTAssertEqual(StatusBadge.boxHeight, 12)
+    }
+
+    /// Nothing a row can hold changes the width of the slot, so it starts at the
+    /// same distance from the right edge of every row.
+    func testTheSlotIsTheSameWidthWhateverIsInIt() throws {
+        for status in RowStatus.allCases.map(Optional.some) + [nil] {
+            let rendered = try render(status: status)
+            XCTAssertEqual(rendered.size.width,
+                           2 * Self.pad + StatusBadge.boxWidth,
+                           accuracy: 0.01,
+                           "status=\(status as Any)")
+        }
+    }
+
+    /// And the four glyphs sit in the same slot as each other: each is centred
+    /// in the same 14 pt box, so their ink is inside it and shares a midpoint.
+    /// They are not the same width — that is exactly why the box is fixed.
+    ///
+    /// The containment half is a canary rather than the requirement: `frame`
+    /// does not clip, so a glyph that outgrew the box would spill outside it
+    /// without moving the slot. Worth hearing about all the same.
+    ///
+    /// And it is a canary with very little room: measured in the 20…34 slot,
+    /// `hand.raised.fill` 22.75…31.5, `checkmark.circle.fill` and
+    /// `moon.zzz.fill` 21.5…32.5, `arrow.triangle.2.circlepath` 20.25…33.5 —
+    /// a quarter of a point from the left edge of the box. Half a point of
+    /// glyph drift in an SF Symbols or macOS update breaks this line with
+    /// nothing changed in the repository. If it fails on the containment
+    /// assertions alone while the midpoints still agree, that is the OS having
+    /// moved, not the layout: widen the box rather than hunting for a regression
+    /// that is not there.
+    func testEveryGlyphSitsInTheSameSlot() throws {
+        var midpoints: [Double] = []
+        for status in RowStatus.allCases {
+            let rendered = try render(status: status)
+            let badge = try XCTUnwrap(rendered.span, "\(status)")
+            XCTAssertGreaterThanOrEqual(badge.lowerBound, Self.badgeSlot.lowerBound, "\(status) overflows left")
+            XCTAssertLessThanOrEqual(badge.upperBound, Self.badgeSlot.upperBound, "\(status) overflows right")
+            midpoints.append((badge.lowerBound + badge.upperBound) / 2)
+        }
+        let slotMidpoint = (Self.badgeSlot.lowerBound + Self.badgeSlot.upperBound) / 2
+        for midpoint in midpoints {
+            XCTAssertEqual(midpoint, slotMidpoint, accuracy: 0.5)
+        }
+    }
+
+    /// A row with nothing to report draws nothing in the slot, and the slot is
+    /// still there — that is what makes the empty case hold the column.
+    func testAnEmptySlotDrawsNothingAndStillHoldsItsGround() throws {
+        let empty = try render(status: nil)
+        XCTAssertNil(empty.span, "an empty row drew something")
+        XCTAssertEqual(empty.size.width, 2 * Self.pad + StatusBadge.boxWidth, accuracy: 0.01)
+    }
+
+    /// The same thing measured where the user sees it: a whole row, laid out at
+    /// the real panel width, with the list's padding around it. The indicator
+    /// lands in the last 14 pt before the row's trailing padding — 353…367 in a
+    /// 380 pt panel — for every status and every count that status can have.
+    ///
+    /// Containment alone does not say "the same place": the four glyphs are
+    /// right-aligned against one edge, so all of them fit inside 353…367 even
+    /// with the fixed box gone — which is what the midpoint check is for.
+    /// Measured 359.875 / 360.0 / 360.125 against a slot midpoint of 360, so
+    /// 0.375 of the tolerance is spare. A 1 pt nudge of the slot fails it even
+    /// for the narrow moon, whose ink would still be inside the bounds.
+    func testTheIndicatorIsInTheSamePlaceInAWholeRowAtPanelWidth() throws {
+        let panelWidth = Config.default.panelWidth
+        let slot = badgeSlot(inRowOfWidth: panelWidth)
+        let slotMidpoint = (slot.lowerBound + slot.upperBound) / 2
+
+        for status in RowStatus.allCases {
+            for count in Self.counts(for: status) {
+                let rendered = try renderRow(status: status, count: count, width: panelWidth)
+                let badge = try XCTUnwrap(rendered.span(rightOf: slot.lowerBound - 3),
+                                          "\(status) count=\(count)")
+                XCTAssertGreaterThanOrEqual(badge.lowerBound, slot.lowerBound, "\(status) count=\(count)")
+                XCTAssertLessThanOrEqual(badge.upperBound, slot.upperBound, "\(status) count=\(count)")
+                XCTAssertEqual((badge.lowerBound + badge.upperBound) / 2, slotMidpoint, accuracy: 0.5,
+                               "\(status) count=\(count)")
+            }
+        }
+    }
+
+    /// The counts each fold can actually carry (§3.1). `blocked` is the only one
+    /// free to have any of them.
+    private static func counts(for status: RowStatus) -> [Int] {
+        switch status {
+        case .blocked: return [0, 1, 12, 123]
+        case .active: return [1, 12, 123]
+        case .done, .asleep: return [0]
+        }
+    }
+
+    /// The point of the round, and the part the move into the title line could
+    /// have broken: the count — absent, one digit, two, or three — never moves
+    /// the indicator by so much as a subpixel, whether the name leaves room or
+    /// runs the whole width of the row.
+    func testTheCountInTheTitleNeverMovesTheIndicator() throws {
+        let panelWidth = Config.default.panelWidth
+        let slot = badgeSlot(inRowOfWidth: panelWidth)
+        for name in ["p", "wirenboard/node-red-contrib-wirenboard"] {
+            var seen: ClosedRange<Double>?
+            for count in [0, 1, 12, 123] {
+                let rendered = try renderRow(status: .blocked, count: count, name: name, width: panelWidth)
+                let badge = try XCTUnwrap(rendered.span(rightOf: slot.lowerBound - 3),
+                                          "no indicator drawn for count=\(count)")
+                if let seen {
+                    XCTAssertEqual(badge.lowerBound, seen.lowerBound, accuracy: 0.01, "\(name) count=\(count)")
+                    XCTAssertEqual(badge.upperBound, seen.upperBound, accuracy: 0.01, "\(name) count=\(count)")
+                } else {
+                    seen = badge
+                }
+            }
+        }
+    }
+
+    /// The name is what gives way when the row runs out of width, not the count:
+    /// the ellipsis lands in the name and `(agents: N)` stays whole. The other
+    /// way round it would be the long-named row — the one worth reading the
+    /// number on — that lost it.
+    ///
+    /// Measured rather than asserted about. The label is rendered on its own to
+    /// learn how wide its ink is, and then looked for at the end of the title
+    /// line: that many points of ink flush with the right edge of the text, with
+    /// a blank band in front of them where the `HStack` spacing is. A label
+    /// truncated to fit would be narrower than its own ink, so the name would
+    /// fill that band; a label dropped altogether leaves the name running
+    /// unbroken to the edge. Both counts are checked, because a label clamped to
+    /// some fixed width would pass one of them by accident.
+    ///
+    /// The name is the longest real one on this machine, 36 characters, and has
+    /// no spaces in it — so a blank band this wide inside the title line is the
+    /// gap in front of the label and nothing else. The row is rendered without a
+    /// chat topic for the same reason: the second line would put its own ink in
+    /// these columns.
+    ///
+    /// Several widths, because the narrow ones are where the name has to be
+    /// defended. At the 380 pt default there is room for both and the shrink
+    /// lands on the name by itself. Further down — `panelWidth` is a setting and
+    /// takes any value above zero — the name is at its floor and the count is
+    /// still whole, which is the middle rung of the ladder doing its job: 40 pt
+    /// answers the fit question, the rest of the line is still drawn in, and at
+    /// least `nameSpanFloor` of the name survives — 33 pt, which is four
+    /// characters and their ellipsis. Measured without the colour bar in front
+    /// of it: the bar's own 13.00…16.75 is in every row and would carry any such
+    /// assertion on its own.
+    ///
+    /// Where that rung gives out was measured by sweeping the width a point at a
+    /// time against the longest real name: the count is drawn down to 188 pt with
+    /// one digit, 193 with two, 201 with three. Hence the pairs — 200 pt is
+    /// below the three-digit line. The two tests below take it from here: the
+    /// sweep walks every width down to where the rung gives out, and the
+    /// narrow-panel one stands on the far side of it. (A short name keeps its
+    /// count further down still, 156 pt for a single character: the first rung
+    /// fits where the second does not.)
+    func testALongNameGivesWayBeforeTheCountDoes() throws {
+        for (width, count) in [(Config.default.panelWidth, 5), (Config.default.panelWidth, 123),
+                               (240.0, 5), (240.0, 123), (200.0, 5)] {
+            let drawn = try countIsDrawnAboveTheNameFloor(width: width,
+                                                         count: count,
+                                                         name: Self.longestName,
+                                                         labelWidth: try inkWidthOfLabel(count: count))
+            XCTAssertTrue(drawn, "the count went away already at \(width) pt — count=\(count)")
+        }
+    }
+
+    /// The top rung, which neither the test above nor the sweep below ever
+    /// reaches: both are run against the longest real name, which has not fitted
+    /// whole since 380 pt, so both of them land on the middle rung and a build
+    /// with the top rung deleted passes them all.
+    ///
+    /// A short name is where the top rung is the one that fits, and it fits
+    /// further down than the middle one can: the middle rung asks for 40 pt of
+    /// name whatever the name is, the top rung asks for the name's own width.
+    /// Measured against `p`, the count survives down to 156 pt with one digit,
+    /// 162 with two, 170 with three; the longest name loses a one-digit count
+    /// already at 188. So the width here is between those two, halfway, with
+    /// 16 pt of drift in either direction before the test stops meaning what it
+    /// says — and both halves are asserted, because "the count is drawn" alone
+    /// would also pass if the middle rung had somehow reached down here.
+    func testAShortNameKeepsItsCountWhereTheFloorWouldNotFit() throws {
+        let width = 172.0
+        let labelWidth = try inkWidthOfLabel(count: 5)
+        let short = try nameInkBesideTheCount(width: width, count: 5, name: "p", labelWidth: labelWidth)
+        XCTAssertNotNil(short, "a one-character name lost its count at \(width) pt")
+        let long = try nameInkBesideTheCount(width: width,
+                                             count: 5,
+                                             name: Self.longestName,
+                                             labelWidth: labelWidth)
+        XCTAssertNil(long, "the middle rung reached \(width) pt, so the count there proves nothing")
+    }
+
+    /// And the floor holds all the way down to where the rung gives out, not
+    /// merely at the widths named above.
+    ///
+    /// This is the assertion that pins `nameFloorWidth` to a number. At 200 pt
+    /// and up the floor is not binding — the name is offered the rest of the
+    /// line and takes 44.75 pt of ink or more — so those widths draw the same
+    /// row whatever the floor is set to, and a floor of 5 pt passed them all.
+    /// What a lower floor really does is keep the count alive further down, on
+    /// rows where the name is already a stump: measured at 20 pt, the count
+    /// still draws at 178 pt beside 24.25 pt of name (`wi…`) and at 169 pt
+    /// beside 9.50 pt (the ellipsis alone, no name at all). Sweeping every
+    /// width down to the narrow panel of the next test is what catches that.
+    ///
+    /// One digit, because the shortest label is the one that survives furthest
+    /// down and squeezes the name hardest.
+    func testTheNameKeepsItsFloorWhereverTheCountIsDrawn() throws {
+        // From just above the three-digit line — the widths above it are the
+        // test before this one — down to the panel of the narrow-panel test.
+        var width = 205.0
+        var widthsWithACount = 0
+        let labelWidth = try inkWidthOfLabel(count: 5)
+        while width >= 150 {
+            if try countIsDrawnAboveTheNameFloor(width: width,
+                                                 count: 5,
+                                                 name: Self.longestName,
+                                                 labelWidth: labelWidth) {
+                widthsWithACount += 1
+            }
+            width -= 1
+        }
+        // And the sweep is not a sweep over rows that all dropped the count,
+        // which would assert nothing at all. One digit reaches 188 pt, so
+        // eighteen of these widths draw it — and the assertion is deliberately
+        // far below that. Like the badge-slot check (§4) this is a canary rather
+        // than the requirement itself, and there the resemblance ends: that one
+        // is deliberately tight, a quarter of a point, so that glyph drift is
+        // what trips it. This one is deliberately loose. What it guards against
+        // is a sweep gone empty (a floor of 60 pt draws no count at any of these
+        // widths at all), not the exact place the rung gives out, which an OS
+        // metrics change may move by a point or two on its own.
+        XCTAssertGreaterThanOrEqual(widthsWithACount, 8)
+    }
+
+    /// One rung of the ladder at one width: is the count still drawn whole, and
+    /// if it is, how much ink is the name in front of it left with? `nil` when
+    /// the row dropped the count altogether.
+    ///
+    /// Whether the count is drawn is decided against the same row without one,
+    /// because a row that dropped it draws exactly what a count-less row draws.
+    /// The name is measured between the colour bar and the label, so that what
+    /// the floor promises — the *name*, not the row — is what is counted.
+    ///
+    /// The label's own ink is passed in rather than measured here: it does not
+    /// depend on the width, and rendering it again at every step of the sweep
+    /// was a third of the whole suite's running time.
+    private func nameInkBesideTheCount(width: Double,
+                                       count: Int,
+                                       name: String,
+                                       labelWidth: Double) throws -> Double? {
+        let rendered = try renderRow(status: .blocked, count: count, name: name, topic: nil, width: width)
+        let bare = try renderRow(status: .blocked, count: 0, name: name, topic: nil, width: width)
+        guard rendered.ink != bare.ink else { return nil }
+
+        let slot = badgeSlot(inRowOfWidth: width)
+        let text = try XCTUnwrap(rendered.span(leftOf: slot.lowerBound - 3), "no title drawn")
+        // Half a point of slack: the label starts at a fractional x in the row
+        // and the antialiasing of its first stem can fall either side of a
+        // quarter-point column.
+        let labelStart = text.upperBound - labelWidth - 0.5
+        XCTAssertTrue(rendered.isBlank(from: labelStart - 2.5, to: labelStart - 0.5),
+                      "the name ran into the label — width=\(width) count=\(count)")
+        let nameInk = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
+                                                  to: labelStart - 2.5),
+                                    "no name drawn — width=\(width) count=\(count)")
+        return nameInk.upperBound - nameInk.lowerBound
+    }
+
+    /// The same thing where the floor is what is being asked about: the count is
+    /// drawn *and* the name in front of it is not a stump.
+    private func countIsDrawnAboveTheNameFloor(width: Double,
+                                               count: Int,
+                                               name: String,
+                                               labelWidth: Double) throws -> Bool {
+        guard let nameInk = try nameInkBesideTheCount(width: width,
+                                                      count: count,
+                                                      name: name,
+                                                      labelWidth: labelWidth) else { return false }
+        XCTAssertGreaterThanOrEqual(nameInk, Self.nameSpanFloor,
+                                    "the name is down to a stump — width=\(width) count=\(count)")
+        return true
+    }
+
+    /// Below that floor the count is what goes, and it goes whole.
+    ///
+    /// A 150 pt panel cannot hold a long name and `(agents: N)` at once, and the
+    /// half that has to survive is the name: a row that reads `(agents: 124)` and
+    /// nothing else identifies no project, the same objection §2.2.1 makes to a
+    /// row parked at the bottom of a 93-row list. So the row is asked to draw
+    /// exactly what the same row without a count draws — not a truncated label,
+    /// which is what a minimum width on the name gives instead (measured: the
+    /// same 25.75 pt stump for 5 as for 124, a count that lies about its number).
+    ///
+    /// The equality is over the whole row, indicator included, so an overflow
+    /// would fail it too: `fixedSize` alone pushed the colour bar 5.5 pt out of
+    /// the row's own frame here.
+    func testANarrowPanelDropsTheCountAndKeepsTheName() throws {
+        let width = 150.0
+        let bare = try renderRow(status: .blocked, count: 0, name: Self.longestName, topic: nil, width: width)
+        // Not two empty rows being compared — and the row's own span cannot say
+        // so, because the colour bar and the indicator hold both its ends: with
+        // no name at all it measures the same 121.50 pt (13.00…134.50) as with
+        // the longest one. So the name's own ink is what is asked for, between
+        // the bar and the badge: 68.25 pt of it here, 26.25…94.50, which is the
+        // name truncated to `wirenboa…` (68.25 pt rendered on its own). The
+        // whole `wirenboard/node-…` would be 123.50 pt and has no room here.
+        let bareName = try XCTUnwrap(bare.span(from: Self.colourBar.upperBound + 0.25,
+                                               to: badgeSlot(inRowOfWidth: width).lowerBound - 3),
+                                     "the bare row drew no name to compare against")
+        XCTAssertGreaterThan(bareName.upperBound - bareName.lowerBound, 60)
+
+        for count in [5, 123] {
+            let rendered = try renderRow(status: .blocked,
+                                         count: count,
+                                         name: Self.longestName,
+                                         topic: nil,
+                                         width: width)
+            XCTAssertEqual(rendered.ink, bare.ink, "count=\(count) still drew something at 150 pt")
+            // And the label is nowhere in the row: its ink would have to end
+            // somewhere, and the title line ends where the name's ellipsis does.
+            let labelWidth = try inkWidthOfLabel(count: count)
+            let slot = badgeSlot(inRowOfWidth: width)
+            let text = try XCTUnwrap(rendered.span(leftOf: slot.lowerBound - 3))
+            XCTAssertFalse(rendered.isBlank(from: text.upperBound - labelWidth - 3,
+                                            to: text.upperBound - labelWidth - 0.5),
+                           "there is a label-shaped gap in the title — count=\(count)")
+        }
+    }
+
+    /// Every measurement above starts its band at the right-hand edge of
+    /// `colourBar`, a range written down by hand, and reads whatever is left of
+    /// the badge as the name. Both halves of that are worth one cheap render: a
+    /// row with no name at all draws the bar exactly where the constant says,
+    /// and nothing whatever between it and the indicator. If a future row grows
+    /// something in that band — a second bar, a leading icon — the assertions
+    /// that ask "is the name still there" would start passing on its ink
+    /// instead, which is the very hole this constant was introduced to close.
+    func testNothingButTheNameLivesBetweenTheBarAndTheSlot() throws {
+        let width = 150.0
+        let rendered = try renderRow(status: .blocked, count: 0, name: "", topic: nil, width: width)
+        let bar = try XCTUnwrap(rendered.span(leftOf: Self.colourBar.upperBound + 3),
+                                "the row drew no colour bar")
+        XCTAssertEqual(bar.lowerBound, Self.colourBar.lowerBound, accuracy: 0.01)
+        XCTAssertEqual(bar.upperBound, Self.colourBar.upperBound, accuracy: 0.01)
+        // Measured: the bar ends at 16.75 and the next ink in the row is the
+        // indicator at 125.75.
+        XCTAssertNil(rendered.span(from: Self.colourBar.upperBound + 0.25,
+                                   to: badgeSlot(inRowOfWidth: width).lowerBound - 3),
+                     "a nameless row drew something between the bar and the slot")
+    }
+
+    /// The count's own ink, rendered on its own in the font the row draws it in.
+    private func inkWidthOfLabel(count: Int) throws -> Double {
+        let label = try XCTUnwrap(SwitcherRowView.countLabel(for: makeRow(status: .blocked, count: count)))
+        let alone = try measure(Text(label)
+            .font(.system(size: 13))
+            .foregroundStyle(.secondary)
+            .padding(Self.pad))
+        let ink = try XCTUnwrap(alone.span)
+        return ink.upperBound - ink.lowerBound
     }
 }
 
@@ -653,7 +1301,6 @@ final class RowTooltipTests: XCTestCase {
                            window: nil,
                            sessions: sessions,
                            state: aggregate.state,
-                           stateCounts: aggregate.stateCounts,
                            activeSubagents: subagents.count,
                            subagentDescriptions: subagents,
                            chatTopic: sessions.first?.topic,
@@ -682,7 +1329,7 @@ final class RowTooltipTests: XCTestCase {
         }
         let text = SwitcherRowView.tooltipText(for: row(sessions))
         for state in AgentState.allCases {
-            XCTAssertTrue(text.contains(StateBadge.label(for: state)), "missing \(state)")
+            XCTAssertTrue(text.contains(SwitcherRowView.stateLabel(for: state)), "missing \(state)")
         }
     }
 

@@ -31,11 +31,11 @@ final class SwitcherViewModel: ObservableObject {
     /// The panel is on screen — false for most of the app's life.
     ///
     /// `withAnimation(.repeatForever)` does not stop when the window is ordered
-    /// out, and a row in `working` or `permission` is the normal state of this
+    /// out, and a row with something running in it is the normal state of this
     /// user's machine. SwiftUI therefore went on laying the whole list out and
     /// rendering its display list at display-link rate into a window nobody
     /// could see: measured at 13.6% of a core with the panel closed, against
-    /// 2.0% once it stops. `StateBadge` keys its pulse on this as well as on the
+    /// 2.0% once it stops. `StatusBadge` keys its pulse on this as well as on the
     /// state.
     @Published private(set) var panelVisible = false
     @Published private(set) var snapshot: SwitcherSnapshot = .empty
@@ -48,8 +48,8 @@ final class SwitcherViewModel: ObservableObject {
     /// perfectly good frozen order — the windows opened from the panel after
     /// that have to be appended to it. Told apart by emptiness alone, that case
     /// read as "no freeze": the rule that records newcomers switched itself off
-    /// for the rest of the appearance and the list went back to live z-order,
-    /// reshuffling under the pointer at every click.
+    /// for the rest of the appearance and the list went back to the live order
+    /// from the data layer, reshuffling under the pointer at every click.
     @Published private var windowOrder: [String]?
     /// Set when the panel appears: the order above came from the cache and is
     /// provisional until a snapshot whose sources were read after this instant
@@ -70,14 +70,19 @@ final class SwitcherViewModel: ObservableObject {
         // The order frozen at show time came from the cache, which is up to two
         // seconds old and has no watcher behind it — nothing tells the store
         // that a window was opened. A window opened a second before the panel
-        // was summoned was therefore missing from it, counted as "appeared
-        // while the panel was up" and pinned to the *bottom* of the list for as
-        // long as the panel stayed open — and the newest window is usually the
-        // one being looked for. So the freeze is redone once, on the first
-        // snapshot that was actually read after the panel appeared. It also
-        // covers the degenerate case of a panel shown before the very first
-        // snapshot, where the frozen order was empty and every click reshuffled
-        // the list.
+        // was summoned is therefore missing from it, counted as "appeared while
+        // the panel was up" and pinned to the *bottom* of the list for as long
+        // as the panel stays open — whatever the ranking would have said about
+        // it. Sometimes the bottom is the right answer: a window with no chat
+        // in it has no activity and belongs there. Often it is not: a new
+        // window of a project an agent is working in inherits that project's
+        // chats the moment it opens, so its activity is the freshest there is
+        // and its place is the top. The freeze is redone once, on the first
+        // snapshot actually read after the panel appeared, so that the order
+        // frozen is the ranking's answer rather than an artefact of a stale
+        // cache. It also covers the degenerate case of a panel shown before the
+        // very first snapshot, where the frozen order was empty and every click
+        // reshuffled the list.
         //
         // Redone by insertion, not by replacement: the assembly takes 40–180 ms
         // and the slide-in 140 ms, so this lands exactly when the panel has
@@ -89,12 +94,12 @@ final class SwitcherViewModel: ObservableObject {
         }
         // A window opened while the panel is up joins the frozen order the first
         // time it is seen, instead of being left out of it for `ordered` to
-        // append on every pass. Left out, its place was decided by live z-order:
-        // clicking two projects in a row put the two new rows at the bottom, and
+        // append on every pass. Left out, its place was decided by the live
+        // order: clicking two projects in a row put both new rows at the bottom, and
         // clicking either of them swapped them under the pointer — the list
         // moving from a click, which is what the freeze exists to stop. Not
         // while the re-freeze is still pending: the order is provisional until
-        // then, and a newcomer belongs in the z-order slot `merged` gives it.
+        // then, and a newcomer belongs in the slot `merged` gives it.
         // An order frozen empty counts as frozen — that is the panel summoned
         // with no editor window at all, where every row that ever appears is a
         // newcomer and this rule is the only thing holding the list still.
@@ -130,13 +135,13 @@ final class SwitcherViewModel: ObservableObject {
     /// confirms it a beat later — and settles the window order for good.
     ///
     /// The click is about to raise a window or open a new one, and both change
-    /// the z-order the next snapshot reports. Whatever the list looked like when
+    /// the order the next snapshot reports. Whatever the list looked like when
     /// the user aimed at it is what it has to keep looking like, so the order in
     /// force at this instant is written down and the pending re-freeze dropped.
     /// Clearing the pending flag alone was not enough: when the order was still
     /// empty — the panel's first appearance after launch, before any snapshot —
     /// the windows on screen appeared in it nowhere, so the list was laid out by
-    /// raw z-order and jumped after every click, which is the defect the freeze
+    /// the raw order and jumped after every click, which is the defect the freeze
     /// was built for.
     ///
     /// And when there is nothing to write down, the wait stays on. The panel can
@@ -144,7 +149,7 @@ final class SwitcherViewModel: ObservableObject {
     /// grant has only just been given — and then the only thing to click is a
     /// project. Settling an empty order there cancelled the re-freeze that was
     /// the one thing left to fix it, and every window opened from the panel
-    /// afterwards was ordered by live z-order again.
+    /// afterwards was ordered by the live order again.
     func rowActivated(_ row: SwitcherRow) {
         if orderPendingSince != nil {
             let settled = Self.ordered(snapshot.openWindows, by: windowOrder).map(\.id)
@@ -184,23 +189,23 @@ final class SwitcherViewModel: ObservableObject {
 
     /// Puts the open windows back into the order frozen at the last show.
     ///
-    /// `DataSource` hands them over in z-order, which is correct of it and
-    /// unusable here: raising a window is exactly what the panel is for, and the
-    /// next snapshot — one second later at most — moved the row the user had
-    /// just clicked to the top and shifted every other row under the pointer.
-    /// Stepping through several windows in a row meant chasing a list that
-    /// reshuffled after each click. Only the sequence is frozen; the contents of
-    /// the rows keep updating.
+    /// `DataSource` hands them over newest-message-first, which is correct of it
+    /// and unusable live: the list would move whenever an agent said something,
+    /// and raising a window — exactly what the panel is for — used to do the same
+    /// back when the order was the z-order. Either way the next snapshot, one
+    /// second later at most, shifted rows under the pointer, and stepping through
+    /// several windows meant chasing a list that reshuffled after each click.
+    /// Only the sequence is frozen; the contents of the rows keep updating.
     ///
     /// Matching is by `row.id`, which carries the `CGWindowID`, so a window that
     /// was closed simply drops out and leaves no hole, and one opened while the
     /// panel is up is appended rather than wedged into the middle. The order is
     /// taken afresh at every show — from the first snapshot read after that show
-    /// (see `update(snapshot:)`) — so the list is back in z-order, most recently
-    /// used first, as soon as the panel is reopened.
+    /// (see `update(snapshot:)`) — so the list is fresh again, the window with the
+    /// last message on top, as soon as the panel is reopened.
     ///
-    /// `nil` means no order has been frozen yet, and only then is the raw z-order
-    /// handed back untouched. An order frozen while no window was open is `[]`,
+    /// `nil` means no order has been frozen yet, and only then is the data
+    /// layer's own order handed back untouched. An order frozen while no window was open is `[]`,
     /// which is a frozen order like any other: its rows are all newcomers and
     /// keep the sequence `update(snapshot:)` recorded them in.
     static func ordered(_ rows: [SwitcherRow], by order: [String]?) -> [SwitcherRow] {
@@ -217,29 +222,40 @@ final class SwitcherViewModel: ObservableObject {
         return frozen.map(\.1) + appeared
     }
 
-    /// Folds a fresh z-order into an order already frozen, by inserting only the
+    /// Folds a fresh order into an order already frozen, by inserting only the
     /// windows the frozen one has never heard of.
     ///
     /// This runs once per appearance, at the worst possible moment: the panel
     /// has just finished sliding in and the pointer is already travelling
     /// towards a row. Taking the fresh order wholesale moved every row that had
-    /// been raised since the cached snapshot was read — for the sake of the one
-    /// window that genuinely was missing. A new window still lands where its
-    /// z-order says, so the window opened a second before the panel was summoned
-    /// is still at the top; the rows below the insertion point still shift by
-    /// one, which is as little as this can move at all.
+    /// moved since the cached snapshot was read — for the sake of the one window
+    /// that genuinely was missing. A new window instead lands where the fresh
+    /// order puts it: near the top when an agent has just said something in it,
+    /// at the very bottom when it holds no chat at all, which under an
+    /// activity ranking is exactly where a chat-less window belongs. The rows
+    /// below the insertion point still shift by one, which is as little as this
+    /// can move at all.
     ///
-    /// The insertion point is the frozen slot of the closest window in front of
-    /// the newcomer, so several new windows keep their relative z-order, and one
-    /// that is frontmost overall goes to the very top.
+    /// The rule is "keep the newcomer on the correct side of a window the frozen
+    /// order already knows". Its slot is just after the closest window it trails
+    /// in the fresh order, so several new windows keep their relative order, and
+    /// one that leads the fresh order overall goes to the very top.
     ///
-    /// Unless that slot is the last one, which would put the newest window at the
-    /// very bottom of the list — the one place it must not be. It happens
-    /// whenever the window in front of the newcomer is the *oldest* one in the
-    /// frozen order: open a window, then click an old one, then summon the panel.
-    /// The closest known window *behind* the newcomer is then the anchor instead,
-    /// and the newcomer goes in just above it — the same rule seen from the other
-    /// side. With nothing known behind it either, the end is where it belongs.
+    /// Unless that slot is the last one. Then the same rule is read from the
+    /// other side: the newcomer goes just above the closest known window it
+    /// *leads* in the fresh order — it outranks that window now, so it belongs
+    /// above it. With nothing known behind it either, the end is where it
+    /// belongs, and that is the ordinary "opened while the panel was up, nothing
+    /// in it yet" case.
+    ///
+    /// The two sides can disagree, because the frozen order is a ranking from a
+    /// moment ago and the fresh one is the ranking now: with frozen `[a, b, c]`
+    /// and fresh `[b, c, new, a]` the newcomer trails `c` (last slot) and leads
+    /// `a` (first slot), and going above `a` puts it above `b` and `c`, which
+    /// currently outrank it. Accepted: it costs one layout on one appearance,
+    /// the next show re-freezes from scratch, and the alternative — dropping the
+    /// second side — sends a window with genuinely fresh activity to the bottom
+    /// in the far commoner case above.
     static func merged(_ order: [String], with fresh: [String]) -> [String] {
         var result = order
         var anchor: Int?
@@ -456,7 +472,7 @@ struct SwitcherRowView: View {
     let row: SwitcherRow
     /// True for the row whose window is currently in front.
     let isFrontmost: Bool
-    /// Passed through to `StateBadge`, which must not animate off screen.
+    /// Passed through to `StatusBadge`, which must not animate off screen.
     var panelVisible: Bool = true
 
     @State private var isHovering = false
@@ -469,10 +485,7 @@ struct SwitcherRowView: View {
                 .frame(maxHeight: .infinity)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(row.displayName)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                titleLine
                 if let subtitle {
                     Text(subtitle)
                         .font(.system(size: 11))
@@ -483,7 +496,7 @@ struct SwitcherRowView: View {
             }
 
             Spacer(minLength: 6)
-            metrics
+            StatusBadge(status: row.status, panelVisible: panelVisible)
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 6)
@@ -496,32 +509,108 @@ struct SwitcherRowView: View {
 
     private var subtitle: String? { Self.rowSubtitle(row) }
 
-    /// One chip per state actually present in the row, plus the subagent count.
+    /// The name, and the count after it when something is running.
     ///
-    /// Two things used to sit here and no longer do. The row showed only the
-    /// highest state, so a window with six chats — four answered, two working —
-    /// read `4` and said nothing about the other two. And the context percentage
-    /// and the model belonged to *one* of those six chats while the numbers
-    /// beside them counted all six: two scales in one block with nothing marking
-    /// the boundary. Both moved into the tooltip, which has room to name the
-    /// chat each number belongs to.
-    @ViewBuilder
-    private var metrics: some View {
-        HStack(spacing: 7) {
-            if row.activeSubagents > 0 {
-                HStack(spacing: 2) {
-                    Image(systemName: "gearshape.2.fill")
-                        .font(.system(size: 9))
-                    Text("\(row.activeSubagents)")
-                        .font(.system(size: 10, weight: .medium).monospacedDigit())
+    /// Three candidates, most generous first; `ViewThatFits` takes the first
+    /// whose ideal width fits the line it is offered:
+    ///
+    /// 1. both whole — what the 380 pt default draws unless the name is long;
+    /// 2. the count whole, the name squeezed down to `nameFloorWidth` at worst.
+    ///    The name is what gives way, because on the row where the number is
+    ///    worth reading it is the name that is long;
+    /// 3. the name alone. A panel too narrow for both drops the *count*: a row
+    ///    reading `(agents: 124)` and nothing else names no project, and a row
+    ///    that identifies nothing is no better than the one parked at the bottom
+    ///    of a 93-row list (§2.2.1).
+    ///
+    /// The middle candidate is what makes the floor a floor: `frame(idealWidth:)`
+    /// answers the fit question with 40 pt instead of the name's full width, and
+    /// passes the real proposal through afterwards, so the name still takes
+    /// whatever the line actually has.
+    ///
+    /// `panelWidth` is a setting that takes any value above zero, and this is the
+    /// second attempt at that end of its range. `fixedSize` alone — the count
+    /// rigid, the name flexible — holds at 380 and 240 and breaks below: at
+    /// 150 pt the name came out as 2.25 pt of ink beside `(agents: 5)`, and with
+    /// `(agents: 124)` the row overflowed its own frame, colour bar and all,
+    /// 5.5 pt to the left of where it belongs. Giving the name a minimum width
+    /// instead keeps the name but truncates the count, and a truncated count is a
+    /// lie: measured at 150 pt it is the same 25.75 pt stump for 5 as for 124.
+    /// `RowLayoutTests` renders 380, 240 and 200 with the count still there, 150
+    /// with it gone, and sweeps every width in between: taking the middle rung
+    /// out is caught at all three of the first ones alike — the top rung has not
+    /// fitted the longest name since 380 — while lowering the floor changes
+    /// nothing at any of them and is caught only in the sweep.
+    @ViewBuilder private var titleLine: some View {
+        if let countLabel = Self.countLabel(for: row) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 4) {
+                    nameText
+                    countText(countLabel)
                 }
-                .foregroundStyle(.secondary)
+                HStack(spacing: 4) {
+                    nameText.frame(idealWidth: Self.nameFloorWidth, alignment: .leading)
+                    countText(countLabel)
+                }
+                nameText
             }
-            ForEach(row.stateCounts, id: \.state) { entry in
-                StateBadge(state: entry.state, count: entry.count, panelVisible: panelVisible)
-            }
+        } else {
+            nameText
         }
-        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var nameText: some View {
+        Text(row.displayName)
+            .font(.system(size: 13, weight: .semibold))
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+
+    /// `.secondary` at the name's own size, in the regular weight: it has to read
+    /// as a separate thing from the name it follows, without reading as the same
+    /// thing as the chat topic under it — which is `.secondary` too, but at
+    /// 11 pt. Size and line keep those two apart. `.tertiary` was the
+    /// alternative and is too faint for this: at roughly a quarter opacity over a
+    /// blurred material it dims a number that answers "how much is running here"
+    /// into decoration.
+    ///
+    /// `fixedSize` keeps the count out of the `HStack`'s division of the line, so
+    /// inside a chosen candidate the shortfall lands on the name's ellipsis.
+    /// Which candidate is chosen is decided above, and that is where the count
+    /// can lose — whole, never cut.
+    private func countText(_ label: String) -> some View {
+        Text(label)
+            .font(.system(size: 13))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    /// The narrowest the name may be squeezed to while the count is still drawn.
+    /// Measured, not guessed: in the row's own font a 40 pt frame renders four
+    /// characters and the ellipsis — `wire…`, 37.00 pt of ink in all: 25.75 of
+    /// glyphs, then 1.75 of gap, then 9.50 of the three dots. 30 pt renders two,
+    /// `wi…`. Four is the least that still says *which* project this is, so
+    /// below this the count is what goes.
+    ///
+    /// Two points of room under it, and measured in the row rather than on the
+    /// frame alone: swept against the floor assertion, 38 pt still keeps four
+    /// characters at every width, 37.5 loses them at one and 36 at two. The
+    /// frame on its own answers differently, because `idealWidth` only settles
+    /// whether the pair fits and the real proposal passes through afterwards —
+    /// so a number measured there does not carry over to here.
+    static let nameFloorWidth: CGFloat = 40
+
+    /// The count as the title line carries it, or `nil` when there is nothing
+    /// running: at zero the brackets go away entirely and the row is just its
+    /// name.
+    ///
+    /// The wording and the brackets are the user's, verbatim. Shared with
+    /// `--dump`, so the two cannot drift — and `nonisolated` for exactly that
+    /// reason: `View` infers `@MainActor` for the whole type, and the dump runs
+    /// outside it. A pure function of a `Sendable` value needs no actor.
+    nonisolated static func countLabel(for row: SwitcherRow) -> String? {
+        let count = row.activeCount
+        return count > 0 ? "(agents: \(count))" : nil
     }
 
     /// Hover deepens the frontmost highlight instead of replacing it: swapping
@@ -548,7 +637,7 @@ struct SwitcherRowView: View {
             lines.append("")
             lines.append("Чаты:")
             for session in row.sessions {
-                var parts = [StateBadge.label(for: session.state)]
+                var parts = [Self.stateLabel(for: session.state)]
                 if let topic = shorten(session.topic, 56) { parts.append(topic) }
                 if let context = contextLabel(used: session.contextUsedTokens,
                                               fraction: session.contextFraction) {
@@ -571,6 +660,19 @@ struct SwitcherRowView: View {
             lines.append(path)
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// A chat's state in words. The tooltip is the only place the five states
+    /// are still told apart — the row folds them into four — so this is where
+    /// the vocabulary lives.
+    static func stateLabel(for state: AgentState) -> String {
+        switch state {
+        case .question: return "Задал вопрос"
+        case .permission: return "Ждёт разрешения"
+        case .waiting: return "Ответил, ждёт реакции"
+        case .working: return "Работает"
+        case .idle: return "Простаивает"
+        }
     }
 
     /// The chat topic as the second line of the row shows it: one line, trimmed.
@@ -617,78 +719,96 @@ struct SwitcherRowView: View {
     }
 }
 
-// MARK: - State badge
+// MARK: - Status badge
 
-struct StateBadge: View {
-    let state: AgentState
-    let count: Int
+/// The row's single indicator: what the window wants, folded from every chat and
+/// subagent in it (`SwitcherRow.status`). The whole right-hand side of a row,
+/// and the reason it is one slot rather than two: the count moved into the title
+/// line, and the per-state census of chats it once stood beside moved into the
+/// tooltip.
+///
+/// A `nil` status draws an empty box of the same size. The slot is what has to
+/// be fixed, not the icon: a row with no chat and no subagent has nothing to
+/// report, and an icon there would say "asleep" about a project that simply has
+/// no agent — the same mark on ninety-odd rows of the "projects" section,
+/// distinguishing nothing. Before the fixed box there were chips packed side by
+/// side, and the icon moved left and right from row to row depending on what
+/// each row happened to hold; a column that will not hold still cannot be
+/// scanned.
+struct StatusBadge: View {
+    let status: RowStatus?
     /// The badge is on screen. See `pulseState`.
     var panelVisible: Bool = true
 
+    /// The slot every glyph is centred in, and the empty case holds. The whole
+    /// width of the row's right-hand side, and pinned by a test.
+    static let boxWidth: CGFloat = 14
+    static let boxHeight: CGFloat = 12
+
     @State private var pulsing = false
 
-    /// The state to pulse for, or `nil` when there must be no pulse at all —
+    /// The status to pulse for, or `nil` when there must be no pulse at all —
     /// including "the panel is not on screen", because `repeatForever` outlives
     /// the window it was started in (see `SwitcherViewModel.panelVisible`).
     ///
-    /// Both the `task` id and the dot's own identity hang off this, and both are
-    /// needed: the task decides when to start a pulse, the identity is what ends
-    /// one.
-    var pulseState: AgentState? {
-        guard panelVisible, Self.animates(state) else { return nil }
-        return state
+    /// Both the `task` id and the icon's own identity hang off this, and both
+    /// are needed: the task decides when to start a pulse, the identity is what
+    /// ends one.
+    var pulseState: RowStatus? {
+        guard panelVisible, let status, Self.animates(status) else { return nil }
+        return status
     }
 
     var body: some View {
-        HStack(spacing: 2) {
+        Group {
             // An icon rather than a coloured dot: the dot told the user there
-            // was *a* state and left the meaning to be memorised, while the
-            // number beside it looked like a count of something unnamed. The
-            // shape names the state, and the tooltip spells it out in words.
-            Image(systemName: Self.symbol(for: state))
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Self.color(for: state))
-                .frame(width: 13, height: 11)
-                .opacity(pulsing ? 0.35 : 1)
-                .scaleEffect(pulsing ? 0.86 : 1)
-                // The one thing that actually *stops* a `repeatForever`. Writing
-                // `pulsing = false` below only moves the value the animation
-                // drives at; the cycle goes on running against a target it
-                // already sits at — invisible, and every bit as expensive, since
-                // SwiftUI keeps laying the list out and rendering its display
-                // list once per display cycle. Probed: a single `working` row,
-                // panel closed, nothing pulsing on screen, 13.6% of a core. It
-                // dropped to 2.0% with this line, and to nothing more with the
-                // window's content view hidden as well, which was the other
-                // candidate. A new identity throws the animated attribute away
-                // and the animation attached to it with it.
-                .id(pulseState)
-            if count > 1 {
-                Text("\(count)")
-                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(Self.color(for: state))
+            // was *a* state and left the meaning to be memorised. Each of the
+            // four shapes is different enough to be read without the colour,
+            // and the tooltip spells the chats out in words.
+            if let status {
+                Image(systemName: Self.symbol(for: status))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Self.color(for: status))
+            } else {
+                Color.clear
             }
         }
+        // A fixed box, because the four glyphs are not the same size — measured
+        // at 11 pt semibold, the moon is the narrowest of them and also three
+        // points taller than the box, which it simply overhangs — and because
+        // the empty case has to hold the same ground. Without it the indicator
+        // would sit at a different x in every row, which is the whole complaint
+        // this answers.
+        .frame(width: Self.boxWidth, height: Self.boxHeight)
+        .opacity(pulsing ? 0.35 : 1)
+        .scaleEffect(pulsing ? 0.86 : 1)
+        // The one thing that actually *stops* a `repeatForever`. Writing
+        // `pulsing = false` below only moves the value the animation drives at;
+        // the cycle goes on running against a target it already sits at —
+        // invisible, and every bit as expensive, since SwiftUI keeps laying the
+        // list out and rendering its display list once per display cycle.
+        // Probed: a single working row, panel closed, nothing pulsing on
+        // screen, 13.6% of a core. It dropped to 2.0% with this line, and to
+        // nothing more with the window's content view hidden as well, which was
+        // the other candidate. A new identity throws the animated attribute
+        // away and the animation attached to it with it.
+        .id(pulseState)
         // Keyed on `pulseState`, not on appearance. The badge sits in a stable
-        // spot in the hierarchy, so when a row changes state SwiftUI reuses the
-        // view and `onAppear` never runs again: a `working` row that received
-        // `Stop` turned green and kept the endless pulse of the blue dot it
-        // replaced, and a row first drawn as `idle` never started pulsing when
-        // the agent began its turn. With updates once a second that is the
-        // normal case, not an edge one — and §3 says the pulse means "working".
+        // spot in the hierarchy, so when a row changes status SwiftUI reuses
+        // the view and `onAppear` never runs again: an `active` row that
+        // received `Stop` turned green and kept the endless pulse of the blue
+        // icon it replaced, and a row first drawn asleep never started pulsing
+        // when the agent began its turn. With updates once a second that is the
+        // normal case, not an edge one.
         .task(id: pulseState) {
             pulsing = false
             guard pulseState != nil else { return }
             // Let the reset land in its own transaction. Both mutations in one
-            // pass would cancel out for a state change that keeps the animation
-            // on (working → permission), leaving the previous rhythm running.
+            // pass would cancel out for a change that keeps the animation on,
+            // leaving the previous rhythm running.
             try? await Task.sleep(for: .milliseconds(50))
             guard !Task.isCancelled else { return }
-            // `pulseState` is nil unless the state animates, so only the three
-            // animating states reach here: the ones that want the user now
-            // (`question`, `permission`) beat faster than plain `working`.
-            withAnimation(.easeInOut(duration: state == .working ? 0.9 : 0.55)
-                .repeatForever(autoreverses: true)) {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
                 pulsing = true
             }
         }
@@ -697,43 +817,36 @@ struct StateBadge: View {
         // which pixel the pointer happened to be over.
     }
 
-    /// SF Symbols, one shape per state.
-    static func symbol(for state: AgentState) -> String {
-        switch state {
-        case .question: return "questionmark.bubble.fill"
-        case .permission: return "hand.raised.fill"
-        case .waiting: return "checkmark.circle.fill"
-        case .working: return "arrow.triangle.2.circlepath"
-        case .idle: return "moon.zzz.fill"
+    /// SF Symbols, one shape per status. Three of the shapes are the ones the
+    /// states they fold used to wear, so the habit carries over: the green tick
+    /// of an answered chat, the turning arrows of a working one, the sleeping
+    /// moon. The raised hand is the new one, and it reads as what it is — a
+    /// chat that stopped mid-task and is holding its hand up.
+    static func symbol(for status: RowStatus) -> String {
+        switch status {
+        case .blocked: return "hand.raised.fill"
+        case .done: return "checkmark.circle.fill"
+        case .active: return "arrow.triangle.2.circlepath"
+        case .asleep: return "moon.zzz.fill"
         }
     }
 
     /// Semantic system colours only — they follow light and dark appearance.
-    static func color(for state: AgentState) -> Color {
-        switch state {
-        case .question: return .yellow
-        case .permission: return .orange
-        case .waiting: return .green
-        case .working: return .blue
-        case .idle: return .secondary
+    static func color(for status: RowStatus) -> Color {
+        switch status {
+        case .blocked: return .orange
+        case .done: return .green
+        case .active: return .blue
+        case .asleep: return .secondary
         }
     }
 
-    /// The states that are waiting on the user or moving right now. `waiting`
-    /// is neither: the agent finished its turn and nothing is on fire.
-    static func animates(_ state: AgentState) -> Bool {
-        state == .permission || state == .working || state == .question
-    }
-
-    static func label(for state: AgentState) -> String {
-        switch state {
-        case .question: return "Задал вопрос"
-        case .permission: return "Ждёт разрешения"
-        case .waiting: return "Ответил, ждёт реакции"
-        case .working: return "Работает"
-        case .idle: return "Простаивает"
-        }
-    }
+    /// Only movement pulses. Neither `blocked` nor `done` does: both are states
+    /// the window rests in for as long as the user takes to come back, and a
+    /// list where half the rows blink is a list nothing stands out in. `blocked`
+    /// is told apart by its own glyph and colour instead — that is the choice
+    /// the user made when asked, over a pulse.
+    static func animates(_ status: RowStatus) -> Bool { status == .active }
 }
 
 // MARK: - Colour helper
