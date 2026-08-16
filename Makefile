@@ -9,6 +9,7 @@ icons:
 test:
 	cd macos && swift test
 	bash scripts/test-hooks.sh
+	bash scripts/test-install-hooks.sh
 
 app:
 	bash macos/scripts/build.sh
