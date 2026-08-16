@@ -215,9 +215,44 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     var contextLimitTokens: Int?
     var lastActivity: Date?
 
+    /// Tokens the gateway accounted for this row's working directories over its
+    /// window, or `nil` when it reported none for them. Last in the list on
+    /// purpose: the memberwise initialiser is called from a dozen places and a
+    /// field with a default at the end leaves every one of them alone.
+    ///
+    /// The panel does not draw it yet — the number is here for `--dump` and for
+    /// the view that comes next.
+    var usage: TokenCounts? = nil
+
     var contextFraction: Double? {
         guard let used = contextUsedTokens, let limit = contextLimitTokens, limit > 0 else { return nil }
         return Double(used) / Double(limit)
+    }
+
+    /// The row's spend as one number, in input-equivalent tokens, or `nil` when
+    /// nothing about it is known.
+    ///
+    /// Two different holes both answer `nil`: no figure for this row at all, and
+    /// a figure in which the gateway named none of the four counters. The second
+    /// is the one worth spelling out — `TokenCounts.weighted()` folds an unnamed
+    /// counter in as zero, so such a row would otherwise print a confident `0`
+    /// where the honest answer is "no idea". A dash is the honest answer.
+    ///
+    /// When *some* of the four were named the number is real but partial: it is
+    /// a lower bound, and `usageIsLowerBound` is what says so. The completeness
+    /// lives in `TokenCounts.isComplete` and would be lost the moment the number
+    /// is taken out on its own, so the two are read together or not at all.
+    var usageInputEquivalent: Double? {
+        guard let usage, !usage.knowsNothing else { return nil }
+        return usage.weighted()
+    }
+
+    /// True when `usageInputEquivalent` is a number *and* that number is only a
+    /// lower bound, because at least one counter behind it was never named.
+    /// Whatever draws the number has to say so — `>=` in `--dump`.
+    var usageIsLowerBound: Bool {
+        guard let usage, !usage.knowsNothing else { return false }
+        return !usage.isComplete
     }
 
     /// The one indicator the row draws, or `nil` when the row has nothing to

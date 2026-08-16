@@ -55,11 +55,18 @@ enum AgentEntryPoint {
 enum ConsoleDump {
 
     static func run(config: Config, json: Bool) {
-        let snapshot = DataSource(config: config).snapshot()
+        // One synchronous poll of the gateway, with the client's own five second
+        // timeout on each call. The agent polls in the background once a minute;
+        // `--dump` has no run loop to wait on, and no second chance to print.
+        // A gateway that is not there prints a line and changes nothing else.
+        let usage = UsageStore.pollOnce(config: config)
+        let cache = UsageCache()
+        cache.store(usage)
+        let snapshot = DataSource(config: config, usage: cache).snapshot()
         if json {
             printJSON(snapshot)
         } else {
-            printText(config: config, snapshot: snapshot)
+            printText(config: config, snapshot: snapshot, usage: usage)
         }
     }
 
@@ -75,14 +82,17 @@ enum ConsoleDump {
         FileHandle.standardOutput.write(Data("\n".utf8))
     }
 
-    private static func printText(config: Config, snapshot: SwitcherSnapshot) {
+    private static func printText(config: Config, snapshot: SwitcherSnapshot, usage: UsageSnapshot) {
         print("Config")
         print("  roots:            \(config.resolvedProjectRoots.map(\.path).joined(separator: ", "))")
         print("  depth:            \(config.scanDepth)")
         print("  transcript tail:  \(config.transcriptTailBytes / 1024) KiB")
         print("  editor:           \(config.editorBundleID)")
+        print("  usage gateway:    \(config.usageBaseURL)")
         print("  accessibility:    \(snapshot.accessibilityTrusted ? "granted" : "NOT GRANTED — window list will be empty")")
         print("")
+
+        printUsage(usage)
 
         print("Open windows (last message first): \(snapshot.openWindows.count)")
         for (position, row) in snapshot.openWindows.enumerated() {
@@ -90,6 +100,9 @@ enum ConsoleDump {
             print("      title:     \(shorten(row.window?.title, 90))")
             print("      topic:     \(shorten(row.chatTopic, 90))")
             print("      model:     \(row.model ?? "-")   context: \(formatContext(row))   subagents: \(row.activeSubagents)")
+            if let usage = row.usage {
+                print("      usage:     \(formatTokens(usage))")
+            }
             if !row.subagentDescriptions.isEmpty {
                 print("      running:   \(row.subagentDescriptions.map { shorten($0, 50) }.joined(separator: "; "))")
             }
@@ -124,7 +137,89 @@ enum ConsoleDump {
             // section is projects nobody has run an agent in.
             print("  - \(nameCell(for: row, width: 34)) \(row.colorHex)"
                 + "  \(column(indicator(row), 12))"
-                + "  \(column(workspace, 9))  \(activity(row, config: config))")
+                + "  \(column(workspace, 9))"
+                + "  \(column(usageCell(for: row), 8))"
+                + "  \(activity(row, config: config))")
+        }
+    }
+
+    /// What the gateway said, before it was spread over the rows.
+    ///
+    /// Printed even when the poll failed: the line that says why is the point of
+    /// the section on the machine where the relay is down.
+    private static func printUsage(_ usage: UsageSnapshot) {
+        print("Usage (claude_gw)")
+        if let failure = usage.failure {
+            print("  unavailable:      \(failure)")
+        }
+        if usage.since != .distantPast {
+            print("  window:           applied since \(age(of: usage.since)) ago"
+                + (usage.truncated ? ", truncated by the gateway's cap" : ""))
+        }
+        print("  fleet 7d:         \(percent(usage.fleetSevenDayMean))")
+        let accounts = usage.accounts.map {
+            "\($0.label) 5h \(percent($0.fiveHour?.utilization)) 7d \(percent($0.sevenDay?.utilization))"
+        }
+        print("  accounts:         \(accounts.isEmpty ? "-" : accounts.joined(separator: "   "))")
+        print("  total:            \(formatTokens(usage.total))")
+        print("  directories:      \(usage.tokensByCwd.count)")
+        print("  no local session: \(usage.unmatchedSessions) sessions, \(formatTokens(usage.unmatched))")
+        print("")
+    }
+
+    private static func percent(_ value: Double?) -> String {
+        value.map { String(format: "%.0f%%", $0) } ?? "-"
+    }
+
+    /// One set of counters: the input-equivalent total, then the four raw
+    /// numbers it was folded from.
+    ///
+    /// The four are never summed raw — they are billed at different rates — and
+    /// a total that had an unnamed counter in it is a lower bound, which is what
+    /// the leading `>=` says. A counter the gateway did not name prints as `?`,
+    /// not as `0`.
+    ///
+    /// Counters that name nothing at all print as a bare `-`, the same dash the
+    /// projects column shows: `0 ie (in ?, out ?, cw ?, cr ?)` is the sum of
+    /// nothing known dressed up as a measurement, and it read as a flat
+    /// contradiction on the line it turns up on most — `no local session: 0
+    /// sessions`, whose counters are `TokenCounts.zero` precisely because there
+    /// were none to add.
+    ///
+    /// Internal so a test can hold that dash: the failing case is what the dump
+    /// prints on a machine whose gateway is down, which is not a state a test
+    /// run can arrange for itself.
+    static func formatTokens(_ counts: TokenCounts) -> String {
+        guard !counts.knowsNothing else { return "-" }
+        let parts = [("in", counts.input), ("out", counts.output),
+                     ("cw", counts.cacheCreation), ("cr", counts.cacheRead)]
+            .map { "\($0.0) \($0.1.map { compact(Double($0)) } ?? "?")" }
+        return "\(counts.isComplete ? "" : ">=")\(compact(counts.weighted())) ie"
+            + " (\(parts.joined(separator: ", ")))"
+    }
+
+    /// The spend column of the "Projects" section: one input-equivalent number,
+    /// or a dash when the row has none.
+    ///
+    /// Carries the same `>=` as the windows section above it. It went missing
+    /// here for a while, and a lower bound that looks like an exact figure in
+    /// one of two sections is worse than either — the two columns are read
+    /// against each other.
+    ///
+    /// Internal for the same reason as `formatTokens`: which rows carry spend at
+    /// all depends on what the gateway says about the machine the dump runs on.
+    static func usageCell(for row: SwitcherRow) -> String {
+        guard let value = row.usageInputEquivalent else { return "-" }
+        return (row.usageIsLowerBound ? ">=" : "") + compact(value)
+    }
+
+    /// `21.3M`, `914k`, `512`: the coarsest unit that still tells two numbers
+    /// apart at a glance.
+    private static func compact(_ value: Double) -> String {
+        switch abs(value) {
+        case 1_000_000...: return String(format: "%.2fM", value / 1_000_000)
+        case 1_000...: return String(format: "%.0fk", value / 1_000)
+        default: return String(format: "%.0f", value)
         }
     }
 
