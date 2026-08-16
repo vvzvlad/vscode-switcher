@@ -1,7 +1,12 @@
 import AppKit
 
-/// The status item's picture: the app's glyph, one bar for the fleet's weekly
-/// quota, and that quota as a number.
+/// The status item's picture: one bar for the fleet's weekly quota, and that
+/// quota as a number.
+///
+/// No app glyph in front of it. There was one, and the user threw it out on
+/// sight: an icon identifying the app says nothing a menu bar full of icons
+/// does not already say, while the bar and the number are the whole reason
+/// this item exists. Its 15 points went back to the menu bar.
 ///
 /// Drawn rather than composed out of views, because a status item takes an
 /// `NSImage` and nothing else — and because `isTemplate` is the whole colour
@@ -21,11 +26,9 @@ enum MenuBarIcon {
 
     /// The height a status item image is drawn at.
     static let height: CGFloat = 18
-    /// The app's own glyph, square.
-    static let glyphWidth: CGFloat = 15
     static let barWidth: CGFloat = 20
     static let barHeight: CGFloat = 6
-    /// Between the glyph and the bar, and between the bar and the number.
+    /// Between the bar and the number.
     static let gap: CGFloat = 4
 
     /// The number's own column, measured off `100%` — the widest string it can
@@ -41,11 +44,11 @@ enum MenuBarIcon {
                                                                    attributes: attributes).size().width)
 
     /// The whole picture, always this wide.
-    static var width: CGFloat { glyphWidth + gap + barWidth + gap + numberColumnWidth }
+    static var width: CGFloat { barWidth + gap + numberColumnWidth }
 
     /// Where the bar sits, vertically centred.
     static var barRect: NSRect {
-        NSRect(x: glyphWidth + gap, y: ((height - barHeight) / 2).rounded(),
+        NSRect(x: 0, y: ((height - barHeight) / 2).rounded(),
                width: barWidth, height: barHeight)
     }
 
@@ -136,9 +139,6 @@ enum MenuBarIcon {
     }
 
     private static func draw(percent: Int?) {
-        glyph()?.draw(in: NSRect(x: 0, y: ((height - glyphWidth) / 2).rounded(),
-                                 width: glyphWidth, height: glyphWidth),
-                      from: .zero, operation: .sourceOver, fraction: 1)
         drawBar(percent: percent)
         guard let percent else { return }
         let label = label(forPercent: percent)
@@ -171,18 +171,4 @@ enum MenuBarIcon {
                      xRadius: inner.height / 2, yRadius: inner.height / 2).fill()
     }
 
-    /// The app's glyph: `MenuBarIconTemplate.png` / `@2x` from the bundle.
-    ///
-    /// The binary also runs straight out of `.build` with no bundle around it —
-    /// that is how `--dump` and the tests run it — hence the SF Symbol fallback.
-    /// A symbol name is a string the compiler never checks, so this one is held
-    /// by `testEverySymbolNameActuallyResolves` along with the row's four.
-    nonisolated static let fallbackSymbolName = "sidebar.left"
-
-    static func glyph() -> NSImage? {
-        let image = NSImage(named: "MenuBarIconTemplate")
-            ?? NSImage(systemSymbolName: fallbackSymbolName, accessibilityDescription: nil)
-        image?.isTemplate = true
-        return image
-    }
 }

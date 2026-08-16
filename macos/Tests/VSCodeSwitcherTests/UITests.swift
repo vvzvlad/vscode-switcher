@@ -759,12 +759,13 @@ final class StatusBadgeTests: XCTestCase {
     /// for these strings.
     ///
     /// Every symbol the app names anywhere goes through here, not just the row's
-    /// four: the menu bar's fallback glyph and the popover's failure mark are
-    /// the same kind of unchecked string, and a picture drawing nothing at all
-    /// is the same silent failure wherever it happens.
+    /// four: the popover's failure mark is the same kind of unchecked string,
+    /// and a picture drawing nothing at all is the same silent failure wherever
+    /// it happens. The menu bar icon names none — it is drawn, not symbolic,
+    /// and its app glyph is gone.
     func testEverySymbolNameActuallyResolves() {
         let names = RowStatus.allCases.map { StatusBadge.symbol(for: $0) }
-            + [MenuBarIcon.fallbackSymbolName, UsagePopoverView.failureSymbolName]
+            + [UsagePopoverView.failureSymbolName]
         for name in names {
             XCTAssertNotNil(NSImage(systemSymbolName: name, accessibilityDescription: nil),
                             "\(name) is not an SF Symbol")
