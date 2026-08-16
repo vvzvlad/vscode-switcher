@@ -269,9 +269,12 @@ enum ClaudeSessions {
         // assistant record still says `tool_use` and the file keeps being
         // touched, so every touch older than the tolerance used to turn the
         // orange indicator off. Only a newer hook — `Stop`, `UserPromptSubmit`,
-        // `PostToolUse` — takes those states away. `question` needs this most of
-        // all: `Stop` does not fire for `AskUserQuestion`, so nothing else would
-        // ever put the state back.
+        // `PostToolUse`, `PostToolUseFailure` — takes those states away. Both
+        // post-tool events are listed because the CLI sends the first only when
+        // the call succeeded; a wait whose tool then errored out is ended by the
+        // second (SPEC §2.6.2). `question` needs this most of all: `Stop` does
+        // not fire for `AskUserQuestion`, so nothing else would ever put the
+        // state back.
         let mayBeOverruled = hookState == .working || hookState == .idle
 
         // The session went on working long after the hook state was written, so

@@ -105,6 +105,10 @@ ADDITIONS=$(jq -n \
 		UserPromptSubmit: [entry($state)],
 		PermissionRequest: [entry($state)],
 		PostToolUse: [entry($state)],
+		# PostToolUse fires only when the call succeeded; a failed one arrives
+		# as PostToolUseFailure, and without it the wait of a tool that
+		# errored out stays open until the turn ends (SPEC §2.6.3).
+		PostToolUseFailure: [entry($state)],
 		Stop: [entry($state)],
 		Notification: [entry($state)],
 		SessionEnd: [entry($state)]
@@ -161,7 +165,7 @@ fi
 mv -f "$TMP" "$SETTINGS"
 
 if [ "$MODE" = "install" ]; then
-	echo "installed hooks: UserPromptSubmit, PermissionRequest, PostToolUse, Stop, Notification, SessionEnd -> $STATE_HOOK"
+	echo "installed hooks: UserPromptSubmit, PermissionRequest, PostToolUse, PostToolUseFailure, Stop, Notification, SessionEnd -> $STATE_HOOK"
 	echo "installed statusLine -> $STATUSLINE_HOOK"
 else
 	echo "removed VSCode Switcher hooks and statusLine from $SETTINGS"

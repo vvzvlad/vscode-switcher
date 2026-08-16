@@ -3,7 +3,7 @@
 # the panel shows for every chat — plus the debug-dump cap of hooks/statusline.sh
 # at the very end.
 #
-# The hook is the riskiest artefact here: six events, three guards, and it runs
+# The hook is the riskiest artefact here: seven events, three guards, and it runs
 # inside every session the user has open, where a wrong answer is either a lost
 # "answer me" signal or an orange indicator that never goes away. Everything
 # below used to be checked by hand.
@@ -92,7 +92,7 @@ has_waits() { # [session]
 	jq -r 'has("waits")' "$(STATE_FILE "${1:-}")" 2>/dev/null
 }
 
-# --- the six events -----------------------------------------------------------
+# --- the seven events ---------------------------------------------------------
 
 start "UserPromptSubmit sets working"
 send "$(payload UserPromptSubmit)"
@@ -219,6 +219,125 @@ start "another tool of the same agent does not clear the wait"
 send "$(payload PermissionRequest '"tool_name":"Bash"')"
 send "$(payload PostToolUse '"tool_name":"Read"')"
 check "state" "$(state)" "permission"
+
+# --- PostToolUseFailure: a call that failed ends its wait just the same -------
+#
+# PostToolUse fires only after a *successful* call; a failed one arrives as
+# PostToolUseFailure (verified on CLI 2.1.233, SPEC §2.6.2), and "failed" includes
+# an MCP tool that answered with an error in its result — which is how a granted
+# permission for an MCP call that returned 403 held the orange hand for twelve
+# minutes. Everything the successful event is asked to do below, the failing one
+# has to do identically, and everything it must *not* do it must not do either.
+
+start "PostToolUseFailure clears the permission it was granted"
+send "$(payload PermissionRequest '"tool_name":"Bash"')"
+check "the wait is open" "$(waits)" "Bash//permission"
+send "$(payload PostToolUseFailure '"tool_name":"Bash"' '"error":"Exit code 7"' '"is_interrupt":false')"
+check "state" "$(state)" "working"
+check "no waits left" "$(waits)" ""
+check "and the key itself is gone" "$(has_waits)" "false"
+
+start "PostToolUseFailure with nothing on disk writes nothing"
+send "$(payload PostToolUseFailure '"tool_name":"Bash"' '"error":"Exit code 7"')"
+check "no file written" "$([ -e "$(STATE_FILE)" ] && echo present || echo absent)" "absent"
+
+start "PostToolUseFailure does not clear somebody else's wait"
+# The whole record is compared, not just the state: a wait that belongs to
+# another agent must leave the file untouched, `ts` included.
+send "$(payload PermissionRequest '"tool_name":"Bash"' '"agent_id":"aaaa1111"')"
+untouched=$(jq -c . "$(STATE_FILE)")
+send "$(payload PostToolUseFailure '"tool_name":"Bash"' '"agent_id":"bbbb2222"' '"error":"Exit code 7"')"
+check "another agent changes nothing" "$(jq -c . "$(STATE_FILE)")" "$untouched"
+send "$(payload PostToolUseFailure '"tool_name":"Read"' '"agent_id":"aaaa1111"' '"error":"File not found"')"
+check "another tool changes nothing" "$(jq -c . "$(STATE_FILE)")" "$untouched"
+send "$(payload PostToolUseFailure '"tool_name":"Bash"' '"agent_id":"aaaa1111"' '"error":"Exit code 7"')"
+check "its own pair does clear it" "$(state)" "working"
+
+start "PostToolUseFailure does not resurrect a finished turn"
+# Measured on 2.1.233: a subagent's PostToolUseFailure landed 3.7 s after the
+# parent's Stop. What keeps it from turning an answered chat back into a working
+# one is that Stop empties the wait list, so the pair matches nothing; here the
+# payload never gets that far, because the fast path reads `waiting` off disk and
+# leaves before jq.
+send "$(payload PermissionRequest '"tool_name":"Bash"' '"agent_id":"ad625ae3cf3"')"
+send "$(payload Stop)"
+send "$(payload PostToolUseFailure '"tool_name":"Bash"' '"agent_id":"ad625ae3cf3"' '"error":"Exit code 7"')"
+check "state" "$(state)" "waiting"
+check "event" "$(field event)" "Stop"
+
+start "a finished turn survives a failed call that missed the fast path"
+# The same sequence with the fast path taken out of it: the event name is pushed
+# past the 2048-byte head window, so the payload reaches the state machine and
+# the pair check is all that is left. The record is the real one Stop wrote, not
+# one built here — Stop is what emptied the list, and that is the whole reason
+# there is no pair to match.
+send "$(payload PermissionRequest '"tool_name":"Bash"' '"agent_id":"ad625ae3cf3"')"
+send "$(payload Stop)"
+pad=$(printf 'x%.0s' $(seq 1 4000))
+printf '{"session_id":"%s","cwd":"/tmp/project","tool_input":{"command":"%s"},"hook_event_name":"PostToolUseFailure","tool_name":"Bash","agent_id":"ad625ae3cf3","error":"Exit code 7"}' \
+	"$SESSION" "$pad" | bash "$HOOK"
+check "nothing is rewritten" "$(field event)" "Stop"
+check "state" "$(state)" "waiting"
+
+start "the state of a record never disagrees with the waits it carries"
+# The invariant that makes a second guard on the post-tool path unnecessary: the
+# state written is the worst of the list, so a non-empty list can only ever
+# appear next to `permission` or `question`. That is what lets the pair check
+# stand alone — a post-tool event that finds a wait of its own has, by
+# construction, found a record in a wait state, and one that finds none writes
+# nothing at all. A guard on the previous state used to sit next to the pair
+# check; no event sequence could tell the two apart, only a record built by
+# hand, so it went (SPEC §2.6.3). If this invariant ever breaks, that door
+# reopens — hence a test rather than a comment.
+broken=""
+held=0
+step() { # payload fragments
+	send "$(payload "$@")"
+	[ -e "$(STATE_FILE)" ] || return 0
+	local s w
+	s=$(state)
+	w=$(waits)
+	[ -z "$w" ] || held=$((held + 1))
+	case "$s" in
+	permission | question) ;;
+	*) [ -z "$w" ] || broken="$broken [$s carries $w]" ;;
+	esac
+}
+step UserPromptSubmit
+step PermissionRequest '"tool_name":"Bash"'
+step PermissionRequest '"tool_name":"AskUserQuestion"'
+step PermissionRequest '"tool_name":"Grep"' '"agent_id":"AAA"'
+step Notification '"notification_type":"permission_prompt"' '"message":"Claude needs your permission"'
+step Notification '"notification_type":"idle_prompt"' '"message":"Claude is waiting for your input"'
+step PostToolUse '"tool_name":"AskUserQuestion"'
+step PostToolUseFailure '"tool_name":"Grep"' '"agent_id":"AAA"' '"error":"Exit code 1"'
+step PostToolUseFailure '"tool_name":"Bash"' '"error":"Exit code 7"'
+step Stop
+step UserPromptSubmit
+step PermissionRequest '"tool_name":"ExitPlanMode"'
+step Stop
+check "records that broke it" "$broken" ""
+# Without this the case would pass just as well on a battery that never opened a
+# wait at all — an invariant nothing ever tested against is not pinned.
+check "steps that left a wait standing" "$held" "8"
+
+start "a failed subagent call leaves the main agent question standing"
+send "$(payload PermissionRequest '"tool_name":"AskUserQuestion"')"
+send "$(payload PermissionRequest '"tool_name":"mcp__probe__statusIsError"' '"agent_id":"AAA"')"
+check "both waits are open" "$(waits)" "AskUserQuestion//question,mcp__probe__statusIsError/AAA/permission"
+send "$(payload PostToolUseFailure '"tool_name":"mcp__probe__statusIsError"' '"agent_id":"AAA"' '"error":"MCP error 403"')"
+check "only the question is left" "$(waits)" "AskUserQuestion//question"
+check "and it is the state of the row" "$(state)" "question"
+
+start "PostToolUseFailure works whatever the payload spacing"
+# The fast path matches a literal string in the payload, so both spellings the
+# CLI could emit have to reach the state machine.
+send "$(payload PermissionRequest '"tool_name":"Bash"')"
+printf '{"session_id": "%s", "cwd": "/tmp/project", "hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "error": "Exit code 7"}' "$SESSION" | bash "$HOOK"
+check "with spaces" "$(state)" "working"
+send "$(payload PermissionRequest '"tool_name":"Bash"')"
+printf '{"session_id":"%s","cwd":"/tmp/project","hook_event_name":"PostToolUseFailure","tool_name":"Bash","error":"Exit code 7"}' "$SESSION" | bash "$HOOK"
+check "and without" "$(state)" "working"
 
 # --- several waits at once ----------------------------------------------------
 
@@ -351,15 +470,18 @@ check "state" "$(state)" "working"
 
 start "a waits list does not confuse the fast path"
 # The early exit matches `"state": "permission"` over the whole file, and that
-# string sits inside every element of `waits` too. The top-level state is the
-# maximum over the list and the key is left out while the list is empty, so a
-# nested hit only ever occurs in a record whose top-level state already matches
-# — but the record has to survive either way, and a real wait must still pass.
+# string sits inside every element of `waits` too, so it can match on a record
+# whose top-level state is something else entirely. By the invariant above no
+# such record exists — the top-level state is the maximum over the list, and the
+# key is left out while the list is empty — so this one is built by hand to
+# exercise the match itself. All a hit here buys is the slow path: the record is
+# handed to the state machine, which decides on the pair alone. Nothing about
+# the row changes, `working` in and `working` out; a real wait must still pass.
 printf '{"sessionId":"%s","cwd":"/tmp/project","state":"working","event":"UserPromptSubmit","waits":[{"tool":"Bash","agent":"","state":"permission"}],"ts":1}' \
 	"$SESSION" >"$(STATE_FILE)"
 send "$(payload PostToolUse '"tool_name":"Bash"')"
 check "a nested permission does not revive a finished turn" "$(state)" "working"
-check "and nothing is rewritten" "$(field event)" "UserPromptSubmit"
+check "and the match did let it through to the slow path" "$(field event)" "PostToolUse"
 printf '{"sessionId":"%s","cwd":"/tmp/project","state":"permission","event":"PermissionRequest","waits":[{"tool":"Bash","agent":"","state":"permission"}],"ts":1}' \
 	"$SESSION" >"$(STATE_FILE)"
 send "$(payload PostToolUse '"tool_name":"Bash"')"
@@ -373,6 +495,52 @@ pad=$(printf 'x%.0s' $(seq 1 4000))
 printf '{"session_id":"%s","cwd":"/tmp/project","tool_input":{"command":"%s"},"hook_event_name":"PostToolUse","tool_name":"Bash"}' \
 	"$SESSION" "$pad" | bash "$HOOK"
 check "state" "$(state)" "working"
+
+start "the post-tool events leave before the dump is written"
+# The fast path is the fourth place the two event names appear, and the only one
+# no assertion reached: removing both `PostToolUseFailure` patterns from
+# `case $head` broke nothing at all. A typo in that list — it spans a line
+# continuation, with tabs inside it — would then quietly send every failed call
+# down the slow path, paying for a jq the exit exists to avoid, and no test
+# would notice.
+#
+# There are four patterns there, not two: each name is written twice, with and
+# without a space after the colon. `payload` above prints its JSON without
+# spaces, so a test going through it would never reach the spaced half of the
+# list at all. Which of the two spellings the CLI puts on the wire has never
+# been checked byte for byte, so both stay in the list — and both are therefore
+# written out literally here rather than built by the helper.
+#
+# The dump is what makes the exit observable: it is appended *after* it, so its
+# absence is the evidence that the exit ran. Which is only worth anything if the
+# dump would otherwise appear — hence the `Stop` at the end, which has no fast
+# path of its own. Nothing is on disk here, so the exit is the `[ -s "$probe" ]`
+# one, the cheapest of the three.
+export VSCODE_SWITCHER_DEBUG=1
+dump="$VSCODE_SWITCHER_STATUS_DIR/_debug.jsonl"
+# Every pattern is asserted on a clean slate: all four share one dump file, so
+# without the removal a later check would inherit an earlier one's verdict and
+# several would go red for a single missing pattern.
+left_before_dump() { # payload
+	rm -f "$dump"
+	printf '%s' "$1" | bash "$HOOK"
+	[ -e "$dump" ] && echo present || echo absent
+}
+check "PostToolUse, no space after the colon" \
+	"$(left_before_dump "$(printf '{"session_id":"%s","cwd":"/tmp/project","hook_event_name":"PostToolUse","tool_name":"Bash"}' "$SESSION")")" \
+	"absent"
+check "PostToolUse, with one" \
+	"$(left_before_dump "$(printf '{"session_id": "%s", "cwd": "/tmp/project", "hook_event_name": "PostToolUse", "tool_name": "Bash"}' "$SESSION")")" \
+	"absent"
+check "PostToolUseFailure, no space after the colon" \
+	"$(left_before_dump "$(printf '{"session_id":"%s","cwd":"/tmp/project","hook_event_name":"PostToolUseFailure","tool_name":"Bash","error":"Exit code 7"}' "$SESSION")")" \
+	"absent"
+check "PostToolUseFailure, with one" \
+	"$(left_before_dump "$(printf '{"session_id": "%s", "cwd": "/tmp/project", "hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "error": "Exit code 7"}' "$SESSION")")" \
+	"absent"
+check "an event without a fast path is dumped" \
+	"$(left_before_dump "$(payload Stop)")" "present"
+unset VSCODE_SWITCHER_DEBUG
 
 # --- out-of-order delivery and damaged input ---------------------------------
 
