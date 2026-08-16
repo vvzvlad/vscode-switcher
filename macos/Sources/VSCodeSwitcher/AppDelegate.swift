@@ -229,7 +229,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Not `squareLength`: the picture is a glyph, a bar and a number.
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = MenuBarIcon.image(forPercent: nil)
-        item.button?.toolTip = "VSCode Switcher — расход и квоты"
+        // No `toolTip` on purpose: the tag popped up on every pass of the
+        // pointer over the menu bar and was asked for gone. The picture and the
+        // popover behind the click are how the item explains itself.
         item.button?.target = self
         item.button?.action = #selector(statusItemClicked)
         // Both buttons have to reach the action for it to be able to tell them
