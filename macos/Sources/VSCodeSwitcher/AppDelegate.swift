@@ -12,6 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let config: Config
     private let store: SnapshotStore
+    /// Token spend from the gateway. It lives beside the snapshot store rather
+    /// than inside it: one is disk-bound and runs every second, the other talks
+    /// to the network once a minute. They meet in `UsageCache`.
+    private let usage: UsageStore
     private let trigger: EdgeTrigger
     private let panel: PanelController
     private var statusItem: NSStatusItem?
@@ -24,7 +28,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     init(config: Config) {
         self.config = config
-        store = SnapshotStore(config: config)
+        let usageCache = UsageCache()
+        store = SnapshotStore(config: config, usage: usageCache)
+        usage = UsageStore(config: config, cache: usageCache)
         trigger = EdgeTrigger(config: config)
         panel = PanelController(config: config, store: store)
         super.init()
@@ -57,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeAccessibilityGrant()
 
         store.start()
+        usage.start()
         trigger.start()
 
         if !VSCodeWindows.isAccessibilityTrusted() {
@@ -71,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         trigger.stop()
         store.stop()
+        usage.stop()
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         screenObserver = nil
     }
@@ -166,7 +174,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "panelHeightFraction": config.panelHeightFraction,
                 "subagentActiveSeconds": config.subagentActiveSeconds,
                 "transcriptTailBytes": config.transcriptTailBytes,
-                "editorBundleID": config.editorBundleID
+                "editorBundleID": config.editorBundleID,
+                "usageBaseURL": config.usageBaseURL
             ]
             do {
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),

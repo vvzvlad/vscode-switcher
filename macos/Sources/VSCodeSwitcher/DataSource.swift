@@ -14,6 +14,9 @@ import Foundation
 final class DataSource: @unchecked Sendable {
     private let config: Config
     private let index = WorkspaceIndex()
+    /// Last answer from the usage gateway, filled in by `UsageStore`. Read, never
+    /// polled: `build()` runs once or twice a second and stays disk-bound.
+    private let usage: UsageCache
     /// Test seam: replaces the disk-bound assembly, so the coalescing around it
     /// can be exercised with a build of a known duration.
     private let buildOverride: (@Sendable () -> SwitcherSnapshot)?
@@ -24,13 +27,15 @@ final class DataSource: @unchecked Sendable {
     /// read. Callers are coalesced against this.
     private var lastSnapshotFinishedAt: Date = .distantPast
 
-    init(config: Config) {
+    init(config: Config, usage: UsageCache = UsageCache()) {
         self.config = config
+        self.usage = usage
         self.buildOverride = nil
     }
 
     init(config: Config, build: @escaping @Sendable () -> SwitcherSnapshot) {
         self.config = config
+        self.usage = UsageCache()
         self.buildOverride = build
     }
 
@@ -92,6 +97,11 @@ final class DataSource: @unchecked Sendable {
                              windows: VSCodeWindows.listWindows(bundleID: config.editorBundleID),
                              sessions: ClaudeSessions.liveSessions(config: config),
                              activity: activity,
+                             // A plain dictionary read under a lock: the poll
+                             // that fills it lives in `UsageStore`, on its own
+                             // minute-long timer, and nothing on this path
+                             // waits for a network.
+                             tokensByCwd: usage.snapshot.tokensByCwd,
                              accessibilityTrusted: VSCodeWindows.isAccessibilityTrusted(),
                              generatedAt: readAt)
     }
@@ -102,12 +112,37 @@ final class DataSource: @unchecked Sendable {
                          windows: [VSCodeWindowInfo],
                          sessions: [ClaudeSessionInfo],
                          activity: [String: ProjectActivity] = [:],
+                         tokensByCwd: [String: TokenCounts] = [:],
                          accessibilityTrusted: Bool,
                          generatedAt: Date = Date()) -> SwitcherSnapshot {
         let projectsByRootName = Dictionary(grouping: projects, by: \.rootName)
+        // Built once for both loops below: each of them asks about every
+        // directory it has against every project there is.
+        let projectPrefixes = Self.prefixes(of: projects)
+
+        // Spend arrives keyed by working directory and is attributed to projects
+        // by the same rule as the sessions below — exact match, otherwise the
+        // deepest project the path sits inside. That second half is what makes
+        // a worktree count: an agent working in
+        // `<project>/.claude/worktrees/<name>` spends the project's tokens, and
+        // keying the number by its own directory would hide it in a row nobody
+        // has open.
+        var usageByProjectPath: [String: TokenCounts] = [:]
+        var usageOutsideProjects: [String: TokenCounts] = [:]
+        for (cwd, tokens) in tokensByCwd {
+            guard let project = Self.project(for: cwd, in: projects, prefixes: projectPrefixes) else {
+                usageOutsideProjects[cwd] = tokens
+                continue
+            }
+            usageByProjectPath[project.path] = (usageByProjectPath[project.path] ?? .zero) + tokens
+        }
+
         var sessionsByProjectPath: [String: [ClaudeSessionInfo]] = [:]
         for session in sessions {
-            guard let project = Self.project(for: session.cwd, in: projects) else { continue }
+            guard let project = Self.project(for: session.cwd,
+                                             in: projects,
+                                             prefixes: projectPrefixes)
+            else { continue }
             sessionsByProjectPath[project.path, default: []].append(session)
         }
 
@@ -138,6 +173,20 @@ final class DataSource: @unchecked Sendable {
             for session in assigned { claimedSessionIDs.insert(session.sessionId) }
         }
 
+        // Each window row carries the whole spend of its project, which means two
+        // windows on one project show the same number twice. That is the chosen
+        // answer, not an oversight left to be tidied up later: the spend belongs
+        // to the project, not to a window.
+        //
+        // Splitting it is what cannot be done honestly. The gateway accounts by
+        // session and knows nothing of windows; sessions reach a window only
+        // through `distribute`, which matches the chat topic against a title
+        // prefix VSCode has already truncated and hands everything it could not
+        // place to the frontmost window (SPEC §8). A per-window "share" would be
+        // that heuristic with a figure attached — a guess printed as a
+        // measurement, which is the one thing this whole layer refuses to do.
+        // Both rows are labelled with the project's name, so the same number on
+        // both reads as what it is.
         var openWindows: [SwitcherRow] = []
         var openProjectPaths = Set<String>()
         for window in windows {
@@ -146,7 +195,8 @@ final class DataSource: @unchecked Sendable {
             if let project { openProjectPaths.insert(project.path) }
             openWindows.append(Self.makeWindowRow(window: window,
                                                   project: project,
-                                                  sessions: sessionsByWindow[window.id] ?? []))
+                                                  sessions: sessionsByWindow[window.id] ?? [],
+                                                  usage: project.flatMap { usageByProjectPath[$0.path] }))
         }
 
         // A project with no window of its own keeps its sessions. This is the
@@ -159,7 +209,9 @@ final class DataSource: @unchecked Sendable {
             let pool = (sessionsByProjectPath[project.path] ?? [])
                 .filter { !claimedSessionIDs.contains($0.sessionId) }
             for session in pool { claimedSessionIDs.insert(session.sessionId) }
-            projectRows.append(Self.makeProjectRow(project: project, sessions: pool))
+            projectRows.append(Self.makeProjectRow(project: project,
+                                                   sessions: pool,
+                                                   usage: usageByProjectPath[project.path]))
         }
 
         // Sessions whose cwd is outside every scan root belong to no project and
@@ -189,7 +241,13 @@ final class DataSource: @unchecked Sendable {
                                           model: active?.model,
                                           contextUsedTokens: active?.contextUsedTokens,
                                           contextLimitTokens: active?.contextLimitTokens,
-                                          lastActivity: group.compactMap(\.lastActivity).max()))
+                                          lastActivity: group.compactMap(\.lastActivity).max(),
+                                          // Matched on the exact directory: an
+                                          // orphan row *is* a directory, and
+                                          // anything below it that the gateway
+                                          // knows about would be a row of its
+                                          // own if an agent were running there.
+                                          usage: usageOutsideProjects[cwd]))
         }
 
         return SwitcherSnapshot(openWindows: Self.rankedWindows(openWindows),
@@ -201,7 +259,8 @@ final class DataSource: @unchecked Sendable {
 
     private static func makeWindowRow(window: VSCodeWindowInfo,
                                       project: ProjectInfo?,
-                                      sessions: [ClaudeSessionInfo]) -> SwitcherRow {
+                                      sessions: [ClaudeSessionInfo],
+                                      usage: TokenCounts?) -> SwitcherRow {
         let name = project?.displayName ?? window.rootName ?? window.title
         let color = project?.colorHex ?? WorkspaceIndex.fallbackColor(for: name)
         let active = Self.activeSession(for: window, among: sessions)
@@ -221,12 +280,15 @@ final class DataSource: @unchecked Sendable {
                            model: active?.model,
                            contextUsedTokens: active?.contextUsedTokens,
                            contextLimitTokens: active?.contextLimitTokens,
-                           lastActivity: active?.lastActivity ?? sessions.first?.lastActivity)
+                           lastActivity: active?.lastActivity ?? sessions.first?.lastActivity,
+                           usage: usage)
     }
 
     /// A project with no window of its own. It still carries whatever sessions
     /// run in it, so the panel shows agent state with or without Accessibility.
-    private static func makeProjectRow(project: ProjectInfo, sessions: [ClaudeSessionInfo]) -> SwitcherRow {
+    private static func makeProjectRow(project: ProjectInfo,
+                                       sessions: [ClaudeSessionInfo],
+                                       usage: TokenCounts?) -> SwitcherRow {
         // `sessions` keeps the pool's order, which is most recently active first.
         let active = sessions.first
         let aggregate = Self.aggregate(sessions)
@@ -245,7 +307,8 @@ final class DataSource: @unchecked Sendable {
                            model: active?.model,
                            contextUsedTokens: active?.contextUsedTokens,
                            contextLimitTokens: active?.contextLimitTokens,
-                           lastActivity: active?.lastActivity ?? project.mtime)
+                           lastActivity: active?.lastActivity ?? project.mtime,
+                           usage: usage)
     }
 
     /// What a row shows for a group of sessions: the highest state among them
@@ -399,13 +462,110 @@ final class DataSource: @unchecked Sendable {
 
     // MARK: - Matching
 
+    /// The containment prefix of every project — its path plus the separator —
+    /// built once, in the order the projects came in.
+    ///
+    /// The separator is the whole of the rule: without it `hasPrefix` matches
+    /// half a path component, and this machine holds the pairs that turn into a
+    /// wrong answer — `asakusa_lab` beside `asakusa_lab_glaze_resolver`,
+    /// `portainer` beside `portainer-agent`. The younger project's spend and
+    /// every session of it would be attributed to the older one's row.
+    /// `ProjectMatchingTests` is what holds it; nothing did before, and
+    /// deleting the `+ "/"` left the whole suite green.
+    ///
+    /// `project(for:in:prefixes:)` is asked the same question for every working
+    /// directory `assemble` is handed — the gateway's directories and every live
+    /// session's — and each question walks the whole project list. Building
+    /// `path + "/"` inside that walk allocates one string per (directory,
+    /// project) pair: 200 directories against 99 projects is 19 800 strings,
+    /// once or twice a second.
+    ///
+    /// A plain `[String]` parallel to `projects`, and not an array of
+    /// `(project, prefix)` pairs, which is what this was written as first.
+    ///
+    /// Measured 2026-08-16, Apple M4, Swift 6.2.4, a standalone harness built
+    /// with `swiftc -O -whole-module-optimization` holding the three variants
+    /// and a verbatim copy of `ProjectInfo`. The measured region is one whole
+    /// pass of `assemble`: build whatever the variant hoists, once, then ask
+    /// every directory. 99 projects under one parent, so every comparison walks
+    /// a 29-character shared prefix before it can differ; 200 directories, of
+    /// which 60% are project paths exactly, 30% sit in a worktree below one and
+    /// 10% match nothing. Best of 25 passes, three independent runs:
+    ///
+    /// - 0.96 / 1.05 / 1.14 ms with `path + "/"` inside the loop,
+    /// - 0.87 / 0.90 / 0.94 ms hoisted into an array of pairs,
+    /// - 0.14 / 0.15 / 0.17 ms as it stands.
+    ///
+    /// Same three over a shape where nothing matches exactly, so every question
+    /// walks the whole list: 1.87–1.98, 1.24–1.33, 0.20–0.22 ms.
+    ///
+    /// What the pair array costs is the *struct in it*, not the pairing: the
+    /// identical walk over `(path, prefix)` strings, with `projects[index]`
+    /// returned at the end, measures 0.14–0.15 ms — the parallel array's time.
+    /// Walking the pairs by index rather than by value does not help (0.82–0.85
+    /// ms), so it is the element being copied out of the array, and the element
+    /// is a six-field struct with five refcounted strings in it.
+    ///
+    /// This comment used to claim the pair array measured *slower than the
+    /// concatenation it replaced*, and that is recorded here because it did not
+    /// reproduce: two independent re-measurements — a reviewer's harness and
+    /// this one — both put the pairs ahead of the concatenation and both put
+    /// this variant six to nine times ahead of either. Only the ranking that
+    /// survived is stated above.
+    ///
+    /// For scale, the whole `stat(2)` walk over 362 transcripts is 1.25 ms
+    /// (SPEC §6). Today the gateway names 8 directories against the index's 96
+    /// projects (`--dump`), and at that size the whole question is 0.021 ms for
+    /// the concatenation, 0.012 for this and 0.027 for the pair array — which
+    /// is the one place the pairs genuinely lose, and they lose on building
+    /// 96 copies of a struct rather than on the walk. So this is not bought for
+    /// today's list; it is bought because the shape — a string built inside a
+    /// loop over every project — is the one §2.2.1 already caught once.
+    static func prefixes(of projects: [ProjectInfo]) -> [String] {
+        projects.map { $0.path + "/" }
+    }
+
     /// The project a working directory belongs to: an exact match, otherwise the
     /// deepest project the path sits inside.
-    static func project(for cwd: String, in projects: [ProjectInfo]) -> ProjectInfo? {
-        if let exact = projects.first(where: { $0.path == cwd }) { return exact }
-        return projects
-            .filter { cwd.hasPrefix($0.path + "/") }
-            .max { $0.path.count < $1.path.count }
+    ///
+    /// `prefixes` is `prefixes(of:)` over the very same list, positional: index
+    /// `i` of one is index `i` of the other. Passed in rather than derived here
+    /// so that the caller decides how many times it is built — which is the
+    /// point of having it at all.
+    ///
+    /// One walk rather than the two it used to be (`first(where:)` for the exact
+    /// match, then `filter`), because an exact match returns immediately and the
+    /// deepest prefix is a running maximum: the `filter` built an array per
+    /// working directory to take one element out of it.
+    ///
+    /// That rewrite is what makes the answer depend on the order the projects
+    /// arrive in — the exact match short-circuits the walk, the deepest prefix
+    /// accumulates through it — so `ProjectMatchingTests` asks both cases with
+    /// the project list both ways round.
+    static func project(for cwd: String,
+                        in projects: [ProjectInfo],
+                        prefixes: [String]) -> ProjectInfo? {
+        // The positional pairing is an invariant a doc comment cannot enforce,
+        // and the walk indexes `projects` by `prefixes.indices`: a shorter
+        // `projects` is an out-of-range crash in code that runs once or twice a
+        // second, and a longer one silently matches paths against the wrong
+        // projects. One integer comparison per call says so at the door.
+        precondition(prefixes.count == projects.count,
+                     "prefixes must be prefixes(of:) the very projects being searched")
+        var deepestIndex = -1
+        var deepestLength = 0
+        for index in prefixes.indices {
+            if projects[index].path == cwd { return projects[index] }
+            guard cwd.hasPrefix(prefixes[index]) else { continue }
+            // First maximum wins, as `max(by:)` did before it: two projects
+            // cannot share a path, so ties are impossible anyway.
+            let length = prefixes[index].count
+            if length > deepestLength {
+                deepestIndex = index
+                deepestLength = length
+            }
+        }
+        return deepestIndex >= 0 ? projects[deepestIndex] : nil
     }
 
     /// Spreads a project's sessions over the windows that show that project.
