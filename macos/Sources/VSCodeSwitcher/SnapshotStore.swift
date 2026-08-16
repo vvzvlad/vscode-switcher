@@ -42,8 +42,10 @@ final class SnapshotStore: ObservableObject {
     private var refreshInFlight = false
     private var refreshRequested = false
 
-    init(config: Config) {
-        source = DataSource(config: config)
+    /// `usage` is the cache `UsageStore` fills in: the snapshot reads it, never
+    /// polls it.
+    init(config: Config, usage: UsageCache = UsageCache()) {
+        source = DataSource(config: config, usage: usage)
         watchedPaths = [ClaudeSessions.windowStatusDirectory.path,
                         ClaudeSessions.sessionsDirectory.path]
     }
