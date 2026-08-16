@@ -686,6 +686,27 @@ final class RowTitleTests: XCTestCase {
     func testNothingRunningMeansNoBracketsAtAll() {
         XCTAssertNil(SwitcherRowView.countLabel(for: row(working: 0, subagents: 0)))
     }
+
+    /// The same pair in `--dump`, where the column has a width to keep to: the
+    /// name is cut to what the brackets leave of the cell, so the cell comes out
+    /// exactly as wide as its column and the count comes out whole.
+    ///
+    /// The rows that have a count are the ones a dump of this machine may or may
+    /// not contain — an orphan session, or a project with a live session and no
+    /// window — so this cannot be left to be noticed in the output. Budgeting
+    /// the name to the full 34 first and appending the brackets afterwards makes
+    /// the cell as wide as the two together — 48 characters for the row below —
+    /// and `column` pads without cutting: every column to the right of it
+    /// shifts, on the rows where name and brackets do not fit in 34 together and
+    /// nowhere else.
+    func testTheDumpCellKeepsTheCountWholeInsideItsColumn() {
+        let longest = "wirenboard/node-red-contrib-wirenboard"
+        let cell = ConsoleDump.nameCell(for: row(working: 1, subagents: 122, name: longest), width: 34)
+        XCTAssertEqual(cell.count, 34, "the cell is not the width of its column: '\(cell)'")
+        XCTAssertTrue(cell.hasSuffix(" (agents: 123)"), "the count did not survive whole: '\(cell)'")
+        // And the name is what was cut, visibly, by `shorten`.
+        XCTAssertTrue(cell.hasPrefix("wirenboard/node-red\u{2026}"), "'\(cell)'")
+    }
 }
 
 /// The requirement this whole round exists for, measured rather than eyeballed:

@@ -122,20 +122,36 @@ enum ConsoleDump {
             // The indicator is printed here too, because this is where the rule
             // "no chat, no subagent, no icon" is worth seeing: most of this
             // section is projects nobody has run an agent in.
-            // The name is what gives way when it is too long, as in the panel:
-            // the count in brackets stays whole and the name is cut to what is
-            // left of the cell. Cutting the name to the full 34 first and adding
-            // the brackets after made this cell 48 wide on exactly the rows that
-            // have a count — the orphan `cwd:` rows `rankedOrphans` puts at the
-            // top — and `column` pads without cutting, so every column after it
-            // shifted right on those rows and nowhere else.
-            let label = SwitcherRowView.countLabel(for: row)
-            let budget = label.map { max(1, 34 - ($0.count + 1)) } ?? 34
-            let name = shorten(row.displayName, budget) + (label.map { " " + $0 } ?? "")
-            print("  - \(column(name, 34)) \(row.colorHex)"
+            print("  - \(nameCell(for: row, width: 34)) \(row.colorHex)"
                 + "  \(column(indicator(row), 12))"
                 + "  \(column(workspace, 9))  \(activity(row, config: config))")
         }
+    }
+
+    /// The name column of the "Projects" section: the name, then the count in
+    /// brackets when something is running, padded out to exactly `width`.
+    ///
+    /// The name is what gives way when the pair is too long, as in the panel:
+    /// the brackets stay whole and the name is cut to what is left of the cell.
+    /// Cutting the name to the full width first and appending the brackets
+    /// afterwards made the cell as wide as the two together, on every row where
+    /// the two do not fit in 34 — from 23 characters of name with a one-digit
+    /// count, and 48 against a column of 34 for the longest name with a
+    /// three-digit one. `column` pads without cutting, so every column after it
+    /// shifted right on those rows alone. Which rows can have a count at all is
+    /// worth being exact about: the
+    /// orphan rows `rankedOrphans` puts at the top of the section — they are
+    /// orphans by `id`, `cwd:<path>`, and by name just the last component of
+    /// that path — and, further down the same list, any ordinary project that
+    /// has no window open but does have a live session in it.
+    ///
+    /// Internal rather than private so a test can hold it to that: `printText`
+    /// prints a whole snapshot of the machine it runs on, and the rows that
+    /// carry a count are exactly the rows a test run cannot count on having.
+    static func nameCell(for row: SwitcherRow, width: Int) -> String {
+        let label = SwitcherRowView.countLabel(for: row)
+        let budget = label.map { max(1, width - ($0.count + 1)) } ?? width
+        return column(shorten(row.displayName, budget) + (label.map { " " + $0 } ?? ""), width)
     }
 
     /// Pads a cell to the column width, and never cuts it short.
