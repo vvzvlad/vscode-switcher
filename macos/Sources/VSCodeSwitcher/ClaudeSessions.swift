@@ -77,6 +77,7 @@ enum ClaudeSessions {
                                         pid: pid,
                                         cwd: cwd,
                                         name: dict["name"] as? String,
+                                        startedAt: startedAt,
                                         config: config))
         }
 
@@ -126,6 +127,7 @@ enum ClaudeSessions {
                                     pid: Int32,
                                     cwd: String,
                                     name: String?,
+                                    startedAt: Date?,
                                     config: Config) -> ClaudeSessionInfo {
         let slug = slug(forPath: cwd)
         let transcriptPath = projectsDirectory
@@ -136,7 +138,13 @@ enum ClaudeSessions {
         let metrics = metricsStatus(sessionId: sessionId)
         let transcript = transcriptSummary(atPath: transcriptPath, tailBytes: config.transcriptTailBytes)
 
-        let resolved = resolveState(hook: hook, transcript: transcript)
+        // `isSessionProcessAlive` has let this session through, which for
+        // everything but one branch means the pid's start time was checked
+        // against this `startedAt`. The exception is a `sysctl` that yields no
+        // start time — it returns `true` without comparing anything — so read
+        // this as "not known to belong to somebody else's process", not as
+        // proven. `KERN_PROC_PID` does not fail for a live pid in practice.
+        let resolved = resolveState(hook: hook, transcript: transcript, sessionStartedAt: startedAt)
         let model = transcript.model ?? metrics?.modelId ?? metrics?.modelName
         let context = contextUsage(transcript: transcript,
                                    metrics: metrics,
@@ -256,10 +264,68 @@ enum ClaudeSessions {
     /// stream: whatever the last delivered hook wrote stays on disk forever. Two
     /// guards keep a stuck value out of the UI, and both use numbers that are
     /// computed anyway — the hook timestamp and the transcript mtime.
+    ///
+    /// `sessionStartedAt` is the third guard, and the only one aimed at the
+    /// transcript rather than the hook. A resumed chat replays whatever its last
+    /// turn stopped on: the user opens a session from a week ago, types nothing,
+    /// and its `tool_use` tail reads `working` under a process that has not run
+    /// a single turn. A turn the current process cannot have started is not
+    /// running now.
+    ///
+    /// The question that settles is "has this process written anything into the
+    /// transcript at all?", and `newestRecordAt` — the record-level stamp of the
+    /// newest record in the tail, whatever its type — answers it in one
+    /// comparison. Everything that means a turn is under way stamps the file on
+    /// the way in: the prompt the user typed, the bare `tool_result` an answer
+    /// to a dialog arrives as (771 of 771 `AskUserQuestion`/`ExitPlanMode`
+    /// answers in the §2.4 census have exactly that shape, and so does an
+    /// approved permission dialog), and, once it finishes, the hanging tool call
+    /// Claude Code replays on resume. Any of them stands the rule down, and none
+    /// of them would have if the comparison were against the last *assistant*
+    /// record instead.
+    ///
+    /// The replay is the one with a gap in it: until its result is written the
+    /// newest record is still the pre-resume one, and the stamps alone would
+    /// call a turn that is executing right then `idle`. So the stamps are not
+    /// asked about it at all. A turn still waiting for a tool result is exactly
+    /// the shape §2.4 reserves — an unanswered `tool_use` with no marker after
+    /// it cannot be told apart from a `Bash` that has been running for an hour,
+    /// and a working agent must never silently vanish — and a replay always has
+    /// that shape while it runs. `lastTurnAwaitingToolResult` excludes it, and
+    /// Rule 2 keeps its own population: of the seven stale `working` tails on
+    /// disk, six have their call answered and are demoted as before (§2.4).
+    /// Rule 1 is not affected; a marker still ends the turn it follows.
+    ///
+    /// Not the file's mtime, which is the same idea and the wrong instrument:
+    /// resuming touches the transcript without appending a stamped record, so
+    /// the reproducer's mtime is two seconds *after* its process started while
+    /// its newest record is eight days older.
+    ///
+    /// Only `working` is demoted, and only to `idle`. Five of the thirteen live
+    /// sessions in the §2.4 control run have written nothing since their process
+    /// started, and all five read `waiting` — a perfectly true statement about a
+    /// resumed chat, and left alone. Only `working` is a claim about right now.
+    ///
+    /// `sessionStartedAt` deliberately has no default value. With one, dropping
+    /// it at the single production call site compiles and breaks no test — the
+    /// rule would simply be off, and the panel would spin over resumed chats
+    /// again with nothing to say so. Without one, every caller has to state what
+    /// it knows, and a lost wire is a compile error.
     static func resolveState(hook: HookStatus?,
                              transcript: TranscriptSummary,
+                             sessionStartedAt: Date?,
                              now: Date = Date()) -> (state: AgentState, source: AgentStateSource) {
-        let fromTranscript: (AgentState, AgentStateSource)? = transcript.fallbackState.map { ($0, .transcript) }
+        // Computed once so that all three uses below agree on it.
+        let fallbackState = transcript.fallbackState.map { state -> AgentState in
+            guard state == .working,
+                  !transcript.lastTurnAwaitingToolResult,
+                  let sessionStartedAt,
+                  let newestRecordAt = transcript.newestRecordAt,
+                  newestRecordAt < sessionStartedAt
+            else { return state }
+            return .idle
+        }
+        let fromTranscript: (AgentState, AgentStateSource)? = fallbackState.map { ($0, .transcript) }
 
         guard let hookState = hook?.state else { return fromTranscript ?? (.idle, .unknown) }
         guard let hookTime = hook?.timestamp else { return (hookState, .hook) }
@@ -546,6 +612,16 @@ enum ClaudeSessions {
         var contextUsedTokens: Int?
         var fallbackState: AgentState?
         var lastActivity: Date?
+        /// Record-level `timestamp` of the newest record in the tail, of any
+        /// type. "This process has written nothing here" is a stamp older than
+        /// its start. Empty when the tail carries no stamp at all and when the
+        /// newest one would not parse; `nil` never demotes anything (§2.4).
+        var newestRecordAt: Date?
+        /// Whether the turn the state above was read from still has a tool call
+        /// in flight — a `tool_use` block of its own with no result written for
+        /// it anywhere below. This is the one shape §2.4 refuses to judge, so
+        /// Rule 2 stands down on it (§2.4).
+        var lastTurnAwaitingToolResult = false
     }
 
     private static let transcriptCache = FileDerivedCache<TranscriptSummary>()
@@ -580,6 +656,25 @@ enum ClaudeSessions {
         // Filled going backwards, so by the time the assistant record that
         // asked is read, its answer — which is written after it — has been seen.
         var answered: Set<String> = []
+        // What the newest thing the user said after the last assistant record
+        // was: `true` — an interrupt marker, `false` — anything else they
+        // said, `nil` — nothing of theirs met yet. Only the newest one counts,
+        // because a prompt typed after a marker restarts the turn the marker
+        // ended, and the agent is working on it again.
+        //
+        // Same trick as `answered`: this is read at the assistant record the
+        // fallback state comes from, and only the record that clears
+        // `needsAssistant` ever reaches the point where it is read (sidechain
+        // and `<synthetic>` records enter that branch too, but `continue` out
+        // before it). Everything the backwards scan has met by then is newer
+        // than that record, so a verdict set afterwards — one belonging to an
+        // earlier turn — can no longer be seen by anybody. It stays local: the
+        // liveness rule outside reads `newestRecordAt` instead (§2.4).
+        var lastUserSaidInterrupted: Bool?
+        // Whether a record carrying a `timestamp` field has been met yet. Not
+        // the same question as `newestRecordAt == nil`, and the difference is
+        // the whole point of the flag — see below.
+        var newestStampSeen = false
 
         for line in lines.reversed() {
             if !needsTitle, !needsPrompt, !needsAssistant { break }
@@ -587,6 +682,32 @@ enum ClaudeSessions {
                 continue
             }
             guard let type = record["type"] as? String else { continue }
+
+            // Newest record first, so the first stamp met is the newest one and
+            // the flag stops the search there: one date per transcript, not one
+            // per line. Records with no `timestamp` field at all are stepped
+            // over — resuming a chat writes ten kinds of record that carry none
+            // (§2.4) — but a field that is there and does not parse stops the
+            // search all the same, leaving `newestRecordAt` empty. It belongs to
+            // the newest record either way, and walking on to the next, older
+            // stamp would hand Rule 2 something that is not the newest record's
+            // and demote a session that has just written into the file. `nil`
+            // demotes nothing, which is what makes a failed parse harmless.
+            //
+            // `Date.ISO8601FormatStyle` is a `Sendable` struct;
+            // `ISO8601DateFormatter` is a class, and a `static let` of one warns
+            // under `-strict-concurrency=complete` (checked — "not
+            // concurrency-safe … may have shared mutable state", an error in the
+            // Swift 6 language mode), which this build may not carry. Every
+            // timestamp in the §2.4 census has fractional seconds (282 511
+            // record-level stamps across 423 transcripts, none without), so
+            // there is no second, fraction-less attempt: a branch that cannot
+            // fire is a branch nobody can trust.
+            if !newestStampSeen, let stamp = record["timestamp"] as? String {
+                newestStampSeen = true
+                summary.newestRecordAt = try? Date(
+                    stamp, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true))
+            }
 
             switch type {
             case "ai-title" where needsTitle:
@@ -608,6 +729,11 @@ enum ClaudeSessions {
                       model != "<synthetic>"
                 else { continue }
                 summary.model = model
+                // A fact about this record, recorded whatever the stop reason
+                // says: only Rule 2 reads it, and only for `working`, but
+                // computing it in one place keeps it what its name claims —
+                // "the last turn is still waiting for a tool".
+                summary.lastTurnAwaitingToolResult = awaitingToolResult(message: message, answered: answered)
                 if let usage = message["usage"] as? [String: Any] {
                     let keys = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
                     summary.contextUsedTokens = keys.reduce(0) { total, key in
@@ -624,12 +750,52 @@ enum ClaudeSessions {
                     // "busy", which is the state the user is least likely to
                     // interrupt.
                     let asked = unansweredQuestion(message: message, answered: answered)
-                    summary.fallbackState = asked ? .question : .working
+                    // An interrupted turn is over, whatever it stopped on. The
+                    // question branch is left alone: a question the user typed
+                    // over is still the last thing that happened, and a wrongly
+                    // cleared `question` never comes back on its own.
+                    if asked {
+                        summary.fallbackState = .question
+                    } else {
+                        summary.fallbackState = lastUserSaidInterrupted == true ? .idle : .working
+                    }
                 default: break
                 }
                 needsAssistant = false
             case "user":
+                // Answers are collected from every user record, sidechain ones
+                // included (SPEC §2.4): `tool_use_id` is unique, so a subagent's
+                // result can never close somebody else's question.
                 collectAnswers(record: record, into: &answered)
+                // What the user said, on the other hand, belongs to the chain it
+                // was typed on, so the sidechain test mirrors the one the
+                // assistant branch above already makes. No such record exists in
+                // a parent transcript today — subagents write into their own
+                // session file (§2.6.3), and not one record in the §2.4 control run
+                // has `isSidechain: true` — so this is symmetry between the
+                // two branches, not an answer to a case anybody has seen.
+                //
+                // `needsAssistant` here is an early-out on a hot path and
+                // nothing more. The verdict never leaves this function and is
+                // read at exactly one place — the assistant record that clears
+                // the flag — so a verdict recorded after that point cannot
+                // reach anybody, and dropping the flag from this condition
+                // changes no behaviour. What makes that true is the invariant
+                // `testAMarkerOlderThanTheLastTurnChangesNothing` pins; the
+                // test passes with this line and without it, as it should.
+                //
+                // It is worth its line because this is the once-a-second
+                // snapshot path: of the 4474 `user` records the scan visits
+                // across the 423 transcripts of the §2.4 census, 4348 (97%)
+                // come after the flag is already false — median 1 per transcript,
+                // p90 41, max 80 — and every one of them would repeat the two
+                // casts `collectAnswers` has just done, the second of which
+                // bridges an array of dictionaries.
+                if needsAssistant, lastUserSaidInterrupted == nil,
+                   (record["isSidechain"] as? Bool) != true,
+                   let verdict = interruptVerdict(record: record) {
+                    lastUserSaidInterrupted = verdict
+                }
                 continue
             default:
                 continue
@@ -677,6 +843,30 @@ enum ClaudeSessions {
         }
     }
 
+    /// True when the assistant record still has a tool call in flight: one of
+    /// its own `tool_use` blocks has no result written for it below.
+    ///
+    /// Same id matching as `unansweredQuestion` and deliberately not the same
+    /// question. That one asks about the two tools that are a question to the
+    /// user, because a question is a state of its own; this one asks about
+    /// **every** tool, because §2.4 refuses to judge a turn that is waiting for
+    /// one — an unanswered `tool_use` with no marker after it is a `Bash` that
+    /// may have been running for an hour, and a working agent must never
+    /// silently vanish from the list. Merging the two would either widen what
+    /// counts as a question or narrow what counts as a turn in flight.
+    ///
+    /// A `tool_use` with no id counts as in flight, for the reason it counts as
+    /// unanswered above: nothing can match it, and the safe direction is the one
+    /// that keeps the row alive.
+    static func awaitingToolResult(message: [String: Any], answered: Set<String>) -> Bool {
+        guard let content = message["content"] as? [[String: Any]] else { return false }
+        return content.contains { block in
+            guard (block["type"] as? String) == "tool_use" else { return false }
+            guard let id = block["id"] as? String else { return true }
+            return !answered.contains(id)
+        }
+    }
+
     /// Adds the `tool_use_id` of every tool result in a user record to `answered`.
     ///
     /// Sidechain records are collected too: ids are unique per tool call, so a
@@ -688,6 +878,64 @@ enum ClaudeSessions {
         for block in content where (block["type"] as? String) == "tool_result" {
             if let id = block["tool_use_id"] as? String { answered.insert(id) }
         }
+    }
+
+    /// What Claude Code writes into the transcript when the user cuts a turn
+    /// short. Two texts exist in the §2.4 census — `[Request interrupted by
+    /// user]` (541 records) and `[Request interrupted by user for tool use]`
+    /// (245 as a text block, plus the 3 written inside a `tool_result`) — and
+    /// this prefix covers both.
+    static let interruptMarkerPrefix = "[Request interrupted"
+
+    /// What a user record says about the turn: `true` — the user cut it short,
+    /// `false` — the user said something else, so a turn is under way again,
+    /// `nil` — the record is not the user speaking at all.
+    ///
+    /// Both shapes `content` comes in are read, but the marker is looked for in
+    /// the block-shaped one only. A plain-string `content` is never the marker
+    /// in the §2.4 census (0 of 789); it is something else — a prompt the user typed
+    /// or dragged in (349 of the 4110 string-shaped records there), a slash
+    /// command (281), a message from another session (224), or an envelope the
+    /// machine injected on their behalf. All of those read `false`, which is
+    /// the safe direction in the only way that matters: `false` keeps
+    /// `working`, and only `true` ever takes a state away. Reading the string
+    /// shape as "nothing was said" is what did the damage — the backwards scan
+    /// walked past a prompt it could not see and stopped at the marker
+    /// underneath, calling a live agent `idle` until its first assistant record
+    /// landed (§2.4).
+    ///
+    /// The marker has two shapes of its own, though: a `text` block (786 of the
+    /// 789 in the census) and the *content* of a `tool_result` block (3). The
+    /// second one has to stay this narrow. An ordinary `tool_result` is the
+    /// machine answering the agent and says nothing — including the string-
+    /// shaped answer to a dialog, which reads "Your questions have been
+    /// answered: …" (771 of 771 in the census) — so only the marker prefix
+    /// separates the two, and `nil` for everything else is what keeps a bare
+    /// result from ending a turn that is running.
+    ///
+    /// Any block that is neither counts as speech — eight user records in the
+    /// census are a pasted image with no text at all, and pasting an image
+    /// starts a turn exactly like typing does.
+    static func interruptVerdict(record: [String: Any]) -> Bool? {
+        guard let message = record["message"] as? [String: Any] else { return nil }
+        if message["content"] is String { return false }
+        guard let content = message["content"] as? [[String: Any]] else { return nil }
+        var saidSomething = false
+        for block in content {
+            let type = block["type"] as? String
+            if type == "text", let text = block["text"] as? String,
+               text.hasPrefix(interruptMarkerPrefix) {
+                return true
+            }
+            if type == "tool_result" {
+                if let text = block["content"] as? String, text.hasPrefix(interruptMarkerPrefix) {
+                    return true
+                }
+                continue
+            }
+            saidSomething = true
+        }
+        return saidSomething ? false : nil
     }
 
     /// Last `maxBytes` of a file split into lines, without the first partial one.
