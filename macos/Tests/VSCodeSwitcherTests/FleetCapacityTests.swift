@@ -147,6 +147,41 @@ final class FleetCapacityTests: XCTestCase {
             """)
     }
 
+    /// The reset threshold held from above. Not every reset falls a whole
+    /// window: both resets on record are 99 → 0 and 100 → 0, but an account
+    /// whose window turns over at 45 falls 40 pp, and 5 sits low enough to read
+    /// that as the reset it is. Raise the constant past this fall and it goes
+    /// uncounted: the interval then reads −25 pp, no schedule is offered to
+    /// place what happened, and the account is refused altogether, leaving both
+    /// halves of the fraction. From below the constant was already held: lower
+    /// it to 1.5 and the 2 and 3 pp falls the hole fixtures are built on are
+    /// charged as whole restored windows, which reddens three of them (checked
+    /// by mutation, 2026-08-17). From above nothing held it at all.
+    func testAFallDeeperThanTheSawtoothIsAResetEvenWithoutAWholeWindowBehindIt() throws {
+        let series = try history("main", [45, 5, 10, 15, 20], overHours: 48)
+        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
+                                                    accounts: try fleet(["main"])))
+        XCTAssertEqual(burnedPP(load), 75, accuracy: 0.001, """
+            20 − 45 over the interval plus the window that turned over inside it; a threshold too \
+            high to see this fall does not answer 25 pp or 0, it refuses the account and takes its \
+            100 pp of capacity out with it
+            """)
+    }
+
+    /// The threshold is the largest fall that is still the signal moving, not
+    /// the smallest fall that is a reset: `>` and not `>=`. So a fall of exactly
+    /// `resetDropThreshold` is the signal, and this account burned the 5 pp its
+    /// endpoints say. Asked with `>=` the same series is charged a whole
+    /// restored window — 105 pp for an account that spent 5 — and every other
+    /// fixture here falls either well inside the threshold or well past it.
+    func testAFallOfExactlyTheThresholdIsNotAReset() throws {
+        let series = try history("main", [50, 50 - FleetCapacity.resetDropThreshold, 55], overHours: 48)
+        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
+                                                    accounts: try fleet(["main"])))
+        XCTAssertEqual(burnedPP(load), 5, accuracy: 0.001,
+                       "55 − 50 with nothing but the signal in between; counting that fall as a reset answers 105 pp")
+    }
+
     /// The mirror of the phantom: a reset that fell entirely inside a hole is
     /// not a fall between two readings, but the readings still carry its
     /// signature — 95 → 92 across the hole is a window that ended lower than it
@@ -225,6 +260,27 @@ final class FleetCapacityTests: XCTestCase {
                      "a reset nobody saw and nothing can place is a missing figure, not zero burn")
     }
 
+    /// The refusal's boundary, and the reason it stands at −1 rather than −2.
+    /// The two measuring sources disagree by one point and only downward — a
+    /// reading is the truth or the truth minus one, never above it (measured
+    /// 2026-08-17, see `FleetCapacity.measure`) — and the truth inside a window
+    /// cannot fall, so an interval with no reset in it can read −1 and nothing
+    /// lower. This one falls exactly 2 pp across a hole, one point past anything
+    /// the sawtooth can make, with no schedule to place the reset that did it.
+    ///
+    /// It sits between the two fixtures that already exist and neither of them
+    /// can ask this question: `testAnIdleAccountJitteringDownDoesNotSubtractDemand`
+    /// falls 1 pp and is answered, `testAFallPastTheSawtoothWithNoScheduleHasNoAnswer`
+    /// falls 3 pp and is refused, and with that gap the threshold can be written
+    /// `< -2` while both stay green.
+    func testAFallOfExactlyTwoPointsIsAlreadyPastTheSawtooth() throws {
+        let series = try history("main", [95, nil, nil, nil, 93], overHours: 48)
+        XCTAssertNil(FleetCapacity.load(histories: histories([series]), accounts: try fleet(["main"])), """
+            a one-sided ±1 tooth cannot take an interval two points below where it opened: something \
+            restored this window, nothing here can place it, and a missing figure beats a confident 0%
+            """)
+    }
+
     /// A `null` sample measured nothing; it is not a reading of zero. Read as
     /// zero it would look like a fall of 50 pp — a reset — and the account's
     /// burn would come out at 110 instead of 10.
@@ -253,9 +309,10 @@ final class FleetCapacityTests: XCTestCase {
     // MARK: - Rates per account, capacity over contributors
 
     /// The accounts do not have the same depth of history — 2.59 / 2.29 / 2.59
-    /// days live, because the gateway cuts one of them at `max_points`. A rate
-    /// per account, then summed; dividing one total by the longest span would
-    /// credit the shallow account with hours nobody measured it over.
+    /// days live on 2026-08-17, because the gateway cuts one of them at
+    /// `max_points`. A rate per account, then summed; dividing one total by the
+    /// longest span would credit the shallow account with hours nobody measured
+    /// it over.
     func testRatesAreSummedPerAccountRatherThanDividedByTheLongestSpan() throws {
         let deep = try history("acc2", [0, 48], overHours: 48)       // 1.0 pp/h
         let shallow = try history("acc3", [10, 22], overHours: 24)   // 0.5 pp/h
@@ -326,6 +383,28 @@ final class FleetCapacityTests: XCTestCase {
             the account was at its ceiling when the interval opened, and the demand it turned away \
             then is missing from the series exactly as much as a ceiling in the middle of it
             """)
+    }
+
+    /// The other seed, and the same reason. `everBelowCeiling` is seeded from
+    /// the first reading and raised again inside a loop that starts at
+    /// `dropFirst()`, so only an account that entered the interval below its
+    /// ceiling and reached it on the second sample can tell the seed from the
+    /// loop — every other fixture that goes below the ceiling does so after the
+    /// first reading. Written `false`, the seed says this account was never
+    /// below its ceiling, `measure` refuses it as one that spent the whole
+    /// interval blocked, and it leaves both halves of the fraction: on the live
+    /// fleet that moves the answer up by about 70 points.
+    func testAnAccountBelowItsCeilingOnlyOnTheFirstReadingIsStillMeasured() throws {
+        let series = try history("acc2", [99, 100, 100, 100, 100], overHours: 48)
+        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
+                                                    accounts: try fleet(["acc2"])))
+        XCTAssertEqual(load.accounts, 1, """
+            the account was below its ceiling when the interval opened and blocked for the rest of \
+            it: that is an account measured over a window it spent at the ceiling, not one nobody \
+            measured at all
+            """)
+        XCTAssertTrue(load.isLowerBound,
+                      "it sat at 100 from the second sample on, and what it turned away is not in the series")
     }
 
     /// An account that spent the *whole* interval at 100 is a different case

@@ -46,8 +46,12 @@ struct FleetLoad: Sendable, Equatable {
     let accounts: Int
     /// The shortest per-account interval that went in. The answer is only as
     /// well measured as its worst-measured contributor, and the depths differ:
-    /// 2.59 / 2.29 / 2.59 days on the live fleet, because one account's history
-    /// is cut short by the gateway's `max_points` cap.
+    /// 2.59 / 2.29 / 2.59 days on the live fleet, measured 2026-08-17, because
+    /// one account's history is cut short by the gateway's `max_points` cap.
+    /// Those spans belong to the day they were taken rather than to the source:
+    /// the cap counts points, not hours, so the depth shrinks as the sampling
+    /// density rises — the same 2000 points cover fewer hours the faster the
+    /// gateway takes them.
     let measuredHours: Double
 }
 
@@ -153,9 +157,23 @@ enum FleetCapacity {
     /// 77 teeth over acc2 / acc3 / main and not one of them at the ceiling,
     /// because all 120 ceiling readings on acc2 sit in runs (measured
     /// 2026-08-17, median of three over the non-null `util_7d` readings). The
-    /// exposure is `hitCeiling` and it is one sample wide: a lone 100 between
-    /// two 99s is exactly the shape a median of three deletes, and with it goes
-    /// the only evidence that the account was ever blocked.
+    /// exposure is the whole account, and it grew that far when the ceiling
+    /// refusal was added: a lone reading *below* the ceiling among ceiling
+    /// readings — a 99 between two 100s — is exactly the shape a median of three
+    /// deletes, and it is the only thing holding `everBelowCeiling` true for an
+    /// account otherwise pinned at 100. Smooth it away and `measure` refuses the
+    /// account outright, taking its 100 pp of capacity out of the denominator
+    /// along with its demand and moving the fleet figure up. The mirror shape, a
+    /// lone 100 between two 99s, is the cheap one: it costs `hitCeiling`, which
+    /// is the `≥` on a figure that still gets printed.
+    ///
+    /// Both are the ordinary one-sample tooth, common enough to plan for: of the
+    /// downward excursions in the live history 18 / 130, 19 / 136 and 6 / 83 are
+    /// one sample wide over acc2 / acc3 / main (2026-08-17, an excursion being a
+    /// fall too small for a reset that later returns to the level it fell from).
+    /// It has not been caught at the ceiling itself — acc2's ceiling readings
+    /// that day are one unbroken run — but nothing about the ceiling makes the
+    /// two measuring sources agree any better there.
     static func load(histories: [String: HistorySeries], accounts: [AccountUsage]) -> FleetLoad? {
         var demandPerHour = 0.0
         var contributors = 0
@@ -218,9 +236,24 @@ enum FleetCapacity {
     /// is bounded and measured — sliding a 24 h window across the live history
     /// one sample at a time (2026-08-17), the raw endpoints disagree with
     /// endpoints taken as a median of the five outermost readings in 13% / 19% /
-    /// 6% of windows over acc2 / acc3 / main. The disagreement is ±1 pp per
-    /// endpoint, so a figure carries ±2 pp at worst, and only when both ends sit
-    /// on a tooth pointing opposite ways.
+    /// 6% of windows over acc2 / acc3 / main. The disagreement is one point wide
+    /// and one-sided *downward*: a reading is either the truth or the truth minus
+    /// one, never above it. So a figure carries ±1 pp at worst rather than the
+    /// ±2 of two teeth pointing opposite ways, and the most a pair of endpoints
+    /// can understate by is one point, never two. Since the truth inside a
+    /// window cannot fall either, an interval with no reset in it can read −1
+    /// and nothing lower — which is the whole reason the refusal below asks
+    /// `rawChange < -1` and not `< -2`.
+    ///
+    /// Re-measured 2026-08-17 over the deepest series each account serves
+    /// (2000 / 2000 / 1558 readings over 53.7 / 52.1 / 65.5 h), two ways.
+    /// Plateaus: over every stretch of at least 100 consecutive readings whose
+    /// values span a single point and whose level holds four fifths of them, not
+    /// one reading sits above the level — 0 against 17 / 47 / 22 below it over
+    /// acc2 / acc3 / main. Pairs: over every two readings less than 24 h apart
+    /// with no reset between them, the smallest `v[j] − v[i]` is exactly −1 pp on
+    /// all three accounts, where a two-sided tooth would answer −2 as soon as the
+    /// earlier reading sat high and the later one low.
     ///
     /// `+ 100` per reset is the one approximation, and it errs upward on
     /// purpose: it charges the stretch before a reset as if the window had been
@@ -244,14 +277,20 @@ enum FleetCapacity {
     /// endpoints answer `99 − 99 + 100 = 100 pp` — wrong by 99 pp, and wrong in
     /// the shape that matters, turning a blocked account into one that spent a
     /// whole week's quota in a day. A reset at the edge of the interval is
-    /// exactly what a median destroys, and ±2 pp of sawtooth is by two orders of
+    /// exactly what a median destroys, and ±1 pp of sawtooth is by two orders of
     /// magnitude the cheaper error.
     ///
     /// One shape gets past everything below: a hole that hides a reset *and*
-    /// lets the new window climb back above the pre-reset reading leaves a small
-    /// positive burn, and there is nothing left to notice it — no fall to count,
-    /// nothing negative to refuse (`[95, nil, nil, nil, 97]` reads 2 pp where the
-    /// truth is 102). A named `resetsAt` does not save it either, and that is on
+    /// lets the new window climb back to within a point of the pre-reset reading
+    /// or past it leaves no signature at all — no fall to count, nothing far
+    /// enough negative to refuse. Above the reading it is a small positive burn
+    /// (`[95, nil, nil, nil, 97]` reads 2 pp where the truth is 102); a point
+    /// below it, the reading falls inside the sawtooth band the refusal leaves
+    /// alone and `max(0, …)` serves it as a confident zero (`[95, nil, nil, nil,
+    /// 94]` reads 0 pp where a counted reset answers 99). Same hole, same
+    /// silence, and the clamp is named again where it happens.
+    ///
+    /// A named `resetsAt` does not save either of them, and that is on
     /// purpose: the schedule is read only over readings that already fell, since
     /// a schedule consulted on its own invents resets that never happened (the
     /// note beside the guard). The readings here carry no signature at all, so
@@ -363,10 +402,18 @@ enum FleetCapacity {
             }
         }
 
-        // What is left for `max(0, …)` is the −1…0 case, which really is the
-        // sawtooth: left signed it would subtract from the fleet's demand, and
-        // one account resting would make the others look cheaper, which is not a
-        // thing that happens.
+        // What is left for `max(0, …)` is the −1…0 case: left signed it would
+        // subtract from the fleet's demand, and one account resting would make
+        // the others look cheaper, which is not a thing that happens. Usually
+        // that band really is the sawtooth — but not certainly, and claiming so
+        // would hide the one shape that reaches it: a reset buried in a hole
+        // whose new window climbed back to within a point *below* the pre-reset
+        // reading (`[95, nil, nil, nil, 94]`) leaves no fall to count and no
+        // signature to refuse, and is served here as 0 pp against a truth near
+        // 99. It is the same blind spot the header documents for a window that
+        // climbed back *above* the reading; the difference is only which side of
+        // the reading the new window stopped on, and this side is the one the
+        // clamp makes silent.
         let burn = rawChange + quotaPerAccount * Double(resets)
         return Measurement(burnPP: max(0, burn), hours: hours, hitCeiling: hitCeiling)
     }
