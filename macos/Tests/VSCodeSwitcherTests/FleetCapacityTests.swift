@@ -308,11 +308,12 @@ final class FleetCapacityTests: XCTestCase {
 
     // MARK: - Rates per account, capacity over contributors
 
-    /// The accounts do not have the same depth of history — 2.59 / 2.29 / 2.59
-    /// days live on 2026-08-17, because the gateway cuts one of them at
-    /// `max_points`. A rate per account, then summed; dividing one total by the
-    /// longest span would credit the shallow account with hours nobody measured
-    /// it over.
+    /// The accounts do not have the same depth of history — 2.16 / 2.18 / 2.74
+    /// days over acc2 / acc3 / main, live on 2026-08-17. It is not that the
+    /// gateway cut one of them at `max_points`: it cut *two*, and the account it
+    /// did not cut is the deepest of the three (see `FleetLoad.measuredHours`).
+    /// A rate per account, then summed; dividing one total by the longest span
+    /// would credit the shallow account with hours nobody measured it over.
     func testRatesAreSummedPerAccountRatherThanDividedByTheLongestSpan() throws {
         let deep = try history("acc2", [0, 48], overHours: 48)       // 1.0 pp/h
         let shallow = try history("acc3", [10, 22], overHours: 24)   // 0.5 pp/h
@@ -392,8 +393,21 @@ final class FleetCapacityTests: XCTestCase {
     /// loop — every other fixture that goes below the ceiling does so after the
     /// first reading. Written `false`, the seed says this account was never
     /// below its ceiling, `measure` refuses it as one that spent the whole
-    /// interval blocked, and it leaves both halves of the fraction: on the live
-    /// fleet that moves the answer up by about 70 points.
+    /// interval blocked, and it leaves both halves of the fraction — its demand
+    /// and its 100 pp of capacity — so the answer is recomputed over a fleet
+    /// smaller by one.
+    ///
+    /// How far that moves the answer is not a live figure, and a live figure was
+    /// claimed here. Replayed against the gateway on 2026-08-17 the delta is
+    /// **zero**: no account has this shape — all three are below their ceiling
+    /// somewhere after the first reading — so nothing changes hands and the seed
+    /// is unobservable on today's data. What the break costs has to be asked of
+    /// an account that has the shape, and then it is large: pinning each of the
+    /// three at its ceiling from the second reading on and computing twice, the
+    /// seed is worth +36.5, +37.7 and +56.8 points of load (same day, same three
+    /// series, only the pinned account swapped). It moves with which account is
+    /// pinned and with what the other two are burning, which is exactly why the
+    /// number belongs to a construction rather than to "the live fleet".
     func testAnAccountBelowItsCeilingOnlyOnTheFirstReadingIsStillMeasured() throws {
         let series = try history("acc2", [99, 100, 100, 100, 100], overHours: 48)
         let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),

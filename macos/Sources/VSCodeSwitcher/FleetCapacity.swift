@@ -46,13 +46,30 @@ struct FleetLoad: Sendable, Equatable {
     let accounts: Int
     /// The shortest per-account interval that went in. The answer is only as
     /// well measured as its worst-measured contributor, and the depths differ:
-    /// 2.59 / 2.29 / 2.59 days on the live fleet, measured 2026-08-17, because
-    /// one account's history is cut short by the gateway's `max_points` cap.
-    /// Those spans belong to the day they were taken rather than to the source:
-    /// the cap counts points, not hours, so the depth shrinks as the sampling
-    /// density rises — the same 2000 points cover fewer hours the faster the
-    /// gateway takes them.
+    /// 2.16 / 2.18 / 2.74 days over acc2 / acc3 / main, measured 2026-08-17
+    /// (51.75 / 52.43 / 65.85 h).
+    ///
+    /// The gateway's `max_points` cap is not what makes the shallowest shallow,
+    /// and the obvious reading of these three numbers is the wrong one: *two* of
+    /// the accounts come back `truncated` at 2000 points, and the one that does
+    /// not — main, at 1581 — is the deepest of the three. What separates them is
+    /// how hard the gateway watches each account: 38.6 and 38.1 readings an hour
+    /// on acc2 and acc3 against main's 24.0. The cap counts points, not hours,
+    /// so the same 2000 points cover fewer hours the faster the samples are
+    /// taken, and these spans belong to the day they were measured rather than
+    /// to the source.
     let measuredHours: Double
+
+    /// At or above this the fleet is being asked for more than the week holds.
+    ///
+    /// Named once because two surfaces have to agree about it — the popover's
+    /// headline and the status item's bar are both green below and red at or
+    /// above, and a boundary written twice is a boundary that can be moved once.
+    static let capacityPercent: Double = 100
+
+    /// Demand has caught up with supply. `>=`, not `>`: exactly 100 is a week
+    /// with nothing left over, which is the state the colour is a warning about.
+    var isOverCapacity: Bool { percent >= Self.capacityPercent }
 }
 
 /// The arithmetic of `FleetLoad`. Stateless, and deliberately not isolated to
@@ -149,8 +166,8 @@ enum FleetCapacity {
     /// shallow to extrapolate from. A missing figure beats a wrong one (§2.7).
     ///
     /// **The points must be the gateway's own, not smoothed ones**, and whoever
-    /// wires this up has to check: the only loader that exists today hands out
-    /// smoothed points, `UsageHistoryModel.load` returning `despiked(answer.points)`
+    /// wires this up has to check: the other loader hands out smoothed points,
+    /// `UsageHistoryModel.load` returning `withoutSourceLag(answer.points)`
     /// because the chart wants the sawtooth gone. Passing that here is not a
     /// visible mistake — the filter never touches the ends the burn is taken
     /// from, and over the live history it changes nothing this reads: 145 / 154 /
@@ -227,9 +244,13 @@ enum FleetCapacity {
     /// by ±1 pp, because the gateway's own poll and the values lifted out of API
     /// response headers disagree by a point for about one five-minute cycle
     /// (§4). Every tooth of that sawtooth has a rising edge, and a sum of
-    /// positive deltas charges every one of them as spend: on acc2 over 62 h it
-    /// answered 158 pp where the account had burned 50 — 111 spurious spikes of
-    /// one point each, an overstatement of three times. Endpoints cannot
+    /// positive deltas charges every one of them as spend. Re-measured 2026-08-18
+    /// over the whole depth of the three series: on acc2 (2000 readings over
+    /// 46.79 h) the sum answers 198 pp where the endpoints say the account burned
+    /// 56 — every one of those 198 a single-point step, an overstatement of 3.5
+    /// times; 185 against 51 on acc3 over 54.23 h and 119 against 23 on main over
+    /// 67.83 h. (The figure that stood here, "158 pp against 50 over 62 h on
+    /// acc2", carried no date and no depth that matches one.) Endpoints cannot
     /// *accumulate* that error, which is the whole point: whatever the signal
     /// did in between, an account that reads 50 now and read 0 then has spent
     /// 50. What an endpoint can still do is land on a tooth of its own, and that
@@ -259,14 +280,19 @@ enum FleetCapacity {
     /// purpose: it charges the stretch before a reset as if the window had been
     /// spent to its ceiling. An account whose window turned over at 93 is
     /// credited with the 7 pp it never got to spend. The error is bounded by
-    /// exactly that headroom (0…7 pp on the live fleet) and it overstates load,
+    /// exactly that headroom — by the reading the window turned over at — and on
+    /// the live fleet that headroom is small: both resets the history has held
+    /// went from 100 (acc2) and from 99 (main), which is 0 pp and 1 pp
+    /// (2026-08-17; the 2026-08-18 re-measure over the full depth keeps the one
+    /// that survived retention, main's 99 → 0). The 7 is the example above, not
+    /// an observation. It overstates load,
     /// which is the safe direction for a question that reads "will my tokens
     /// last". The bound holds only for a reset the series showed: for one
     /// inferred from `resetsAt` the pre-reset reading was never observed, so the
     /// charge can be a whole window over an account that had spent little of it.
     ///
-    /// Nothing is smoothed on the way in, and `UsageHistoryModel.despiked` is
-    /// declined even though it would leave these endpoints where they are — it
+    /// Nothing is smoothed on the way in, and `UsageHistoryModel.withoutSourceLag`
+    /// is declined even though it would leave these endpoints where they are — it
     /// iterates `1..<(points.count - 1)`, and untouched edges are a requirement
     /// of §4 that two tests hold. Smoothing an endpoint is not a fix but a
     /// hazard, and the cost was measured on a real window: main over the 24 h
@@ -348,13 +374,17 @@ enum FleetCapacity {
         // The clamp used to be conditional on `hours <= hoursPerWeek`, guarding
         // a span long enough to hold two real resets. No such span can reach
         // here, and that is a property of the source rather than of this
-        // function: measured 2026-08-17, `since` of 2, 7 and 30 days returns
-        // byte-identical points, and the spans are 56.46 h on acc2, 51.74 h on
-        // acc3 and 64.89 h on main. Two independent ceilings hold it — `max_points`
-        // of 2000 against 23 to 39 readings an hour (acc2 and acc3 come back
-        // `truncated`), and the gateway simply not retaining more, which is what
-        // main shows at 1525 points, not truncated and still stopping at 64.89 h.
-        // A whole week of history is four times what the deepest account has.
+        // function: measured 2026-08-17, `since` of 7 and 30 days returns the
+        // same points and the spans stop at 51.75 h on acc2, 52.43 h on acc3 and
+        // 65.85 h on main. Asking for *less* does shorten them — `since` of two
+        // days answers 1951 points over 47.96 h on acc2 against 2000 over
+        // 51.75 h — so `since` is honoured on the left edge; what it cannot do is
+        // reach further back than the gateway kept. Two independent ceilings hold
+        // that — `max_points` of 2000 against 24 to 39 readings an hour, which is
+        // what makes acc2 and acc3 come back `truncated`, and the gateway simply
+        // not retaining more, which is what main shows at 1581 points, not
+        // truncated and still stopping at 65.85 h. A whole week is two and a half
+        // times deeper than the deepest account reaches.
         resets = min(resets, 1)
 
         let rawChange = last.value - first.value

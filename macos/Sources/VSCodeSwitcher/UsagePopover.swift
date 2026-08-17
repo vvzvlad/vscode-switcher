@@ -640,6 +640,24 @@ struct UsagePopoverView: View {
     static let headlineCaption = "weekly quota, average across accounts"
     static let headlineCaptionSize: CGFloat = 11
 
+    /// What the headline says when there is a load figure to say it about, and
+    /// it names a different quantity from the caption above: not how much of the
+    /// week is spent, but how much of the week is being asked for. `126%` reads
+    /// "a quarter more than the week holds".
+    ///
+    /// No jargon and no internal vocabulary — the word this metric is called by
+    /// inside the app appears in no string on this surface (§4).
+    static let loadCaption = "of weekly capacity across accounts"
+
+    /// The headline's bar, taller than the ones on the account rows because it
+    /// belongs to the figure this popover is opened for.
+    ///
+    /// A constant for the reason the dot's size is one: the test that holds its
+    /// colour finds it by its size — nothing else in the picture is a patch
+    /// exactly this tall — and a copy of the number in the test would be a test
+    /// about a bar that no longer exists.
+    static let headlineBarHeight: CGFloat = 8
+
     /// The slot the reset time gets at the right end of a window row. Wide enough
     /// for everything `resetLabel` writes about a quota window, which is measured
     /// rather than asserted (`testTheResetTimeFitsItsSlotWhole`): a truncated
@@ -672,9 +690,11 @@ struct UsagePopoverView: View {
                                       seriesPeriod: history.seriesPeriod,
                                       period: history.period,
                                       chartFailed: history.failure != nil,
+                                      loadFailed: usage.snapshot.fleetLoadFailure != nil,
                                       now: history.now)
         let failure = Self.failureText(quota: usage.snapshot.quotaFailure,
-                                       history: history.failure)
+                                       history: history.failure,
+                                       load: usage.snapshot.fleetLoadFailure)
         return VStack(alignment: .leading, spacing: 12) {
             headline
             Divider()
@@ -717,20 +737,56 @@ struct UsagePopoverView: View {
     /// 199.5 — the caption then wraps, and a wrapped caption is the complaint this
     /// headline was rebuilt for. On its own row it has the whole width and one line
     /// is one line whatever the figure says.
+    ///
+    /// What stands in those three rows is the load when there is one, and the
+    /// mean utilisation when there is not. All three rows switch together, and
+    /// that is the point of doing it here rather than adding a fourth row: the
+    /// caption names the figure and the bar is the figure drawn, so a bar left
+    /// showing the mean under a caption that says "capacity" would be the two
+    /// contradicting statements on one screen that this very headline already
+    /// refused once (see `headlinePercent`).
+    ///
+    /// **A `nil` load falls back to exactly the old drawing, and nothing is
+    /// invented in its place.** `FleetCapacity.load` answers `nil` when the
+    /// gateway said nothing, when no account has six hours of history to
+    /// extrapolate from, and when every account spent the whole window pinned at
+    /// its ceiling — and from here those three are one state, because the metric
+    /// hands back no way to tell them apart. Two of them are cases where the
+    /// truthful answer is "unknown" and the third is a fleet in the worst
+    /// trouble it can be in; a number that split the difference would be wrong
+    /// for all three (§2.7).
     private var headline: some View {
+        // The clock the whole popover reads, which ticks while it is open: one
+        // of the load's two rules is an age, so a figure that goes stale under an
+        // open popover has to leave the headline without waiting for a click.
+        let load = Self.headlineLoad(for: usage.snapshot, now: history.now)
         let percent = Self.headlinePercent(for: usage.snapshot)
         return VStack(alignment: .leading, spacing: 6) {
             // Tighter than the gap above the bar, because the words belong to the
             // figure: they say which quota it is.
             VStack(alignment: .leading, spacing: 2) {
-                Text(percent.map { "\($0)%" } ?? "—")
+                Text(Self.headlineFigureLabel(for: usage.snapshot, now: history.now))
                     .font(.system(size: 30, weight: .semibold))
                     .monospacedDigit()
-                Text(Self.headlineCaption)
+                    .foregroundStyle(Self.headlineFigureColor(for: usage.snapshot, now: history.now))
+                Text(load == nil ? Self.headlineCaption : Self.loadCaption)
                     .font(.system(size: Self.headlineCaptionSize))
                     .foregroundStyle(.secondary)
             }
-            QuotaBar(fraction: percent.map { Double($0) / 100 }, height: 8)
+            // Past 100 the bar is full and the figure carries the rest: a scale
+            // that stretched to fit 300% would make 100% — the boundary that
+            // matters — a mark a third of the way along.
+            //
+            // The clamp is the only thing this bar shares with the menu bar's,
+            // and calling them one rule was wrong: what fills this one is the
+            // *load*, what fills that one is the mean, and the mean cannot reach
+            // the clamp at all — it tops out at exactly 100. Both are right for
+            // their own surface, because each bar sits under its own number: up
+            // there the number is the mean, here it is whatever this headline is
+            // stating.
+            QuotaBar(fraction: load.map { $0.percent / 100 } ?? percent.map { Double($0) / 100 },
+                     height: Self.headlineBarHeight,
+                     tint: load.map(Self.loadColor(for:)))
         }
     }
 
@@ -1001,6 +1057,128 @@ struct UsagePopoverView: View {
         snapshot.fleetSevenDayPercent
     }
 
+    /// Past this age the load figure is not shown at all — on this surface or on
+    /// the menu bar.
+    ///
+    /// Two of its own polling intervals (`UsageStore.fleetLoadIntervalSeconds`),
+    /// built the same way `footerStaleSeconds` is built out of the fast halves':
+    /// a figure that is *meant* to be up to ten minutes old is not stale at ten
+    /// minutes, and past two intervals nothing is refreshing it at all.
+    ///
+    /// One constant because one rule: `headlineLoad` below is the whole of it and
+    /// `MenuBarIcon.load(for:now:)` is that function under another name.
+    static let loadStaleSeconds: TimeInterval = 2 * UsageStore.fleetLoadIntervalSeconds
+
+    /// The load this headline speaks for, or `nil` when it has to fall back to
+    /// the mean. The one rule both surfaces read.
+    ///
+    /// **A failure of its own half.** The figure is frozen then, and the error is
+    /// not one-directional, which is the whole of it. Measured with `/gw/usage`
+    /// and `/gw/sessions` answering while `/history` returned HTTP 500 — the menu
+    /// bar correctly dropped its colour and this line went on stating a red
+    /// `≥134%` over a full red bar, with nothing on screen saying the figure had
+    /// not been confirmed. A frozen 134% over a fleet that has since calmed down
+    /// is a false alarm; a frozen green 80% over one that has gone to 200% is
+    /// exactly the failure this metric was built to prevent. And the gateway's
+    /// own bodies make it likely rather than exotic: `/gw/usage` is about 3 KB
+    /// against 130–187 KB for one history (measured 2026-08-18), so a slow link
+    /// delivers the quota and loses the histories.
+    ///
+    /// **And an age, because the failure is missing exactly where it is needed.**
+    /// A `/gw/usage` outage skips the load block whole (`UsageStore.poll` needs a
+    /// freshly confirmed account list), so `fleetLoadFailure` stays `nil`, neither
+    /// stamp moves, and a guard on the blame alone presents a two-hour-old figure
+    /// as current under a caption that says "capacity" — with a red frame in the
+    /// menu bar that nothing can clear, since up there the whole load half is
+    /// this one answer. The quiet direction is the same failure mirrored: a
+    /// frozen green figure over a fleet that has since gone over capacity.
+    ///
+    /// Dating it in the footer instead was the other answer and it is not enough
+    /// on its own — it leaves the number itself stating the present, and it
+    /// cannot reach the menu bar, which has no room for a caveat. The stamp is
+    /// the arrival and never the attempt: the attempt moves on a failure and
+    /// would call a frozen figure fresh (`UsageSnapshot.fleetLoadCheckedAt`).
+    /// A figure with no arrival stamp at all is not shown either — every pass
+    /// that produces one stamps it in the same breath, so a load without a stamp
+    /// is a fixture, not a reading.
+    static func headlineLoad(for snapshot: UsageSnapshot, now: Date = Date()) -> FleetLoad? {
+        guard snapshot.fleetLoadFailure == nil,
+              let fetchedAt = snapshot.fleetLoadFetchedAt,
+              now.timeIntervalSince(fetchedAt) < loadStaleSeconds else { return nil }
+        return snapshot.fleetLoad
+    }
+
+    /// The string in the headline's top row: the load when there is one, the
+    /// mean when there is not, and a dash when there is neither.
+    ///
+    /// A named function for the same reason `headlinePercent` is one — the
+    /// fallback is a rule and a rule should be something a test can ask about.
+    /// The rendering cannot: the picture is measured by its lines of ink, and
+    /// `—` drawn where `100%` belongs is the same three lines of the same widths
+    /// (checked by mutation, 2026-08-17 — the paint test stayed green).
+    static func headlineFigureLabel(for snapshot: UsageSnapshot, now: Date = Date()) -> String {
+        if let load = headlineLoad(for: snapshot, now: now) { return loadLabel(for: load) }
+        return headlinePercent(for: snapshot).map { "\($0)%" } ?? "—"
+    }
+
+    /// The colour of that string: the load's own, or ink when the headline is
+    /// back to being the mean.
+    ///
+    /// Named rather than written into the view, and the reason is that it was
+    /// not: replacing the modifier with a flat `Color.primary` passed all 478
+    /// tests (2026-08-17), which made this the one visible quantity on the
+    /// surface with nothing holding it. The rule is here so a test can ask it,
+    /// and `UsagePopoverPaintTests` asks the rendering as well — a function
+    /// nobody calls would answer correctly for ever.
+    ///
+    /// The mean is deliberately not coloured. `QuotaBar.color(for:)` would give
+    /// it a scale of its own — green, orange, red at 60% and 85% of a window —
+    /// and that is a different quantity's thresholds on a number this line is
+    /// only standing in with; a red `92%` beside a green account row would be
+    /// two scales for one reading.
+    static func headlineFigureColor(for snapshot: UsageSnapshot, now: Date = Date()) -> Color {
+        headlineLoad(for: snapshot, now: now).map(loadColor(for:)) ?? .primary
+    }
+
+    /// The load as the headline writes it.
+    ///
+    /// `≥` when the figure is only a floor: an account sat at its ceiling while
+    /// it was measured, and the demand it turned away never entered its series
+    /// at all, so the truth is at least this (`FleetLoad.isLowerBound`). The
+    /// same symbol, for the same reason, that the panel's row and `--dump` put
+    /// in front of a token sum they know only a lower bound of (§2.7). What it
+    /// does *not* say is by how much — the requests an exhausted account refused
+    /// leave nothing behind to count.
+    static func loadLabel(for load: FleetLoad) -> String {
+        (load.isLowerBound ? "≥" : "") + "\(Int(load.percent.rounded()))%"
+    }
+
+    /// Green below capacity, red at or above it.
+    ///
+    /// The same two system colours `QuotaBar.color(for:)` fills an account's bar
+    /// with, on a boundary of its own — and not that function, because its 60
+    /// and 85 per cent are thresholds on a different quantity: how much of one
+    /// account's window is gone. There is no orange here because there is no
+    /// middle to paint. The week either holds what is being asked of it or it
+    /// does not, and `FleetLoad.isOverCapacity` is where that boundary is
+    /// written, once, for this surface and the menu bar both.
+    static func loadColor(for load: FleetLoad) -> Color {
+        loadColor(overCapacity: load.isOverCapacity)
+    }
+
+    /// The same two colours, asked for by the side of the boundary rather than
+    /// by a figure standing on it.
+    ///
+    /// Its own caller is the menu bar, which needs the over-capacity colour with
+    /// no load in hand at all: the number's attributed strings are laid out once
+    /// at type initialisation, long before any figure has arrived
+    /// (`MenuBarIcon.alertLabels`). Building a `FleetLoad` there purely to ask
+    /// this question would be a fixture in the middle of the drawing code, and
+    /// the boundary would still be read out of it by `isOverCapacity`.
+    static func loadColor(overCapacity: Bool) -> Color {
+        overCapacity ? .red : .green
+    }
+
     /// A utilisation as the popover writes it. A dash when the gateway had no
     /// reading — never a zero (§2.4: a confidently wrong figure is worse than a
     /// missing one).
@@ -1113,18 +1291,26 @@ struct UsagePopoverView: View {
 
     /// The reasons behind what this view draws, all of them at once.
     ///
-    /// The two halves are the two this popover shows: the quota poll and the
-    /// chart's own requests. `UsageSnapshot.failureText` is the wrong source
-    /// here — it also carries `/gw/sessions`, whose figures live in the panel's
-    /// rows and not one of which is on this surface. Shown instead of the
-    /// chart's own reason (and it was, being first), it left an empty chart with
-    /// its cause named nowhere while explaining a number the user cannot see.
+    /// The three halves are the three this popover shows: the quota poll, the
+    /// chart's own requests, and the histories behind the load figure.
+    /// `UsageSnapshot.failureText` is still the wrong source — it also carries
+    /// `/gw/sessions`, whose figures live in the panel's rows and not one of
+    /// which is on this surface. Shown instead of the chart's own reason (and it
+    /// was, being first), it left an empty chart with its cause named nowhere
+    /// while explaining a number the user cannot see.
     ///
-    /// Both when both failed, for the same reason: they are separate questions,
-    /// and the first non-empty of them is not an answer to the other.
-    static func failureText(quota: String?, history: String?) -> String? {
-        let both = [quota, history].compactMap { $0 }
-        return both.isEmpty ? nil : both.joined(separator: "; ")
+    /// Which is the argument for the load half rather than against it: the test
+    /// is whether the reader can see the figure the reason is about, and this
+    /// one's figure is the largest thing on the screen. Without it the headline
+    /// stated a load nobody had confirmed since the outage began, with the whole
+    /// footer silent about why.
+    ///
+    /// All of them when all of them failed, for the same reason: they are
+    /// separate questions, and the first non-empty of them is not an answer to
+    /// the others.
+    static func failureText(quota: String?, history: String?, load: String?) -> String? {
+        let all = [quota, history, load].compactMap { $0 }
+        return all.isEmpty ? nil : all.joined(separator: "; ")
     }
 
     /// Below this age the footer says nothing about it at all.
@@ -1150,6 +1336,18 @@ struct UsagePopoverView: View {
     /// after a tap on `30d` the stamp in hand belongs to the previous window's
     /// lines, which the plot is no longer drawing, and it says "Loading…" itself.
     ///
+    /// **The load figure is not dated here at all, and that is the same rule.** A
+    /// stamp counts only for something on screen, and the load is never on screen
+    /// while it is worth dating: `headlineLoad` takes it away the moment it is
+    /// older than `loadStaleSeconds` or its half is failing, and below that
+    /// ceiling it is the slow schedule running normally — a footer reporting
+    /// *that* would date the whole popover by the one half that is designed to be
+    /// minutes old. Folding the stamp in on a failure is what stood here, and it
+    /// dated a screen by a figure the same failure had already removed: with
+    /// `/history` down for two hours and everything else seconds old, the footer
+    /// said `as of 2h ago` under a popover where every drawn value was fresh, by
+    /// as much as the process had been running.
+    ///
     /// Silence has two reasons and they are different. Nothing fetched at all is
     /// not a matter of age — the sections above say "Loading…" or name the
     /// gateway's failure — so there is nothing to date. Fresh data is silence
@@ -1157,17 +1355,21 @@ struct UsagePopoverView: View {
     /// second one at any age: with the numbers standing still and the checks
     /// failing, how old they are is the only thing telling live figures from
     /// frozen ones, and `footerStaleSeconds` would hide it for the first two
-    /// minutes of every outage.
+    /// minutes of every outage. `loadFailed` is in that list although the load
+    /// carries no stamp here — what it dates is then the halves that *are* on
+    /// screen, and one of the three having gone quiet is the moment to say how
+    /// old the rest is.
     static func footerAgeLabel(quotaFetchedAt: Date?,
                                quotaFailed: Bool,
                                chartFetchedAt: Date?,
                                seriesPeriod: HistoryPeriod?,
                                period: HistoryPeriod,
                                chartFailed: Bool,
+                               loadFailed: Bool,
                                now: Date) -> String? {
         let chart = seriesPeriod == period ? chartFetchedAt : nil
         guard let oldest = [quotaFetchedAt, chart].compactMap({ $0 }).min() else { return nil }
-        guard quotaFailed || chartFailed
+        guard quotaFailed || chartFailed || loadFailed
                 || now.timeIntervalSince(oldest) >= footerStaleSeconds else { return nil }
         return "as of \(ago(oldest, now: now))"
     }
@@ -1202,6 +1404,11 @@ struct QuotaBar: View {
     /// 0…1, or `nil` when there is no reading — then the bar is only its track.
     let fraction: Double?
     var height: CGFloat = 6
+    /// The fill colour when the caller has a rule of its own. `nil` leaves it to
+    /// `color(for:)`, which answers "how full is this account's window" — the
+    /// headline's bar is filled by a different quantity and coloured on a
+    /// different boundary (`UsagePopoverView.loadColor`).
+    var tint: Color?
 
     var body: some View {
         GeometryReader { geometry in
@@ -1209,7 +1416,7 @@ struct QuotaBar: View {
                 Capsule().fill(Color.primary.opacity(0.12))
                 if let fraction {
                     Capsule()
-                        .fill(Self.color(for: fraction))
+                        .fill(tint ?? Self.color(for: fraction))
                         .frame(width: geometry.size.width * min(1, max(0, fraction)))
                 }
             }

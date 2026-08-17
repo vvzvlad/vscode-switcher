@@ -158,8 +158,8 @@ enum ConsoleDump {
         // the figures themselves cannot: a session's tokens are counted against
         // the project it was *started* in, not the ones it spent them in.
         print("Usage (claude_gw) — a session's spend counts against the project it was started in")
-        // Both halves in one line: each reason names its own endpoint already,
-        // and the dump acts on neither.
+        // Every half in one line: each reason names its own endpoint already,
+        // and the dump acts on none of them.
         if let failure = usage.failureText {
             print("  unavailable:      \(failure)")
         }
@@ -168,6 +168,7 @@ enum ConsoleDump {
                 + (usage.truncated ? ", truncated by the gateway's cap" : ""))
         }
         print("  fleet 7d:         \(percent(usage.fleetSevenDayMean))")
+        print("  weekly load:      \(loadLine(usage.fleetLoad))")
         let accounts = usage.accounts.map {
             "\($0.label) 5h \(percent($0.fiveHour?.utilization)) 7d \(percent($0.sevenDay?.utilization))"
         }
@@ -197,6 +198,22 @@ enum ConsoleDump {
 
     private static func percent(_ value: Double?) -> String {
         value.map { String(format: "%.0f%%", $0) } ?? "-"
+    }
+
+    /// The week's demand against the week's supply, with everything the figure
+    /// is qualified by written out beside it.
+    ///
+    /// `>=` rather than the panel's `≥`, the way the token columns are already
+    /// spelled here: this line goes to a terminal. The two numbers after it are
+    /// not decoration — a load is only as good as how many accounts stood behind
+    /// it and how deep the shallowest of their histories went, and a dump that
+    /// printed the percentage alone would hide an answer measured over one
+    /// account out of three.
+    private static func loadLine(_ load: FleetLoad?) -> String {
+        guard let load else { return "-" }
+        return (load.isLowerBound ? ">=" : "")
+            + String(format: "%.0f%% of capacity", load.percent)
+            + String(format: ", %d accounts over %.1f h", load.accounts, load.measuredHours)
     }
 
     /// One set of counters: the input-equivalent total, then the four raw

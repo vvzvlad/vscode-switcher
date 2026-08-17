@@ -1035,13 +1035,29 @@ final class UsageWiringTests: XCTestCase {
 /// runs.
 final class UsageStoreTests: XCTestCase {
 
-    /// Answers `/gw/usage` and `/gw/sessions` from the fixtures, or fails both.
+    /// Answers the three endpoints from the fixtures, or fails whichever of them
+    /// is handed `nil`.
+    ///
+    /// The history is checked for first, because its path (`/gw/usage/acc2/
+    /// history`) begins with the quota endpoint's and would otherwise be served
+    /// the quota body — which decodes into nothing and would look like a
+    /// malformed gateway rather than a test that misrouted itself.
     private func transport(usage: String? = UsageFixtures.usage,
                            sessions: String? = "{\"since\": 1786761516, \"sessions\": []}",
-                           status: Int = 200) -> UsageClient.Transport {
+                           history: String? = UsageStoreTests.risingHistory,
+                           status: Int = 200,
+                           log: RequestLog? = nil) -> UsageClient.Transport {
         { request in
             let path = request.url?.path ?? ""
-            let body = path.hasSuffix("/sessions") ? sessions : usage
+            log?.record(path)
+            let body: String?
+            if path.hasSuffix("/history") {
+                body = history
+            } else if path.hasSuffix("/sessions") {
+                body = sessions
+            } else {
+                body = usage
+            }
             guard let body else { throw UsageError.unreachable("nothing listening") }
             let url = request.url ?? Config.default.resolvedUsageBaseURL
             guard let response = HTTPURLResponse(url: url, statusCode: status,
@@ -1051,6 +1067,25 @@ final class UsageStoreTests: XCTestCase {
             return (Data(body.utf8), response)
         }
     }
+
+    /// One account's series as the gateway sends it, `readings` spread evenly
+    /// over `overHours`.
+    private static func historySeries(label: String = "acc2",
+                                      readings: [Double],
+                                      overHours: Double = 48) -> String {
+        let start = 1_786_700_000.0
+        let step = readings.count > 1 ? overHours * 3600 / Double(readings.count - 1) : 0
+        let points = readings.enumerated().map { index, value in
+            "{\"ts\": \(start + Double(index) * step), \"util_7d\": \(value)}"
+        }
+        return "{\"label\": \"\(label)\", \"since\": \(start), "
+            + "\"points\": [\(points.joined(separator: ","))]}"
+    }
+
+    /// The default history: acc2 burning 50 pp over 48 h, which is 175 pp of a
+    /// week against the 100 pp one account is worth — 175%, and not a lower
+    /// bound, so every field of the answer is distinguishable from a default.
+    private static let risingHistory = historySeries(readings: [0, 25, 50])
 
     private func client(_ transport: @escaping UsageClient.Transport) -> UsageClient {
         UsageClient(baseURL: Config.default.resolvedUsageBaseURL, transport: transport)
@@ -1173,6 +1208,253 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(semaphore.wait(timeout: .now() + 5), .success,
                        "the pass waited for a main thread that is standing right here")
     }
+
+    // MARK: - The load figure's own half
+
+    /// The same deadlock, one endpoint further on. `fleetLoadWindowSeconds` is
+    /// another `static let` on a `@MainActor` type read straight from the
+    /// `nonisolated async` pass, and losing `nonisolated` on it hops the rest of
+    /// the pass — two HTTP calls, the histories and the transcript walk — onto a
+    /// main thread that is standing on a semaphore right here.
+    ///
+    /// Only that one, and the difference is worth naming because the two
+    /// constants read alike. `fleetLoadIntervalSeconds` has no `async` reader —
+    /// `shouldFetchFleetLoad` is synchronous and `UsagePopoverView.loadStaleSeconds`
+    /// is a constant — so there is nowhere for the compiler to put a hop: taking
+    /// its `nonisolated` off (2026-08-17) leaves this test green and fails the
+    /// build instead, under the `-strict-concurrency=complete` the project has to
+    /// be clean under. What holds it is the compiler; what holds
+    /// `fleetLoadWindowSeconds` is the timeout below.
+    ///
+    /// The timeout is the whole test. Without it a regression is a run that
+    /// never comes back, which is what this looked like when it happened to
+    /// `windowSeconds`: `--dump` hung forever and had to be found by sampling
+    /// the stuck process.
+    ///
+    /// A previous snapshot with no stamp, so the half actually runs — a pass
+    /// that skipped it would never read either constant and would prove nothing.
+    func testTheFleetLoadPassDoesNotNeedTheMainThread() {
+        let client = client(transport())
+        let semaphore = DispatchSemaphore(value: 0)
+        let answer = PollAnswer()
+        Task.detached {
+            answer.value = await UsageStore.poll(client: client, previous: .empty)
+            semaphore.signal()
+        }
+        XCTAssertEqual(semaphore.wait(timeout: .now() + 5), .success,
+                       "the pass waited for a main thread that is standing right here")
+        XCTAssertNotNil(answer.value.fleetLoad,
+                        "the histories were never fetched, so neither constant was ever read")
+    }
+
+    /// The half runs on its own clock, and the reason is bandwidth: each pass is
+    /// one request per account of roughly 150 KB, and at the once-a-minute
+    /// cadence of the rest of the pass that is tens of megabytes an hour on a
+    /// laptop. The figure is an average over two days and cannot move fast
+    /// enough to be worth it.
+    ///
+    /// Driven to the state where the skip could fail to happen before it is
+    /// asked about: the first pass has to fetch, or "no second request" would be
+    /// true of a store that never asks at all.
+    func testTheHistoriesAreNotFetchedAgainWhileTheFigureIsYoung() async {
+        let log = RequestLog()
+        let client = client(transport(log: log))
+        let start = Date(timeIntervalSince1970: 1_786_800_000)
+
+        let first = await UsageStore.poll(client: client, previous: .empty, now: start)
+        XCTAssertEqual(log.historyRequests, 1, "the first pass did not fetch a history at all")
+        XCTAssertEqual(first.fleetLoadFetchedAt, start)
+        XCTAssertEqual(first.fleetLoadCheckedAt, start,
+                       "on a pass that answered, the attempt and the arrival are one moment")
+
+        let interval = UsageStore.fleetLoadIntervalSeconds
+        let soon = await UsageStore.poll(client: client, previous: first,
+                                         now: start.addingTimeInterval(interval - 1))
+        XCTAssertEqual(log.historyRequests, 1,
+                       "the histories were fetched again a second before the interval was up")
+        XCTAssertEqual(soon.fleetLoad, first.fleetLoad, "the figure changed on a pass that never asked")
+        XCTAssertEqual(soon.fleetLoadFetchedAt, start, "a skipped pass moved the stamp")
+
+        let later = await UsageStore.poll(client: client, previous: soon,
+                                          now: start.addingTimeInterval(interval))
+        XCTAssertEqual(log.historyRequests, 2, "the interval came round and nothing was fetched")
+        XCTAssertEqual(later.fleetLoadFetchedAt, start.addingTimeInterval(interval))
+    }
+
+    /// The points that reach `FleetCapacity` are the gateway's own.
+    ///
+    /// The other loader in this app, `UsageHistoryModel.load`, hands out
+    /// `withoutSourceLag(answer.points)` because the chart wants the sawtooth
+    /// gone, and routing this half through it would be an easy mistake to make
+    /// and a hard one to see. The fixture is the shape where it is not subtle: a
+    /// lone reading one point *below* the ceiling among ceiling readings is
+    /// exactly what that filter deletes, and it is the only thing keeping an
+    /// otherwise pinned account inside the measurement. Smoothed, the account is
+    /// refused as one that spent the whole window blocked, and it leaves with its
+    /// 100 pp of capacity as well as its demand.
+    ///
+    /// Both halves are asserted here, because "the answer is not nil" alone
+    /// would pass over a filter that had never been applied to anything: the
+    /// filter is run on the very same points to show it does change them, and the
+    /// smoothed series is then put through `FleetCapacity` to show what that
+    /// would have cost.
+    func testTheLoadIsBuiltFromRawPointsRatherThanSmoothedOnes() async throws {
+        let raw = Self.historySeries(readings: [100, 99, 100, 100, 100])
+        let series = try UsageFixtures.decode(raw, as: HistorySeries.self)
+        XCTAssertEqual(UsageHistoryModel.withoutSourceLag(series.points).map(\.sevenDay),
+                       [100, 100, 100, 100, 100],
+                       "the fixture is not a series the filter changes, so it proves nothing")
+
+        let accounts = try UsageFixtures.decode(UsageFixtures.usage, as: UsageReport.self).accounts
+        let smoothed = try UsageFixtures.decode(Self.historySeries(readings: [100, 100, 100, 100, 100]),
+                                                as: HistorySeries.self)
+        XCTAssertNil(FleetCapacity.load(histories: ["acc2": smoothed], accounts: accounts),
+                     "smoothed, this account is refused — which is the whole cost being avoided")
+
+        let snapshot = await UsageStore.poll(client: client(transport(history: raw)), previous: .empty)
+        let load = try XCTUnwrap(snapshot.fleetLoad, """
+            the pass answered nothing for an account that spent one sample below its ceiling: \
+            the points were smoothed on the way in and the account went out of the fraction \
+            with its capacity
+            """)
+        XCTAssertEqual(load.accounts, 1)
+        XCTAssertTrue(load.isLowerBound, "it sat at 100 for four of five samples")
+    }
+
+    /// A history that does not answer is ordinary, and it is one half of three.
+    /// The previous figure stays where it was **and so does its age** — that
+    /// stamp is what the popover's footer dates the screen by, and moving it
+    /// along with a failed attempt is how a frozen figure gets called fresh. The
+    /// blame names its own endpoint without touching the two that answered.
+    func testAFailedHistoryHalfKeepsThePreviousFigureAndBlamesItsOwnEndpoint() async {
+        let earlier = Date(timeIntervalSince1970: 1_786_700_000)
+        var previous = UsageSnapshot.empty
+        previous.fleetLoad = FleetLoad(percent: 126, isLowerBound: true, accounts: 3, measuredHours: 48)
+        previous.fleetLoadFetchedAt = earlier
+        previous.fleetLoadCheckedAt = earlier
+
+        let now = Date()
+        let snapshot = await UsageStore.poll(client: client(transport(history: nil)),
+                                             previous: previous, now: now)
+        XCTAssertEqual(snapshot.fleetLoad, previous.fleetLoad, "the figure blinked to blank")
+        XCTAssertEqual(snapshot.fleetLoadFetchedAt, earlier,
+                       "the age of the figure moved to an attempt that brought nothing back")
+        XCTAssertEqual(snapshot.fleetLoadFailure?.contains("history"), true)
+        XCTAssertNil(snapshot.quotaFailure, "the quota endpoint answered and is blamed anyway")
+        XCTAssertNil(snapshot.sessionsFailure)
+        XCTAssertEqual(snapshot.quotaFetchedAt, now)
+    }
+
+    /// And the attempt is stamped anyway, so the half that keeps failing keeps
+    /// failing on its own ten-minute cadence rather than on the once-a-minute
+    /// one of the rest of the pass.
+    ///
+    /// The cost of the other behaviour is measured rather than feared: one round
+    /// over the live fleet is 481 KB (2026-08-18, three accounts, a 48 h
+    /// window), which is 2.9 MB/h at ten minutes — and every minute, carrying
+    /// every account but the one that failed, some 19 MB/h, the figure
+    /// `fleetLoadIntervalSeconds` exists to avoid.
+    /// Affordable now because the screen says so: the figure keeps the age it
+    /// arrived under and the footer prints both that and the reason.
+    ///
+    /// Driven to the state where the skip could fail to happen: the failing pass
+    /// has to *make* its request first, or "no second request" would be true of
+    /// a pass that never asked at all.
+    func testAFailedHistoryHalfWaitsOutItsOwnIntervalBeforeRetrying() async {
+        let log = RequestLog()
+        let start = Date(timeIntervalSince1970: 1_786_800_000)
+        let broken = client(transport(history: nil, log: log))
+
+        let failed = await UsageStore.poll(client: broken, previous: .empty, now: start)
+        XCTAssertEqual(log.historyRequests, 1, "the failing pass never asked, so it skipped nothing")
+        XCTAssertNotNil(failed.fleetLoadFailure)
+        XCTAssertNil(failed.fleetLoadFetchedAt, "nothing arrived, so nothing may carry an age")
+
+        let minuteLater = await UsageStore.poll(client: broken, previous: failed,
+                                                now: start.addingTimeInterval(60))
+        XCTAssertEqual(log.historyRequests, 1,
+                       "a failed round was retried a minute later, which is the 19 MB/h on a "
+                       + "tether that the ten-minute cadence exists to avoid")
+
+        let interval = UsageStore.fleetLoadIntervalSeconds
+        _ = await UsageStore.poll(client: broken, previous: minuteLater,
+                                  now: start.addingTimeInterval(interval))
+        XCTAssertEqual(log.historyRequests, 2, "the interval came round and the retry never happened")
+    }
+
+    /// The histories are not asked for at all when the quota half did not
+    /// answer, and that is not thrift: the fleet's membership and each account's
+    /// window boundary both come from that answer, and `FleetCapacity` reads a
+    /// history only under a label the fleet has.
+    ///
+    /// The previous snapshot has to carry accounts, or this cannot come out
+    /// wrong. Started from `.empty` the labels are an empty list whatever the
+    /// guard does, so no request is made for want of anything to request —
+    /// checked by removing the guard, where the test stayed green. With a
+    /// remembered account in hand the ungated pass fetches its history, which is
+    /// the mistake being described: measuring a fleet against a membership the
+    /// gateway has stopped confirming.
+    func testNoHistoryIsFetchedWhenTheQuotaHalfDidNotAnswer() async throws {
+        var previous = UsageSnapshot.empty
+        previous.accounts = try UsageFixtures.decode(UsageFixtures.usage, as: UsageReport.self).accounts
+        XCTAssertFalse(previous.accounts.isEmpty, "the fixture remembers no account to be tempted by")
+
+        let log = RequestLog()
+        let snapshot = await UsageStore.poll(client: client(transport(usage: nil, log: log)),
+                                             previous: previous)
+        XCTAssertEqual(log.historyRequests, 0,
+                       "a history was fetched for a fleet whose membership nobody just confirmed")
+        XCTAssertNil(snapshot.fleetLoad)
+        XCTAssertNil(snapshot.fleetLoadFailure, "the history half is blamed for the quota half's failure")
+    }
+
+    /// A `nil` from `FleetCapacity` is an arrival, not a failure: it is the
+    /// answer "this fleet supports no figure", which happens when no account has
+    /// six hours of history and when every one of them is pinned at its ceiling.
+    /// So it is stamped, it clears the blame, and it replaces whatever was there
+    /// — holding the previous number over it would draw a load for a fleet that
+    /// stopped having one.
+    func testAFleetThatSupportsNoFigureReplacesTheOneBeforeIt() async {
+        var previous = UsageSnapshot.empty
+        previous.fleetLoad = FleetLoad(percent: 126, isLowerBound: false, accounts: 3, measuredHours: 48)
+        previous.fleetLoadFetchedAt = Date(timeIntervalSince1970: 1_786_700_000)
+
+        let now = Date()
+        // Four hours of history, under the six the metric will extrapolate from.
+        let brief = Self.historySeries(readings: [0, 50], overHours: 4)
+        let snapshot = await UsageStore.poll(client: client(transport(history: brief)),
+                                             previous: previous, now: now)
+        XCTAssertNil(snapshot.fleetLoad, "a figure nobody can measure was kept from the pass before")
+        XCTAssertEqual(snapshot.fleetLoadFetchedAt, now)
+        XCTAssertNil(snapshot.fleetLoadFailure, "nothing failed: the gateway answered and said so")
+    }
+}
+
+/// What a transport was asked for, across the threads a pass runs on.
+///
+/// `@unchecked Sendable`: every access is under the lock.
+private final class RequestLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var paths: [String] = []
+
+    func record(_ path: String) {
+        lock.lock()
+        paths.append(path)
+        lock.unlock()
+    }
+
+    var historyRequests: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return paths.filter { $0.hasSuffix("/history") }.count
+    }
+}
+
+/// Carries one pass's answer out of a detached task to the test that waited on
+/// it. `@unchecked Sendable` on the same terms as `UsageStore.PollResult`:
+/// written once inside the task and read only after the semaphore was signalled.
+private final class PollAnswer: @unchecked Sendable {
+    var value: UsageSnapshot = .empty
 }
 
 /// The one new setting.

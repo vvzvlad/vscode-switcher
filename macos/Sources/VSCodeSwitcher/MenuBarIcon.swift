@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// The status item's picture: one bar for the fleet's weekly quota, and that
 /// quota as a number under it.
@@ -15,12 +16,47 @@ import AppKit
 /// this item exists. Its 15 points went back to the menu bar.
 ///
 /// Drawn rather than composed out of views, because a status item takes an
-/// `NSImage` and nothing else — and because `isTemplate` is the whole colour
-/// policy here. The system tints a template picture for the current menu bar
-/// appearance (light, dark, "reduce transparency", a coloured desktop showing
-/// through), and a colour of our own would be fighting it every time. The fill
-/// colour that says how bad 90% is lives in the popover, where there is room to
-/// read it.
+/// `NSImage` and nothing else.
+///
+/// **The picture is not a template, and owning the colour is the point.** A
+/// template picture is tinted by the system for whatever the menu bar currently
+/// is (light, dark, "reduce transparency", a coloured desktop showing through),
+/// and a colour of our own would be fighting that every time — which is why the
+/// colour used to live in the popover alone, where there is room to read it.
+/// The owner gave that up deliberately: the bar's fill is green while the week
+/// holds the demand being put on it and red once it does not, and a glance at
+/// the menu bar without opening anything is the whole reason for having the
+/// figure at all.
+///
+/// What the fill is coloured by is not the number under it. The number is the
+/// quota already spent, 0…100, which reaches the boundary only at its own top;
+/// the colour is `FleetLoad`, demand against supply, which crosses 100 in
+/// ordinary use and is the thing worth a warning. They are two readings of one
+/// week and the picture carries both.
+///
+/// **Past capacity the frame and the number are red as well, because the fill
+/// may not be there to be red.** The fill's *length* is the mean, and a mean
+/// near zero leaves nothing to colour: the fill's own ink, counted off the
+/// bitmap at scale 4 (2026-08-18), is 0.00 pt² at a mean of 0 and 2.12 pt² at 3%
+/// — against 34.50 pt² at 50%. At 1% there is no fill at all, the shape being
+/// narrower than `minimumVisibleFillWidth`.
+/// That is not an exotic state — it is what the fleet looks like just after the
+/// windows turn over, which is exactly when a 300% burn is worth knowing, and
+/// the one glance this item exists for showed an empty outline and no warning
+/// at all. So the colour goes on what is always drawn. A minimum fill width was
+/// the other way to fix it and is refused: a capsule drawn at a mean of 0 is a
+/// claim about quota that has not been spent, and the whole point of the dashed
+/// bar above is that this file does not draw quantities it does not have.
+/// Below capacity the frame and the number stay `labelColor` — the loud state
+/// has to be the one that means something, and a picture that changed colour on
+/// every reading would be saying nothing with all of them.
+///
+/// The price of leaving `isTemplate` behind is the work the system used to do:
+/// nothing here may be drawn in a fixed colour, because black ink vanishes on a
+/// dark menu bar. Every colour is dynamic and everything is drawn inside
+/// `performAsCurrentDrawingAppearance`, and since the appearance is now an
+/// input the picture has to be redrawn when *it* changes and not only when the
+/// figure does — which is `AppDelegate.observeAppearance`.
 ///
 /// One bar, not two: the user asked for the fleet's seven-day mean and nothing
 /// else in the menu bar. The five-hour windows and the per-account figures are
@@ -87,6 +123,40 @@ enum MenuBarIcon {
     /// edge, which is the way this picture is drawn (`lockFocusFlipped(false)`).
     static var numberRows: ClosedRange<CGFloat> { 0...numberHeight }
 
+    /// Inside the frame: where the fill is allowed, one and a half points in
+    /// from the bar on every side so the stroke is not painted over.
+    static var barFillBounds: NSRect { barRect.insetBy(dx: 1.5, dy: 1.5) }
+
+    /// How wide the fill comes out for a figure — nought when there is none.
+    ///
+    /// One arithmetic, asked by the drawing and by `showsLoad`, because the two
+    /// have to agree about whether there is a fill at all: the description reads
+    /// the picture out to somebody who cannot see it, and it may only name what
+    /// the picture drew.
+    static func fillWidth(forPercent percent: Int?) -> CGFloat {
+        guard let percent else { return 0 }
+        return barFillBounds.width * CGFloat(min(100, max(0, percent))) / 100
+    }
+
+    /// The narrowest fill worth drawing: a quarter of a point, which is half a
+    /// pixel on a 2x display — narrower than that the shape cannot cover a device
+    /// pixel and what lands on screen is its own antialiasing.
+    ///
+    /// Where the line goes is measured and not reasoned, off the bitmap at
+    /// scale 4 with the threshold taken off (2026-08-18, the fill's own coloured
+    /// ink inside the bar): 0.00 pt² at a mean of 0, **0.25 pt² at 1%** — a shape
+    /// 0.24 pt across — and **1.88 pt² at 2%**, at 0.48 pt. Sevenfold between two
+    /// neighbouring figures is where a smudge becomes a mark, and the threshold
+    /// goes in that gap; for scale, 3% is 2.12 pt² and 50% is 34.50. One figure
+    /// is refused by it and no more, which is the point — a wider threshold would
+    /// be throwing away readings that can be seen.
+    ///
+    /// On the width and not on the figure, because the width is what is seen: the
+    /// bar is 24 pt wide inside its frame today, so a percentage point is 0.24 pt
+    /// — and it is a different number of points the day the picture is a
+    /// different size.
+    static let minimumVisibleFillWidth: CGFloat = 0.25
+
     // MARK: - Labels
 
     /// Two points smaller than the row beside it used to be, and that is what
@@ -94,25 +164,45 @@ enum MenuBarIcon {
     /// and the width of the picture is now the width of this string.
     static let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
 
-    private static let attributes: [NSAttributedString.Key: Any] = [
-        .font: font,
-        .foregroundColor: NSColor.black
-    ]
+    /// `labelColor` and not `black`: it is a dynamic colour, so the very same
+    /// laid-out strings below come out dark on a light menu bar and light on a
+    /// dark one, resolved at the moment they are drawn against whatever
+    /// appearance `image` made current. Black ink was invisible on a dark menu
+    /// bar the instant the picture stopped being a template.
+    ///
+    /// The over-capacity colour is dynamic in the same way and for the same
+    /// reason: it is a system colour reached through the popover, so it is one
+    /// red on both surfaces and it follows the appearance the picture is drawn
+    /// against.
+    private static let attributes: [NSAttributedString.Key: Any] = attributes(in: .labelColor)
 
-    /// Every percentage the icon can ever draw, laid out once.
+    private static func attributes(in color: NSColor) -> [NSAttributedString.Key: Any] {
+        [.font: font, .foregroundColor: color]
+    }
+
+    /// Every percentage the icon can ever draw, laid out once — twice over,
+    /// because the number has two colours (see the note at the top of the file).
     ///
     /// The icon is redrawn whenever the figure changes, and laying a string out
     /// is the expensive half of drawing one. An array rather than a dictionary
     /// keyed by the same integer: the index is clamped into range before the
     /// lookup, so there is no absent case to invent an answer for.
-    private static let labels: [NSAttributedString] = (0...100).map {
-        NSAttributedString(string: "\($0)%", attributes: attributes)
+    private static let labels: [NSAttributedString] = labels(in: .labelColor)
+    private static let alertLabels: [NSAttributedString] =
+        labels(in: NSColor(UsagePopoverView.loadColor(overCapacity: true)))
+
+    private static func labels(in color: NSColor) -> [NSAttributedString] {
+        (0...100).map { NSAttributedString(string: "\($0)%", attributes: attributes(in: color)) }
     }
 
     /// The label for a percentage, clamped into the range the table covers.
     /// Above 100 the quota is spent, and `100%` says exactly that.
-    static func label(forPercent value: Int) -> NSAttributedString {
-        labels[min(100, max(0, value))]
+    ///
+    /// `overCapacity` is about the *load*, which is a different quantity from
+    /// the one being printed: the number is the mean already spent and it can be
+    /// anything at all while the week is being asked for more than it holds.
+    static func label(forPercent value: Int, overCapacity: Bool = false) -> NSAttributedString {
+        (overCapacity ? alertLabels : labels)[min(100, max(0, value))]
     }
 
     // MARK: - Value
@@ -143,7 +233,136 @@ enum MenuBarIcon {
         return snapshot.fleetSevenDayPercent
     }
 
+    /// The load the bar is coloured by, or `nil` for a bar with nothing to say
+    /// about it.
+    ///
+    /// One rule for both surfaces, asked of the popover rather than written out
+    /// again — the same arrangement as `fillColor` below and for the same
+    /// reason: two surfaces deciding separately when a figure has stopped
+    /// standing for now would drift the day one of them was tuned. What the rule
+    /// is, and why it has an age in it, is spelled out over
+    /// `UsagePopoverView.headlineLoad`.
+    ///
+    /// The age half is not ceremony up here, and the argument that used to stand
+    /// in this comment — "the figure is an average over two days, refreshed
+    /// every ten minutes on purpose, and ten minutes cannot move it enough to
+    /// matter" — assumed the refreshing. A `/gw/usage` outage skips the whole
+    /// load block (`UsageStore.poll`), so nothing is refreshed at all, no
+    /// `fleetLoadFailure` is set, and a guard on the failure alone left this
+    /// picture with a red frame nothing could clear over a figure last confirmed
+    /// hours ago. Up here there is no room to write "as of a while ago", so the
+    /// colour has to go rather than get a caveat.
+    static func load(for snapshot: UsageSnapshot, now: Date = Date()) -> FleetLoad? {
+        UsagePopoverView.headlineLoad(for: snapshot, now: now)
+    }
+
+    /// Everything one picture is drawn from.
+    ///
+    /// `Equatable` so its owner can go on redrawing only when the reason to
+    /// redraw really changed — a poll lands once a minute and mostly says the
+    /// same thing twice. Two fields rather than one now, and both belong: the
+    /// figure sets the number and the fill's length, the load sets the fill's
+    /// colour.
+    struct Reading: Equatable {
+        var percent: Int?
+        var load: FleetLoad?
+    }
+
+    /// What one poll makes of the picture, with each half's own freshness rule
+    /// already applied.
+    ///
+    /// The clock is an argument because one of those rules is an age
+    /// (`load(for:now:)`): with it the ceiling can be asked about without
+    /// waiting twenty minutes of real time for one.
+    static func reading(for snapshot: UsageSnapshot, now: Date = Date()) -> Reading {
+        Reading(percent: percent(for: snapshot), load: load(for: snapshot, now: now))
+    }
+
+    /// The bar's fill colour.
+    ///
+    /// Asked of the popover rather than written out again, and that is the whole
+    /// of "matching the popover": the two surfaces cannot drift into two greens
+    /// or two boundaries, because there is one of each and this is a conversion
+    /// of it. `labelColor` when there is no load — a bar drawn in a colour that
+    /// meant something would be answering a question nobody could answer.
+    static func fillColor(for load: FleetLoad?) -> NSColor {
+        guard let load else { return .labelColor }
+        return NSColor(UsagePopoverView.loadColor(for: load))
+    }
+
+    /// What everything that is not the fill is drawn in: the bar's frame and the
+    /// number.
+    ///
+    /// Ink, until the week stops holding the demand — then the same red the fill
+    /// would be. Which is the whole of the fix at the top of this file: the fill
+    /// is only as big as the mean, and at a mean near zero there is no fill to
+    /// carry a warning. Below capacity this is `labelColor` and the picture
+    /// looks exactly as it did.
+    static func inkColor(for load: FleetLoad?) -> NSColor {
+        guard let load, load.isOverCapacity else { return .labelColor }
+        return NSColor(UsagePopoverView.loadColor(for: load))
+    }
+
+    /// Whether this picture says anything about the load at all.
+    ///
+    /// The load reaches the picture as colour and as nothing else, so there are
+    /// two ways for it to reach nobody. A fill too narrow to see is not drawn at
+    /// all (`drawBar` returns before it), and neither is one with no reading
+    /// behind it — and below capacity everything else in the picture is ink, so
+    /// at a mean of nought, or with the quota half failed, what is on screen is
+    /// the picture an unmeasured fleet gets. Over capacity the frame carries it
+    /// whatever the mean says, which is what the tinting is for.
+    ///
+    /// It asks `fillWidth` and not the figure, and the difference is a percentage
+    /// point wide: `(reading.percent ?? 0) > 0` stood here, which is `drawBar`'s
+    /// old exit condition rather than a question about what can be seen. At 1%
+    /// the fill is 0.24 pt across — less than half a pixel on a 2x display and
+    /// 0.25 pt² of ink against 34.50 at 50% — and VoiceOver was told the picture
+    /// carried a load it does not carry.
+    ///
+    /// Asked by `describe`, and that is the point of naming it: the description
+    /// is the picture read out to somebody who cannot see it, and a description
+    /// that named a figure the picture is not carrying would be the reverse of
+    /// what it is for. Measured with the gateway down and a stored load of 60%:
+    /// the picture drew no colour anywhere and VoiceOver said "Weekly quota: no
+    /// data, 60% of weekly capacity across accounts".
+    static func showsLoad(_ reading: Reading) -> Bool {
+        guard let load = reading.load else { return false }
+        return load.isOverCapacity || fillWidth(forPercent: reading.percent) >= minimumVisibleFillWidth
+    }
+
     // MARK: - Drawing
+
+    /// The appearance this picture has to be resolved against: the status item
+    /// button's own, and the application's only while there is no button to ask.
+    ///
+    /// They are two different appearances, and the menu bar follows the button's
+    /// one. Measured 2026-08-18 on this machine, a status item made in a scratch
+    /// process:
+    ///
+    ///     system NSApp.effectiveAppearance : NSAppearanceNameDarkAqua
+    ///     status button effectiveAppearance: NSAppearanceNameVibrantDark
+    ///     --- after forcing NSApp.appearance = aqua ---
+    ///     NSApp.effectiveAppearance : NSAppearanceNameAqua
+    ///     status button effectiveAppearance: NSAppearanceNameVibrantDark
+    ///
+    /// The second half is the failure in miniature: `labelColor` resolves to
+    /// black in `aqua` (measured `r=0 g=0 b=0`), the picture is rasterised
+    /// through `lockFocus` and holds it, and black ink lands on a dark menu bar
+    /// — the very thing the note at the top of this file promises to prevent.
+    /// In life the two come apart because the menu bar follows the *wallpaper*:
+    /// a light system theme over a dark desktop picture gives a dark menu bar
+    /// while `NSApp.effectiveAppearance` says `aqua`. And they differ in their
+    /// colours even when they agree in kind — `labelColor` is alpha 0.898 in
+    /// `NSAppearanceNameVibrantDark` against 0.847 in `NSAppearanceNameDarkAqua`
+    /// (same measurement).
+    ///
+    /// `NSView?` rather than the button's own type, because the rule is about
+    /// having an appearance of one's own and a test can then hold it with any
+    /// view.
+    static func appearance(ofButton button: NSView?, system: NSAppearance) -> NSAppearance {
+        button?.effectiveAppearance ?? system
+    }
 
     /// The status item image for one figure. `nil` draws the bar empty and
     /// dashed, with the number's column left blank.
@@ -156,27 +375,53 @@ enum MenuBarIcon {
     /// eager rasterisation at the deepest screen's scale is one picture on one
     /// known thread, and the icon is redrawn on every change of the figure
     /// anyway.
-    static func image(forPercent percent: Int?) -> NSImage {
+    /// `nil` draws against the application's own appearance, which is the
+    /// second-best answer and only a fallback — the picture belongs to the
+    /// status item's button and the button has an appearance of its own
+    /// (`appearance(ofButton:system:)`). A parameter at all so a test can ask
+    /// for either without changing the machine it runs on — and the fallback is
+    /// resolved *inside* this function rather than as a default value, because a
+    /// default is evaluated at the call site and `NSApplication.shared` is
+    /// main-actor isolated: written there it would put the isolation on every
+    /// caller.
+    static func image(for reading: Reading, appearance: NSAppearance? = nil) -> NSImage {
+        let appearance = appearance ?? NSApplication.shared.effectiveAppearance
         let size = NSSize(width: width, height: height)
         let image = NSImage(size: size)
         image.lockFocusFlipped(false)
-        NSGraphicsContext.current?.imageInterpolation = .high
-        draw(percent: percent)
+        // Every colour in `draw` is dynamic, and a dynamic colour resolves
+        // against `NSAppearance.current` at the moment it is used — not when it
+        // was written down, which for the number's attributes was at type
+        // initialisation. Without this the picture takes whatever appearance
+        // happened to be current on this thread.
+        appearance.performAsCurrentDrawingAppearance {
+            NSGraphicsContext.current?.imageInterpolation = .high
+            draw(reading)
+        }
         image.unlockFocus()
-        // Both halves matter. The `Template` suffix on a bundled file is what
-        // usually sets this; an image built here has no name to carry it, and a
-        // status item picture that is not a template is a flat black blob on a
-        // dark menu bar.
-        image.isTemplate = true
-        image.accessibilityDescription = percent.map { "Weekly quota: \($0)%" }
-            ?? "Weekly quota: no data"
+        // Not a template any more: the fill's colour is the reading (see the
+        // note at the top of this file), and the system would tint it away.
+        image.isTemplate = false
+        image.accessibilityDescription = describe(reading)
         return image
     }
 
-    private static func draw(percent: Int?) {
-        drawBar(percent: percent)
-        guard let percent else { return }
-        let label = label(forPercent: percent)
+    /// What the picture says, for a reader who cannot see it. The load is in
+    /// here because in the picture it is carried by colour alone, and colour
+    /// alone reaches nobody using VoiceOver — and it is in here on exactly the
+    /// terms the picture carries it on (`showsLoad`), because the two have to
+    /// say the same thing.
+    static func describe(_ reading: Reading) -> String {
+        let quota = reading.percent.map { "Weekly quota: \($0)%" } ?? "Weekly quota: no data"
+        guard let load = reading.load, showsLoad(reading) else { return quota }
+        return quota + ", " + UsagePopoverView.loadLabel(for: load) + " " + UsagePopoverView.loadCaption
+    }
+
+    private static func draw(_ reading: Reading) {
+        drawBar(reading)
+        guard let percent = reading.percent else { return }
+        let label = label(forPercent: percent,
+                          overCapacity: reading.load?.isOverCapacity == true)
         let size = label.size()
         // Flush with the right edge of the picture, which is the right edge of
         // the column: the digits grow leftwards and the `%` never moves. And on
@@ -187,21 +432,28 @@ enum MenuBarIcon {
     /// The bar. Filled in proportion when there is a reading, empty and dashed
     /// when there is not — a shape that reads as "nothing measured" rather than
     /// as a quota nobody has touched.
-    private static func drawBar(percent: Int?) {
+    private static func drawBar(_ reading: Reading) {
         let rect = barRect
         let radius = barHeight / 2
         let outline = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
                                    xRadius: radius, yRadius: radius)
         outline.lineWidth = 1
-        if percent == nil { outline.setLineDash([2, 2], count: 2, phase: 0) }
-        NSColor.black.withAlphaComponent(0.55).setStroke()
+        if reading.percent == nil { outline.setLineDash([2, 2], count: 2, phase: 0) }
+        // Ink below capacity: the frame is the shape of the reading rather than
+        // the reading, and a green outline around an empty bar would be saying
+        // something about a fleet nobody measured. Above it the frame is the
+        // only thing certain to be drawn, so it is where the warning has to go.
+        inkColor(for: reading.load).withAlphaComponent(0.55).setStroke()
         outline.stroke()
 
-        guard let percent else { return }
-        let inner = rect.insetBy(dx: 1.5, dy: 1.5)
-        let filled = inner.width * CGFloat(min(100, max(0, percent))) / 100
-        guard filled > 0 else { return }
-        NSColor.black.setFill()
+        let inner = barFillBounds
+        let filled = fillWidth(forPercent: reading.percent)
+        // Narrower than a pixel is not a smaller reading, it is a mark nobody
+        // can see — and `showsLoad` asks the same question of the same
+        // arithmetic, so the description never names a colour that was not put
+        // on screen.
+        guard filled >= minimumVisibleFillWidth else { return }
+        fillColor(for: reading.load).setFill()
         NSBezierPath(roundedRect: NSRect(x: inner.minX, y: inner.minY,
                                          width: filled, height: inner.height),
                      xRadius: inner.height / 2, yRadius: inner.height / 2).fill()
