@@ -24,8 +24,18 @@ struct Config: Sendable, Equatable {
     /// fraction defines the edge strip that opens it, so the trigger zone always
     /// lines up with where the panel will appear.
     var panelHeightFraction: Double
-    /// A background subagent counts as active while its transcript was touched
-    /// within this many seconds.
+    /// A background subagent counts as active while its last record does not
+    /// say it stopped and its transcript was touched within this many seconds.
+    ///
+    /// The age half only guards the tails where the stop is not visible in the
+    /// shape: a subagent that ended normally is caught at once by its final
+    /// record (`end_turn` or `stop_sequence`), and one the user cut short by
+    /// the interrupt marker, whatever this is set to. Silence, on the other
+    /// hand, is not evidence of a stopped subagent — a thinking model writes
+    /// nothing for minutes — so a tight threshold costs much and buys little:
+    /// over a week of subagent transcripts, the working time a subagent spent
+    /// invisible to the panel was 17.4% of the corpus at 90 s against 2.3% at
+    /// 600 s, and the trade it buys is counted in hours in SPEC §3.1.
     var subagentActiveSeconds: Double
     /// How much of a session transcript is read from the end. Transcripts reach
     /// tens of megabytes, so they are never read in full.
@@ -48,7 +58,7 @@ struct Config: Sendable, Equatable {
         dwellMilliseconds: 300,
         panelWidth: 380,
         panelHeightFraction: 0.7,
-        subagentActiveSeconds: 90,
+        subagentActiveSeconds: 600,
         transcriptTailBytes: 512 * 1024,
         editorBundleID: "com.microsoft.VSCode",
         usageBaseURL: "http://127.0.0.1:8788"

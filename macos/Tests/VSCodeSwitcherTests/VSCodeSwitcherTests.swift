@@ -3113,6 +3113,174 @@ final class FileDerivedCacheTests: XCTestCase {
     }
 }
 
+/// The two halves of "this subagent is still working" (SPEC §3.1).
+///
+/// The threshold is always passed in rather than taken from `Config.default`:
+/// these are about the mechanism, not about the number, and the number moves —
+/// it went from 90 s to 600 s once already.
+final class SubagentLivenessTests: XCTestCase {
+
+    /// The invariant everything else rests on: a subagent that ended normally
+    /// goes quiet on its final record, at any threshold. Raising
+    /// `subagentActiveSeconds` is only safe because the clock never gets asked
+    /// about a subagent that finished.
+    func testAFinishedSubagentIsInactiveWhileItsTranscriptIsStillFresh() throws {
+        let root = try makeTemporaryDirectory()
+        try writeTranscript(assistantTail(stopReason: "end_turn"), age: 0, in: root)
+
+        for threshold in [300.0, 86_400.0] {
+            XCTAssertEqual(subagents(in: root, activeSeconds: threshold).map(\.isActive),
+                           [false],
+                           "threshold \(threshold)")
+        }
+    }
+
+    /// `stop_sequence` ends a turn the same way `end_turn` does (§2.4), so it
+    /// has to gate the same way. Named only in the last record, which is why
+    /// this is a separate transcript rather than an extra assertion.
+    func testAStopSequenceEndsTheSubagentToo() throws {
+        let root = try makeTemporaryDirectory()
+        try writeTranscript(assistantTail(stopReason: "stop_sequence"), age: 0, in: root)
+
+        XCTAssertEqual(subagents(in: root, activeSeconds: 300).map(\.isActive), [false])
+    }
+
+    /// The other way a subagent stops: the user cut it short — 166 of the 2776
+    /// tails on this machine end on the marker (SPEC §3.1). Something does get
+    /// appended after a marker now and then, and then that record becomes the
+    /// tail and is read instead; it is how often that happens that separates a
+    /// subagent from the main chain — 19 markers of 185 against 789 of 793 —
+    /// which is why §2.4 needs a rule for it and this one line is enough here.
+    func testAnInterruptedSubagentIsInactiveAtAnyThreshold() throws {
+        let root = try makeTemporaryDirectory()
+        try writeTranscript(Self.interrupted, age: 0, in: root)
+
+        for threshold in [300.0, 86_400.0] {
+            XCTAssertEqual(subagents(in: root, activeSeconds: threshold).map(\.isActive),
+                           [false],
+                           "threshold \(threshold)")
+        }
+    }
+
+    /// The price of the fix, written down rather than left implicit: an answer
+    /// that was delivered but carries `stop_reason: null` is *not* read as an
+    /// ending, so its row keeps spinning until the clock runs out — 243 of the
+    /// same 2776 tails. It stays that way on purpose: across the corpus read
+    /// whole, the identical shape sits mid-turn 22204 times against 245 as a
+    /// last record, so calling it an ending would blank the indicator over a
+    /// subagent that is still working (SPEC §3.1).
+    ///
+    /// Two things hang on this row staying `true`: the `as? String` in
+    /// `uncachedIsFinished` — JSON `null` parses to `NSNull`, not to a string —
+    /// and the whitelist, in the form the blacklist is naturally written in.
+    /// `stopReason != "tool_use"` over the *optional* needs no `guard let` and
+    /// so drops it; that version passes every other test in this class and
+    /// fails this one. The version that keeps the `guard let` is a different
+    /// matter — see the test below.
+    func testADeliveredAnswerWithoutAStopReasonKeepsWorking() throws {
+        let root = try makeTemporaryDirectory()
+        try writeTranscript(Self.deliveredWithoutStopReason, age: 60, in: root)
+
+        XCTAssertEqual(subagents(in: root, activeSeconds: 300).map(\.isActive), [true])
+    }
+
+    /// The rule is a whitelist: only a proven ending ends a subagent, anything
+    /// else keeps the row working until the clock retires it. That direction is
+    /// the whole point — a value nobody has seen must not blank the indicator
+    /// over a subagent that is still going.
+    ///
+    /// Four `stop_reason` values occur among the tails (`end_turn`,
+    /// `stop_sequence`, `tool_use`, `null`), and on every one of them a
+    /// blacklist that keeps the `guard let` answers exactly as the whitelist
+    /// does — which is why that mutation survives everything else here. A fifth
+    /// value is not hypothetical, though: read whole, the corpus has one
+    /// `refusal` — record 53 of 91 in `agent-abbf674d09bc1b914.jsonl` — which
+    /// has simply never landed last yet (SPEC §2.5). This pins what happens
+    /// when it does.
+    func testAnUnknownStopReasonIsNotAnEnding() throws {
+        let root = try makeTemporaryDirectory()
+        try writeTranscript(assistantTail(stopReason: "max_tokens"), age: 60, in: root)
+
+        XCTAssertEqual(subagents(in: root, activeSeconds: 300).map(\.isActive), [true])
+    }
+
+    /// A tail that stopped mid-turn — the shape a thinking subagent leaves
+    /// behind — is working as long as the clock allows.
+    func testAnUnfinishedTranscriptWithinTheThresholdIsActive() throws {
+        let root = try makeTemporaryDirectory()
+        try writeTranscript(Self.toolResult, age: 60, in: root)
+
+        XCTAssertEqual(subagents(in: root, activeSeconds: 300).map(\.isActive), [true])
+    }
+
+    /// The same tail past the threshold: the age is the only thing that can
+    /// ever retire a transcript that was cut off before its final record.
+    func testAnUnfinishedTranscriptOlderThanTheThresholdIsNotActive() throws {
+        let root = try makeTemporaryDirectory()
+        try writeTranscript(Self.toolResult, age: 60, in: root)
+
+        XCTAssertEqual(subagents(in: root, activeSeconds: 30).map(\.isActive), [false])
+    }
+
+    private let slug = "-Users-x-Data-Projects-pebble"
+    private let sessionID = "914f8824-0e0e-4a0a-9b0b-000000000000"
+
+    private func subagents(in projectsDirectory: URL, activeSeconds: Double) -> [SubagentInfo] {
+        var config = Config.default
+        config.subagentActiveSeconds = activeSeconds
+        return ClaudeSessions.subagents(slug: slug,
+                                        sessionId: sessionID,
+                                        config: config,
+                                        projectsDirectory: projectsDirectory)
+    }
+
+    /// One `agent-<id>.jsonl` with an explicit mtime. Waiting out a real clock
+    /// would make the age half untestable at any useful threshold.
+    private func writeTranscript(_ contents: String, age: TimeInterval, in projectsDirectory: URL) throws {
+        let directory = projectsDirectory
+            .appendingPathComponent(slug)
+            .appendingPathComponent(sessionID)
+            .appendingPathComponent("subagents")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("agent-a48ba5a32f6185898.jsonl")
+        try contents.write(to: file, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-age)],
+                                              ofItemAtPath: file.path)
+    }
+
+    /// The last record before the answer: a tool call that came back. On its
+    /// own this is an unfinished tail.
+    private static let toolResult =
+        ##"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"## + "\n"
+
+    /// What a subagent the user cut short leaves behind: the marker in its
+    /// block shape, on a `user` record.
+    private static let interrupted = toolResult
+        + ##"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"##
+        + "\n"
+
+    /// An assistant record that reads like a finished answer and does not say
+    /// so anywhere in its shape. The `###` delimiters are for the heading the
+    /// answer opens with: `"##` would close a `##`-delimited literal.
+    private static let deliveredWithoutStopReason = toolResult
+        + ###"{"type":"assistant","message":{"content":[{"type":"text","text":"## Done — added the moving average line"}],"stop_reason":null,"stop_details":null}}"###
+        + "\n"
+
+    private func assistantTail(stopReason: String) -> String {
+        Self.toolResult
+            + #"{"type":"assistant","message":{"stop_reason":"\#(stopReason)"}}"#
+            + "\n"
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vscode-switcher-subagent-liveness-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+}
+
 /// Session files stay on disk after the process dies, and pids are reused.
 final class SessionLivenessTests: XCTestCase {
 
