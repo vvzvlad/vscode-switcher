@@ -131,15 +131,15 @@ struct FleetSeries: Sendable, Equatable {
     var isEmpty: Bool { points.isEmpty }
 
     /// The key this line's colour and its place in the scale hang on. Nothing on
-    /// screen reads it any more — the legend is hidden (§4) and the marker beside
-    /// the headline's caption is what names this line now — but the scale still
-    /// needs a domain entry no label anybody would configure can equal.
+    /// screen reads it any more — the legend is hidden (§4) and the headline's own
+    /// caption is what names this line now — but the scale still needs a domain
+    /// entry no label anybody would configure can equal.
     ///
     /// Hence the NUL: an account's label comes out of the gateway's config, and
     /// a plain word is a label somebody may already have. `average` was one, and
     /// the collision is silent in the worst way — the domain gets the same key
     /// twice, Charts keeps the last colour for it, and the mean is drawn in that
-    /// account's hue while the marker beside the headline points at nothing. No
+    /// account's hue, one hue among hues rather than the one line in ink. No
     /// palette test notices: both lines are then chromatic and both dots still
     /// match a line of their own hue.
     ///
@@ -397,10 +397,18 @@ final class UsageHistoryModel: ObservableObject {
                     do {
                         let answer = try await client.history(label: label, since: since)
                         // Filtered once, here, and both the lines and the mean
-                        // are built from the result below: filtered twice, or on
-                        // one path only, the bold line and the lines under it
-                        // would describe different data.
-                        return Fetched(label: label, points: despiked(answer.points), failure: nil)
+                        // are built from the result below. What matters is that
+                        // it is one path and not two: applied to the account
+                        // lines alone, or to the mean alone, the bold line and
+                        // the lines under it would describe different data.
+                        // Filtering twice would merely be wasted work — the rule
+                        // is idempotent (`f(f(x)) == f(x)` on all 5484 live
+                        // samples of 17.08.2026), because a filtered series has
+                        // no fall of one point left inside a window for a second
+                        // pass to find.
+                        return Fetched(label: label,
+                                       points: withoutSourceLag(answer.points),
+                                       failure: nil)
                     } catch {
                         return Fetched(label: label, points: [], failure: "\(label): \(error)")
                     }
@@ -421,62 +429,120 @@ final class UsageHistoryModel: ObservableObject {
                       failure: failures.isEmpty ? nil : failures.joined(separator: "; "))
     }
 
-    /// The gateway's samples with the sawtooth taken out of `util_7d`: each
-    /// reading replaced by the median of itself and its two neighbours.
+    /// The gateway's samples with the lag between its two measuring sources taken
+    /// out of `util_7d`: inside a quota window utilisation only accumulates, so a
+    /// fall of exactly one point per cent is the slower source talking and the
+    /// reading before it is carried through.
     ///
-    /// The teeth are real and they are not the quota's. A sample carries the
-    /// `source` it was taken from — `poll` (the gateway asked the API for the
-    /// state of the quota) or `headers` (the figure was read out of the headers of
-    /// an ordinary request) — and the two disagree by exactly one point per cent,
-    /// systematically: over the week measured, neighbouring pairs inside 60 s went
-    /// `poll → headers` −1 in 108 cases and `headers → poll` +1 in 99. Shuffled
-    /// together in time they draw a ±1 comb over lines that are otherwise smooth.
+    /// The sawtooth is real and it is not the quota's. A sample carries the
+    /// `source` it was taken from — `poll` (the gateway asked the API for the state
+    /// of the quota) or `headers` (the figure was read out of the headers of an
+    /// ordinary request) — and `headers` trails `poll` by about one five-minute
+    /// poll cycle, so for the length of that lag the two report figures one point
+    /// per cent apart. Shuffled together in time they draw a comb.
     ///
-    /// A median of three is what removes it: 259 single teeth over three accounts
-    /// (96, 134, 29 samples changed), every one of amplitude 1, and the genuine
-    /// steps survive — a quota reset from 100 to 0 is a step, not a tooth, and a
-    /// median keeps it whole. Re-measured against the live gateway the same day:
-    /// 99, 134 and 34 teeth, all of them gone afterwards, with the count of
-    /// samples the filter changed equal to the count of teeth — which is also
-    /// what says the teeth are isolated rather than a run of alternation, the one
-    /// shape a median of three moves the phase of instead of flattening.
+    /// The window is hard, not sliding, which is what makes "utilisation does not
+    /// fall" a rule rather than a guess: the two resets in the history drop 100 → 0
+    /// at 2026-08-15 21:00Z and 99 → 0 at 2026-08-16 15:00Z, and each account then
+    /// announces a `resets_at` exactly 7×24 h later. Inside such a window spend
+    /// only accumulates.
     ///
-    /// Filtering by `source` was tried and rejected: `poll` alone throws away two
-    /// thirds of the samples (1192 of 1862 on one account) and guts the resolution
-    /// of the short windows, and `headers` alone leaves the 15 teeth of the 259
-    /// that sit inside `headers` runs. The numbers and the method are in SPEC §4.
+    /// Measured against the live gateway on 17.08.2026 (3 accounts, 5437 samples,
+    /// 2.3–2.6 days each — all the history there is, SPEC §4): 322 falls, every one
+    /// of them exactly 1 pp deep, and after this rule at most one — the last
+    /// sample of a series, when it is the trailing source that took it, which the
+    /// rule may not touch. Half an hour later the same three answered 327 and none.
+    /// A fall lasts 3 to 5 samples, so a median of three could only ever reach the
+    /// 43 that lasted a single sample — 42 of them, the last sample of a series
+    /// being beyond any filter. The rest it "cured" by deleting the *higher*
+    /// reading instead, which pinned the line to the trailing source: of the 352
+    /// samples it changed, it lowered 310. Figures in SPEC §4.
     ///
-    /// Two things it deliberately does not touch. A window containing a sample
-    /// with no reading is left alone: a `null` is a real hole (§4), and smoothing
-    /// across one would invent a reading where the gateway took none. And the
-    /// first and last samples are never changed, which is a requirement rather
-    /// than an omission: the last reading of the series is the "last known value"
-    /// the end of the bold line is made of, and that end has to be the figure in
-    /// the headline (the rule in §4).
+    /// Filtering by `source` was tried and rejected: `poll` alone throws away 3298
+    /// of the 5437 samples and guts the resolution of the short windows, and every
+    /// one of the 322 falls is made of `headers` samples — 10 of them with a
+    /// `headers` reading on top as well, so dropping `poll` does not help either.
+    /// The numbers and the method are in SPEC §4.
     ///
-    /// Those two exemptions are the same exemption, and together they are what
-    /// makes the requirement hold for a series whose *array* ends in holes. The
-    /// last reading a series knows either sits at the end of the array, where this
-    /// window does not reach, or has a `null` after it — and then the guard below
-    /// declines it. So there is no such thing here as a last reading inside the
-    /// window: `testTheLastKnownReadingIsNeverMoved` asks it in both forms, and
-    /// `testTheEndsOfTheSeriesAreNeverMoved` holds the plain case.
+    /// Three things it deliberately does not do. A fall into zero is taken as it
+    /// came however small it is, because a reset is the one event this chart exists
+    /// to show. A level is never carried across a `null`: a hole is "nobody
+    /// measured" (§4), a reset may have happened inside one, and after it the rule
+    /// starts again with no inherited level. And **the last reading is never
+    /// moved** — the end of the bold line is the reading as it arrived, because
+    /// the freshest figure is the one thing the rule may not guess on the
+    /// gateway's behalf. It is emphatically not a promise that the end of the
+    /// line equals the headline: those are two endpoints (`/gw/usage` and the
+    /// history) with the same source lag over both, and only the arithmetic is
+    /// shared (§4). About one sample in four arrives inside a lag — 1348 of 5484
+    /// on 17.08.2026 — so the two standing 1 pp apart is an ordinary state and
+    /// not a rarity of the moment one measures in. It goes either way: in 39 of 60
+    /// observations that evening the window had already reached a point above the
+    /// last sample, so it was the exemption that kept the end of the line level
+    /// with the headline rather than a point over it.
+    ///
+    /// That last exemption has to be spelled out here, where under the median it
+    /// followed from the shape of the window: a reading with nothing but holes
+    /// after it used to be declined because the window would have had to reach
+    /// across a `null`, and this rule looks only backwards, so it would happily
+    /// raise it. Hence `lastIndex(where:)` rather than `dropLast()`.
+    /// `testTheLastReadingIsNeverMoved` asks it in both forms.
+    ///
+    /// Where it lies, and it is worth naming because the chart will not show it.
+    /// Telling a lag from a reset by the *depth* of the fall is an indirect test
+    /// and it blurs at both ends. A genuine reset exactly 1 pp deep and not into
+    /// zero — the window rolls over at 2 % and the first sample of the new one
+    /// reads 1 % — is taken for a lag and pulled back up to 2, and since the rule
+    /// never lowers a level, that point of overstatement stays to the end of the
+    /// series or to the next hole. Live data holds no such case (all 334 falls of
+    /// the control run were 1 pp deep, and both real resets fell from 100 and from
+    /// 99), and the line it draws comes out smooth and plausible, which is exactly
+    /// why it goes in writing. The other end is a lag 2 pp deep, when two points
+    /// burn inside one poll cycle: that fall is read as a reset, the sample is
+    /// taken as it came, and the rule stands down over the stretch. Nothing is
+    /// falsified — the sample is drawn as it arrived — but the comb stays, and that
+    /// is the tell: a sawtooth back on the chart while only a handful of samples
+    /// were changed. A sawtooth at 24 % changed is the ordinary lag, handled.
     ///
     /// `util_5h` is left as it came: no line on this chart is drawn from it.
-    nonisolated static func despiked(_ points: [HistoryPoint]) -> [HistoryPoint] {
-        guard points.count > 2 else { return points }
+    ///
+    /// **This result is for drawing the line and for nothing else.** Spend over a
+    /// stretch is the two ends of it plus 100 pp for every reset crossed, and no
+    /// series here may be differenced for it. On the raw samples the comb makes
+    /// that arithmetic nonsense: the positive deltas of acc2 add up to 167 pp over
+    /// 63.4 h against the 50 pp actually spent (192 against 55, 86 against 19 on
+    /// the other two). This filtered series happens to give the right total by the
+    /// same method, but only because the rule left it monotone inside a window,
+    /// where the sum of the rises *is* the difference of the ends — it buys
+    /// nothing and would hide the error the day the rule changes. And a level read
+    /// off it is up to 1 pp above what arrived, for as long as the lag lasts.
+    /// `load` above is the only caller, on purpose.
+    nonisolated static func withoutSourceLag(_ points: [HistoryPoint]) -> [HistoryPoint] {
+        // Everything past the last reading is a hole, and holes are never moved,
+        // so the pass stops here — which is also the exemption that leaves the
+        // end of the bold line as the gateway sent it (§4).
+        guard let last = points.lastIndex(where: { $0.sevenDay != nil }) else { return points }
         var filtered = points
-        // Read from `points` and written to `filtered`, so every median is taken
-        // over the samples as they arrived rather than over ones already moved.
-        for index in 1..<(points.count - 1) {
-            guard let previous = points[index - 1].sevenDay,
-                  let value = points[index].sevenDay,
-                  let next = points[index + 1].sevenDay else { continue }
-            let median = max(min(previous, value), min(max(previous, value), next))
-            guard median != value else { continue }
-            filtered[index] = HistoryPoint(timestamp: points[index].timestamp,
-                                           fiveHour: points[index].fiveHour,
-                                           sevenDay: median)
+        // The figure this window is known to have reached. `nil` before the first
+        // reading and after every hole.
+        var carried: Double?
+        for index in 0..<last {
+            guard let value = points[index].sevenDay else {
+                carried = nil
+                continue
+            }
+            // A fall of exactly one point that is not a fall into zero: the
+            // trailing source, and the reading before it stands. The tolerance is
+            // for a percentage that arrives as a fraction — the gateway sends
+            // whole numbers today (0 of 5437 samples were fractional), and the
+            // field is a `Double` all the same.
+            if let level = carried, value > 0, abs(level - value - 1) < 1e-6 {
+                filtered[index] = HistoryPoint(timestamp: points[index].timestamp,
+                                               fiveHour: points[index].fiveHour,
+                                               sevenDay: level)
+            } else {
+                carried = value
+            }
         }
         return filtered
     }
@@ -565,6 +631,15 @@ struct UsagePopoverView: View {
     /// along with the row's four: an unknown name draws nothing at all.
     static let failureSymbolName = "exclamationmark.triangle.fill"
 
+    /// What the big figure is a figure of, and in what size. Constants for the
+    /// reason the dot's size is one: the test that holds this line at one line
+    /// (`testTheHeadlineCaptionIsDrawnOnOneLine`) measures the string drawn on its
+    /// own against the same string drawn in the popover, and a copy of the wording
+    /// or of the size in the test would compare a rendering with a rendering of
+    /// something else.
+    static let headlineCaption = "weekly quota, average across accounts"
+    static let headlineCaptionSize: CGFloat = 11
+
     /// The slot the reset time gets at the right end of a window row. Wide enough
     /// for everything `resetLabel` writes about a quota window, which is measured
     /// rather than asserted (`testTheResetTimeFitsItsSlotWhole`): a truncated
@@ -586,11 +661,6 @@ struct UsagePopoverView: View {
     /// copy in the test, and changing the dot — pure decoration — would fail a
     /// test about the palette.
     static let accountDotSize: CGFloat = 7
-
-    /// The sample of the bold line that stands in front of the headline's caption:
-    /// a `Capsule` of `fleetColor`, this wide and this tall. Read by the test that
-    /// holds the marker, for the reason the dot's size is.
-    static let fleetMarkerSize = CGSize(width: 10, height: 2.5)
 
     var body: some View {
         // Worked out once here rather than inside `footer`, because the divider
@@ -641,39 +711,24 @@ struct UsagePopoverView: View {
     /// a dash over the account rows right below it, which go on showing their
     /// stored percentages — two contradicting statements on one screen, and the
     /// dash was the false one: the number is known, it is merely old.
-    /// Not private, for the reason `plot` is not: the marker in front of the
-    /// caption is the whole explanation of the bold line on the chart, and nothing
-    /// but a rendering can be asked whether it is there and whether it is ink
-    /// (`testTheHeadlineCarriesAnInkSampleOfTheBoldLine`).
-    var headline: some View {
+    /// Three rows rather than "figure, caption beside it, bar", and the reason is
+    /// measured (§4): the caption is 206 pt of a 292 pt line, so beside a figure it
+    /// only fits while the figure is short. `52%` leaves it 219 pt and `100%` leaves
+    /// 199.5 — the caption then wraps, and a wrapped caption is the complaint this
+    /// headline was rebuilt for. On its own row it has the whole width and one line
+    /// is one line whatever the figure says.
+    private var headline: some View {
         let percent = Self.headlinePercent(for: usage.snapshot)
         return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // Tighter than the gap above the bar, because the words belong to the
+            // figure: they say which quota it is.
+            VStack(alignment: .leading, spacing: 2) {
                 Text(percent.map { "\($0)%" } ?? "—")
                     .font(.system(size: 30, weight: .semibold))
                     .monospacedDigit()
-                HStack(alignment: .firstTextBaseline, spacing: 5) {
-                    // The chart's bold line, in front of the words it is the
-                    // same quantity as. This is the whole explanation of that
-                    // line now: the legend is hidden and the caption that used
-                    // to spell the rule out under the chart is gone, so what
-                    // ties the ink-coloured line to this number is a sample of
-                    // it standing next to the number.
-                    //
-                    // A shape has no baseline of its own, and left to itself it
-                    // would sit *on* the text's, which reads as a full stop
-                    // rather than as a line. Three points above it is roughly
-                    // the middle of the lower-case letters beside it.
-                    Capsule()
-                        .fill(Self.fleetColor)
-                        .frame(width: Self.fleetMarkerSize.width,
-                               height: Self.fleetMarkerSize.height)
-                        .alignmentGuide(.firstTextBaseline) { dimensions in dimensions[.bottom] + 3 }
-                    Text("weekly quota, average across accounts")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text(Self.headlineCaption)
+                    .font(.system(size: Self.headlineCaptionSize))
+                    .foregroundStyle(.secondary)
             }
             QuotaBar(fraction: percent.map { Double($0) / 100 }, height: 8)
         }
@@ -953,37 +1008,42 @@ struct UsagePopoverView: View {
         value.map { "\(Int($0.rounded()))%" } ?? "—"
     }
 
-    /// When a window starts over, to the hour. Empty when the gateway named no
-    /// reset — the row has a dash in the percentage already, and a second one adds
-    /// nothing.
+    /// When a window starts over. Empty when the gateway named no reset — the row
+    /// has a dash in the percentage already, and a second one adds nothing.
     ///
-    /// To the hour because whole days do not answer the question. `in 1d` covers
-    /// everything from 24 hours to 48 of them, which is the difference between
-    /// "wait until tomorrow morning" and "wait until the day after" — the user
-    /// asked what `1d` meant, "19 hours? 26?", and the honest answer was that the
-    /// label could not tell him.
+    /// The rule is one: **the smallest unit written is always explicit**. A bare
+    /// unit is a floor and therefore a range — `in 1d` is anything from 24 hours
+    /// to 48, `in 1h` anything from 60 minutes to 119 — and the range covers the
+    /// very difference the row is looked at for. The user asked both questions in
+    /// turn, "19 hours? 26?" of the days and "an hour and a half? five minutes?" of
+    /// the hours; neither label could answer.
     ///
-    /// So the hours are printed even when there are none of them: `in 5d 0h` is
-    /// five days and change measured to the hour, while a bare `in 5d` is exactly
-    /// the ambiguity this rule removes.
+    /// So the lower unit is printed even when it is zero: `in 5d 0h` and `in 4h 0m`
+    /// are countdowns measured to that unit, while a bare `in 5d` or `in 4h` is
+    /// exactly the ambiguity being removed. Days stop at the hour — an hour is the
+    /// precision that was asked for, and `in 5d 3h 20m` says nothing the row needs.
     static func resetLabel(_ date: Date?, now: Date) -> String {
         guard let date else { return "" }
         let seconds = date.timeIntervalSince(now)
         guard seconds > 0 else { return "resets now" }
-        // Minutes round up, so a window with 30 seconds left says `in 1m` rather
-        // than `in 0m`; days and hours go down, because they are a countdown and
-        // rounding one up would promise time that is not there.
-        let minutes = Int((seconds / 60).rounded(.up))
-        if minutes < 60 { return "in \(minutes)m" }
-        // The one place the two rounding rules meet, and the one place it has to
-        // be said out loud: the last minute below an hour rounds up to 60 of
-        // them, and `in 60m` is an hour written the long way. Carried into the
-        // hour by hand, because the branch below floors — 3599 s would be
-        // `in 0h`. Only this seam; rounding the whole countdown up to the minute
-        // instead would carry into the days as well and turn 1d 23h 59m into
-        // `in 2d 0h`, which is the promise of time that is not there.
-        if seconds < 3600 { return "in 1h" }
-        if seconds < 86_400 { return "in \(Int(seconds / 3600))h" }
+        if seconds < 3600 {
+            // Minutes round up, so a window with 30 seconds left says `in 1m`
+            // rather than `in 0m`. The last minute below an hour rounds up to 60
+            // of them, and `in 60m` is an hour written the long way — carried by
+            // hand, because the branch below floors and would write `in 0h 59m`
+            // for the same instant.
+            let minutes = Int((seconds / 60).rounded(.up))
+            return minutes < 60 ? "in \(minutes)m" : "in 1h 0m"
+        }
+        // Hours and days go down, and so does the remainder beside them: this is a
+        // countdown, and rounding any of it up would promise time that is not
+        // there. Which is also why the carry above is only at that one seam —
+        // rounding the whole countdown up to the minute would turn 1d 23h 59m into
+        // `in 2d 0h`.
+        if seconds < 86_400 {
+            let hours = Int(seconds / 3600)
+            return "in \(hours)h \(Int((seconds - Double(hours) * 3600) / 60))m"
+        }
         let days = Int(seconds / 86_400)
         return "in \(days)d \(Int((seconds - Double(days) * 86_400) / 3600))h"
     }

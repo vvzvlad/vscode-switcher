@@ -308,9 +308,9 @@ struct HistoryPoint: Sendable, Decodable, Equatable {
     }
 
     /// A sample with a reading of our own in it. Its one use is
-    /// `UsageHistoryModel.despiked`, which replaces a sample's `util_7d` with
-    /// the median of it and its neighbours; the wire format is otherwise the
-    /// only maker of these values.
+    /// `UsageHistoryModel.withoutSourceLag`, which replaces a sample's `util_7d`
+    /// with the reading before it when the two measuring sources disagree; the
+    /// wire format is otherwise the only maker of these values.
     init(timestamp: Date, fiveHour: Double?, sevenDay: Double?) {
         self.timestamp = timestamp
         self.fiveHour = fiveHour

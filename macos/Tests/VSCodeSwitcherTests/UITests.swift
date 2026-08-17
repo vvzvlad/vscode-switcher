@@ -3057,10 +3057,10 @@ final class FleetMeanTests: XCTestCase {
     }
 }
 
-/// The sawtooth the two measuring sources put on the chart, and the median that
-/// takes it off without touching anything the quota actually did.
+/// The sawtooth the lag between the two measuring sources puts on the chart, and
+/// the rule that takes it off without touching anything the quota actually did.
 @MainActor
-final class DespikeTests: XCTestCase {
+final class SourceLagTests: XCTestCase {
 
     /// Samples a minute apart, as the gateway sends them. Decoded rather than
     /// constructed, because a hole is a thing only the wire format can say.
@@ -3072,22 +3072,39 @@ final class DespikeTests: XCTestCase {
     }
 
     private func filtered(_ readings: [Double?]) throws -> [Double?] {
-        UsageHistoryModel.despiked(try samples(readings)).map(\.sevenDay)
+        UsageHistoryModel.withoutSourceLag(try samples(readings)).map(\.sevenDay)
     }
 
-    /// The tooth itself: one sample a point above both of its neighbours, which
-    /// agree with each other. 259 of these over three accounts in a week, every
-    /// one of amplitude 1 — a `poll` sample standing between two `headers` ones,
-    /// most of the time.
-    func testASingleToothIsFlattened() throws {
-        XCTAssertEqual(try filtered([40, 41, 40]), [40, 40, 40])
-        // Downwards as well: 31 of the 259 pointed that way.
+    /// The shortest fall there is: one sample a point below the reading either
+    /// side of it. 43 of the 322 falls in the live history lasted a single sample,
+    /// and a median of three could have reached 42 of them — the forty-third stood
+    /// last in its series, where no filter may go (§4). Those were the only ones it
+    /// could reach at all.
+    func testASingleSampleFallIsPulledUp() throws {
         XCTAssertEqual(try filtered([40, 39, 40]), [40, 40, 40])
+        // The same event seen from the other side — the leading source spiking up
+        // between two trailing samples. The spike is a genuine new level, and the
+        // sample after it is the one that gets pulled, so inside the series no comb
+        // is left either way round. The tail is the exception and it is not this
+        // test's: the array below ends on a fall of 41 → 40, which stands because
+        // the last reading is never moved (`testTheLastReadingIsNeverMoved`).
+        XCTAssertEqual(try filtered([40, 41, 40, 40]), [40, 41, 41, 40])
     }
 
-    /// A step is not a tooth. The quota goes up in ones all day long, and a median
-    /// of three keeps every one of those: the difference is whether the neighbours
-    /// agree.
+    /// The fall a median of three cannot reach, and the reason this rule replaced
+    /// it. A fall lasts 3 to 5 samples in the live history — the trailing source
+    /// is behind by about a poll cycle, and every sample it takes meanwhile
+    /// repeats the stale figure. A median of three leaves every one of these
+    /// standing; taken out with the old filter in place, this test fails.
+    func testALongFallIsPulledUpToTheReadingBeforeIt() throws {
+        XCTAssertEqual(try filtered([40, 39, 39, 39, 40]), [40, 40, 40, 40, 40])
+        // Five samples of it, which is the commonest length of all (§4).
+        XCTAssertEqual(try filtered([40, 39, 39, 39, 39, 39, 40]),
+                       [40, 40, 40, 40, 40, 40, 40])
+    }
+
+    /// A step is not a fall. The quota goes up in ones all day long, and every one
+    /// of those is kept: the rule only ever looks at readings that went *down*.
     func testAGenuineStepSurvivesWhole() throws {
         XCTAssertEqual(try filtered([40, 41, 41]), [40, 41, 41])
         XCTAssertEqual(try filtered([40, 40, 41, 41, 42, 42]), [40, 40, 41, 41, 42, 42])
@@ -3096,70 +3113,58 @@ final class DespikeTests: XCTestCase {
     /// And the largest step there is — a week rolling over — survives to the
     /// sample. A filter that took the corner off this would be lying about the one
     /// event the chart exists to show.
+    ///
+    /// The window is what makes the whole rule true: it is hard rather than
+    /// sliding, so utilisation inside one only accumulates. The live history holds
+    /// two of these corners, 100 → 0 and 99 → 0, each followed by a `resets_at`
+    /// exactly 7×24 h later (§4).
     func testAQuotaResetIsNotSmoothedAway() throws {
         XCTAssertEqual(try filtered([87, 87, 3, 3]), [87, 87, 3, 3])
         XCTAssertEqual(try filtered([100, 100, 0, 0, 1]), [100, 100, 0, 0, 1])
+        // A reset that falls by exactly one point is still a reset: the rule reads
+        // a zero as the window rolling over and takes it as it came, rather than
+        // carrying the 1 across it and drawing a week that never ended.
+        XCTAssertEqual(try filtered([1, 0, 0]), [1, 0, 0])
+        XCTAssertEqual(try filtered([1, 0, 0, 1, 1]), [1, 0, 0, 1, 1])
     }
 
-    /// The window never reaches across a hole. A `null` says the gateway took no
-    /// reading at that moment (§4), and a median through one would invent a
-    /// reading out of two on either side of a gap of unknown length.
-    func testTheWindowDoesNotReachAcrossAHole() throws {
+    /// A level is never carried across a hole. A `null` says the gateway took no
+    /// reading at that moment (§4) — a reset may have happened inside one — so
+    /// after a hole the rule starts again with nothing behind it.
+    func testTheLevelIsNotCarriedAcrossAHole() throws {
         XCTAssertEqual(try filtered([40, nil, 80]), [40, nil, 80])
-        // The samples either side of a hole are left as they are too — each of
-        // them has a window with a `null` in it.
-        XCTAssertEqual(try filtered([10, 40, nil, 80, 90]), [10, 40, nil, 80, 90])
-        // And a sample that *looks* like a tooth against the reading on the far
-        // side of the hole keeps its value: this is where a window that closed
-        // over the gap instead of stopping at it would show, and the two cases
-        // are the tooth before the hole and the tooth after it.
-        XCTAssertEqual(try filtered([40, 41, nil, 40, 40]), [40, 41, nil, 40, 40])
-        XCTAssertEqual(try filtered([10, 40, nil, 39, 40]), [10, 40, nil, 39, 40])
-        // A tooth on the far side of a hole is still flattened: the hole stops the
-        // window, it does not stop the pass.
-        XCTAssertEqual(try filtered([10, nil, 40, 41, 40, nil, 10]),
-                       [10, nil, 40, 40, 40, nil, 10])
+        // The bite of it: the same shape with and without the hole. Continuous,
+        // the two samples after the 41 are a fall and get pulled up to it; with a
+        // hole in front of them there is no level to pull them to.
+        XCTAssertEqual(try filtered([40, 41, 40, 40, 41]), [40, 41, 41, 41, 41])
+        XCTAssertEqual(try filtered([40, 41, nil, 40, 40, 41]), [40, 41, nil, 40, 40, 41])
+        // And the pass carries on afterwards: the hole stops the level, not the
+        // filter.
+        XCTAssertEqual(try filtered([10, nil, 40, 39, 39, 40]), [10, nil, 40, 40, 40, 40])
     }
 
-    /// The ends of the series are never touched, and that is a requirement rather
-    /// than an omission: the last sample is the "last known value" the end of the
-    /// bold line is built from, and that end has to be the figure in the headline
-    /// (§4).
+    /// The last reading is never moved, and that is a requirement rather than an
+    /// omission: the freshest figure is the one thing the rule may not invent on
+    /// the gateway's behalf, so the line ends at the reading that arrived (§4).
     ///
-    /// This test is the one that holds it. Not
-    /// `testTheLastPointOfTheMeanIsTheHeadlineFigure`, which said so here and in
-    /// §4 until it was checked: that one builds `FleetSeries.make` straight out of
-    /// samples and never goes through the filter at all.
-    func testTheEndsOfTheSeriesAreNeverMoved() throws {
-        // Both ends are teeth by shape, and both stay.
-        XCTAssertEqual(try filtered([41, 40, 40, 40, 41]), [41, 40, 40, 40, 41])
-        XCTAssertEqual(try filtered([0, 50, 50, 50, 100]), [0, 50, 50, 50, 100])
-    }
-
-    /// And the *last reading* is never moved either, which is not the same
-    /// sentence: a series can end in holes, and then its last reading is not the
-    /// last element of the array.
-    ///
-    /// This is the invariant the end of the bold line rests on, so it is asked
-    /// directly rather than left to follow from the two exemptions. It does follow
-    /// from them — the last reading either sits at the end of the array, out of the
-    /// window's range, or is followed by a `null`, which stops the window — and
-    /// that is exactly why no third rule is needed. Checked by breaking both
-    /// halves: a window extended over the last element (median of the last three
-    /// samples) flattens the first case, and a missing right-hand neighbour filled
-    /// in with the reading before it — carrying forward across a hole, the way the
-    /// mean legitimately does — flattens the second.
-    func testTheLastKnownReadingIsNeverMoved() throws {
-        // A tooth by shape at the very end of the array. The window does not reach
-        // it.
-        XCTAssertEqual(try filtered([40, 40, 40, 41]), [40, 40, 40, 41])
-        // The same tooth with nothing but holes after it. Now it is inside the
-        // window's range, and what saves it is the hole on its right.
-        XCTAssertEqual(try filtered([40, 40, 41, nil]), [40, 40, 41, nil])
-        XCTAssertEqual(try filtered([40, 40, 41, nil, nil]), [40, 40, 41, nil, nil])
+    /// Under the median this held by itself — the last element was outside the
+    /// window, and a reading with holes after it was declined because the window
+    /// could not reach across a `null`. This rule looks only backwards, so a hole
+    /// on the right stops nothing and the exemption has to be written down. It is:
+    /// the pass ends at the last reading rather than at the last element, and both
+    /// forms are asked here.
+    func testTheLastReadingIsNeverMoved() throws {
+        // A fall at the very end of the array, which is where the exemption costs
+        // something: the line ends a point below the level before it, and that is
+        // the price of the end of the line being the figure that arrived.
+        XCTAssertEqual(try filtered([40, 40, 40, 39]), [40, 40, 40, 39])
+        XCTAssertEqual(try filtered([40, 39, 39, 39]), [40, 40, 40, 39])
+        // The same fall with nothing but holes after it. Still the last reading.
+        XCTAssertEqual(try filtered([40, 40, 39, nil]), [40, 40, 39, nil])
+        XCTAssertEqual(try filtered([40, 40, 39, nil, nil]), [40, 40, 39, nil, nil])
         // A reset is the case that matters, being the largest step there is: the
-        // headline says 3% and the line has to end at 3, however many samples the
-        // gateway took no reading for afterwards.
+        // gateway last said 3, so the line ends at 3, however many samples it took
+        // no reading for afterwards.
         for holes in 1...4 {
             let readings: [Double?] = [87, 87, 3] + Array(repeating: nil, count: holes)
             XCTAssertEqual(try filtered(readings).compactMap { $0 }.last, 3,
@@ -3167,71 +3172,154 @@ final class DespikeTests: XCTestCase {
         }
     }
 
-    /// A series too short to have a middle comes back as it was, rather than
-    /// coming back empty.
+    /// A series too short to have a fall in it comes back as it was, rather than
+    /// coming back empty. A series of nothing but holes too — there is no last
+    /// reading to stop at, and the pass has to survive that.
     func testAVeryShortSeriesIsLeftAlone() throws {
         XCTAssertEqual(try filtered([]), [])
         XCTAssertEqual(try filtered([41]), [41])
         XCTAssertEqual(try filtered([41, 40]), [41, 40])
+        XCTAssertEqual(try filtered([nil]), [nil])
+        XCTAssertEqual(try filtered([nil, nil]), [nil, nil])
     }
 
-    /// The picture the user pointed at: `poll` samples standing one point per cent
-    /// above the `headers` ones around them, over and over. After the filter the
-    /// line has no teeth left in it at all.
-    ///
-    /// The teeth in the live data are *isolated* — a `poll` sample between two
-    /// `headers` ones that agree — and that is not an assumption but a
-    /// measurement: the filter changed exactly as many samples as the census had
-    /// counted teeth (96, 134, 29 against 259 in total, §4). A strict alternation,
-    /// every sample disagreeing with the one before it, is the one shape a median
-    /// of three does *not* flatten — it moves the phase instead — and its absence
-    /// is what those equal counts say, since a run of it would have had the filter
-    /// touching samples the census never counted.
+    /// The picture the user pointed at, in the shape the live data has it: a run
+    /// of trailing `headers` samples with a `poll` sample rising a point above
+    /// them every poll cycle, over and over. After the rule the line has no fall
+    /// left in it at all.
     func testTheCombOfTheTwoSourcesComesOutFlat() throws {
-        let comb: [Double?] = [38, 39, 38, 38, 39, 38, 38, 39, 38]
-        let smooth = try filtered(comb)
-        XCTAssertEqual(smooth, [38, 38, 38, 38, 38, 38, 38, 38, 38])
-        for index in 1..<(smooth.count - 1) {
-            let previous = try XCTUnwrap(smooth[index - 1])
-            let value = try XCTUnwrap(smooth[index])
-            let next = try XCTUnwrap(smooth[index + 1])
-            XCTAssertFalse(value != previous && value != next && previous == next,
-                           "a tooth survived at \(index): \(smooth)")
-        }
-
-        // And whatever the shape, the filter only ever picks one of the three
-        // readings in front of it: it cannot invent a level the gateway never
-        // measured, which is what an averaging filter here would do.
+        let comb: [Double?] = [38, 39, 38, 38, 39, 38, 38, 39, 39]
+        XCTAssertEqual(try filtered(comb), [38, 39, 39, 39, 39, 39, 39, 39, 39])
+        // Strict alternation is the shape a median of three moves the phase of
+        // instead of flattening. This rule flattens it, because it asks what the
+        // window has already reached rather than what the neighbours agree on.
         let alternating: [Double?] = [38, 39, 38, 39, 38, 39]
-        for value in try filtered(alternating) {
-            XCTAssertTrue([38, 39].contains(try XCTUnwrap(value)),
-                          "the filter produced a reading nobody measured")
-        }
-
-        // Which is also the shape that says where the medians are taken from, and
-        // it has to be asked as the whole array. Every median is over the samples
-        // as they *arrived*: reading the left neighbour out of the output instead
-        // makes the filter creep, each pass carrying its own last answer forward
-        // — and the two agree on "38 or 39" at every position, which is all the
-        // loop above can see. Strict alternation is the one shape a median of
-        // three does not flatten, so it is the one shape the two disagree over:
-        // the creeping filter flattens it to a line, having smoothed its own
-        // smoothing.
-        XCTAssertEqual(try filtered(alternating), [38, 38, 39, 38, 39, 39],
-                       "the medians were taken over readings the filter had already moved")
+        XCTAssertEqual(try filtered(alternating), [38, 39, 39, 39, 39, 39])
     }
 
-    /// `util_5h` is not filtered and the timestamps are not moved: the filter is
+    /// The rule's properties, asked of a series no `XCTAssertEqual` holds in place.
+    ///
+    /// Two loops used to stand in the test above — "the result never falls", "the
+    /// filter invented nothing" — over an array pinned by an exact equality on the
+    /// line before them. Green equality, and neither could fail; red equality, and
+    /// they said the same thing a second time: a branch that cannot execute, in
+    /// test form. So the input here is generated instead, and generated
+    /// deterministically — a fixed seed through a linear congruential step, with no
+    /// `random()` and no `Date` anywhere near it, because a test that fails one run
+    /// in ten is not evidence of anything. Six hundred-odd samples of a level that
+    /// climbs, combed by falls of one to six samples, with resets and holes through
+    /// it, and a trailing-source sample deliberately last so the tail exemption is
+    /// in play as well.
+    ///
+    /// Four properties, and every one of them the rule restated: inside a window
+    /// the result never falls; no reading moved by anything but exactly +1 pp; the
+    /// resets came through untouched; the last reading is where it was. Around
+    /// them stand four assertions on the input and the work done, because a rule
+    /// that did nothing at all would satisfy all four properties: the series has
+    /// to hold a comb, at least two resets, at least one of those not into zero,
+    /// and the rule has to have moved a hundred samples of it.
+    func testTheRuleHoldsItsPropertiesOverAGeneratedComb() throws {
+        var seed: UInt64 = 0x2026_0817
+        func next(_ bound: Int) -> Int {
+            seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Int((seed >> 33) % UInt64(bound))
+        }
+        var readings: [Double?] = []
+        var resets: Set<Int> = []
+        var level = 1.0
+        while readings.count < 600 {
+            for _ in 0...next(3) { readings.append(level) }
+            // The trailing source repeating the figure from before this step, one
+            // to six samples of it, and then the leading source again.
+            let lag = next(7)
+            if lag > 0, level > 1 {
+                for _ in 0..<lag { readings.append(level - 1) }
+                readings.append(level)
+            }
+            switch next(12) {
+            case 0:
+                readings.append(nil)                // nobody measured
+            case 1 where level >= 5:
+                // The window rolled over. Not always into zero: the gateway's
+                // first sample of a new window can already carry a point or two,
+                // and that is the reset the *depth* of the fall has to catch
+                // rather than the guard on zero.
+                level = Double(next(4))
+                resets.insert(readings.count)
+                readings.append(level)
+            default:
+                level += 1                          // spend
+            }
+        }
+        // The series ends inside a lag, whatever the loop happened to leave behind:
+        // the level once more, and then the trailing source repeating the figure
+        // under it — the one sample the rule may not touch.
+        level = max(level, 2)
+        readings.append(level)
+        readings.append(level - 1)
+        let tail = readings.count - 1
+
+        let result = try filtered(readings)
+        XCTAssertEqual(result.count, readings.count)
+        XCTAssertEqual(result.map { $0 == nil }, readings.map { $0 == nil },
+                       "a hole was filled in or moved")
+
+        // The input has to be able to break the rule before its surviving is worth
+        // anything: a comb with resets in it, not a monotone ramp.
+        let rawFalls = (1..<readings.count).filter { index in
+            guard let previous = readings[index - 1], let value = readings[index] else { return false }
+            return value < previous
+        }
+        XCTAssertGreaterThan(rawFalls.count, 50, "the generated series has no comb in it")
+        XCTAssertGreaterThanOrEqual(resets.count, 2, "the generated series has no reset in it")
+        // And at least one reset that does not land on zero. A series whose every
+        // reset falls into zero is carried entirely by the guard on zero, and the
+        // depth of the fall — the half of the condition that tells a reset from a
+        // lag — is then never asked at all.
+        XCTAssertGreaterThanOrEqual(resets.filter { (readings[$0] ?? 0) > 0 }.count, 1,
+                                    "every generated reset fell into zero")
+
+        // (1) Inside a window the result never falls. Two exceptions, and both are
+        // the rule's own words: a reset, and the last reading.
+        for index in 1..<result.count {
+            guard let previous = result[index - 1], let value = result[index] else { continue }
+            guard value < previous else { continue }
+            XCTAssertTrue(resets.contains(index) || index == tail,
+                          "the result fell at \(index): \(previous) → \(value)")
+        }
+        // (2) Every change is a reading raised to the level before it, by exactly
+        // one point. Anything else is a figure nobody measured.
+        var changed = 0
+        for (raw, value) in zip(readings, result) {
+            guard let raw, let value else { continue }
+            if raw == value { continue }
+            changed += 1
+            XCTAssertEqual(value, raw + 1, "a reading moved from \(raw) to \(value)")
+        }
+        XCTAssertGreaterThan(changed, 100, "the rule barely touched the comb")
+        // (3) The resets are the one event this chart exists to show.
+        for index in resets.sorted() {
+            XCTAssertEqual(result[index], readings[index], "the reset at \(index) was smoothed")
+        }
+        // (4) And the last reading is where it was — a point under the level the
+        // window had reached, on a series long enough to have forgotten about it.
+        XCTAssertEqual(result[tail], readings[tail], "the last reading moved")
+        let beforeTail = try XCTUnwrap(result[tail - 1])
+        let atTail = try XCTUnwrap(result[tail])
+        XCTAssertEqual(beforeTail - atTail, 1, "this series was meant to end inside a lag")
+    }
+
+    /// `util_5h` is not filtered and the timestamps are not moved: the rule is
     /// about the one quantity this chart draws, and a sample that changed its
     /// moment would move the line sideways.
     func testNothingButTheSevenDayReadingIsTouched() throws {
         let body = (0..<3).map { index in
             "{\"ts\": \(1_786_700_000 + index * 60), \"util_5h\": \(index == 1 ? 91 : 4),"
-                + " \"util_7d\": \(index == 1 ? 41 : 40)}"
+                + " \"util_7d\": \(index == 1 ? 39 : 40)}"
         }
         let points = try UsageFixtures.decode("[\(body.joined(separator: ","))]",
                                               as: [HistoryPoint].self)
-        let filtered = UsageHistoryModel.despiked(points)
+        let filtered = UsageHistoryModel.withoutSourceLag(points)
         XCTAssertEqual(filtered.map(\.sevenDay), [40, 40, 40])
         XCTAssertEqual(filtered.map(\.fiveHour), [4, 91, 4], "the five-hour window was filtered too")
         XCTAssertEqual(filtered.map(\.timestamp), points.map(\.timestamp))
@@ -3239,13 +3327,13 @@ final class DespikeTests: XCTestCase {
 
     /// And the filter is on the path the popover actually uses: the lines and the
     /// mean are both built from the filtered samples, so the two describe the same
-    /// data. Applied on one path only, the bold line would run through teeth the
+    /// data. Applied on one path only, the bold line would run through falls the
     /// lines under it no longer have.
     func testBothTheLinesAndTheMeanAreBuiltFromFilteredSamples() async throws {
         // A gateway answering with the comb of the two sources, on one account.
         let client = UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
             let url = request.url ?? Config.default.resolvedUsageBaseURL
-            let points = [38, 39, 38, 38, 38].enumerated().map { index, value in
+            let points = [38, 39, 38, 38, 39].enumerated().map { index, value in
                 "{\"ts\": \(1_786_700_000 + index * 60), \"util_7d\": \(value)}"
             }
             let body = "{\"label\": \"acc1\", \"since\": 1786700000,"
@@ -3265,8 +3353,8 @@ final class DespikeTests: XCTestCase {
         defer { history.close() }
 
         let readings = try XCTUnwrap(history.series.first).segments.flatMap { $0.readings.map(\.value) }
-        XCTAssertEqual(readings, [38, 38, 38, 38, 38], "the account's line kept its teeth")
-        XCTAssertEqual(history.fleet.points.map(\.value), [38, 38, 38, 38, 38],
+        XCTAssertEqual(readings, [38, 39, 39, 39, 39], "the account's line kept its falls")
+        XCTAssertEqual(history.fleet.points.map(\.value), [38, 39, 39, 39, 39],
                        "the mean was folded from unfiltered samples")
     }
 
@@ -3296,12 +3384,16 @@ final class UsagePopoverLabelTests: XCTestCase {
         XCTAssertEqual(UsagePopoverView.percentLabel(nil), "—")
     }
 
-    /// The reset time is told to the hour, all the way up: whole days do not
-    /// answer the question the row is asked. `in 1d` covers everything from 24
-    /// hours to 48 of them — the user's own objection, "19 hours? 26?" — so the
-    /// hours are printed beside the days, and printed even when there are none of
-    /// them, because a bare `in 5d` is exactly the ambiguity being removed.
-    func testTheResetTimeIsToldToTheHourAndAbsentWhenUnknown() {
+    /// The reset time always names its smallest unit, and never leaves a floor
+    /// standing on its own.
+    ///
+    /// A bare unit is a floor and therefore a range: `in 1d` covers 24 hours to
+    /// 48, `in 1h` covers 60 minutes to 119. Both were caught on the live screen —
+    /// "19 hours? 26?" of the days, and then `5h … in 1h` in the same popover, "an
+    /// hour and a half? five minutes?". So the lower unit is printed beside the
+    /// higher one and printed even when it is zero, because a bare `in 4h` is
+    /// exactly the ambiguity being removed.
+    func testTheResetTimeAlwaysNamesItsSmallestUnit() {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
         func label(_ seconds: TimeInterval) -> String {
             UsagePopoverView.resetLabel(now.addingTimeInterval(seconds), now: now)
@@ -3309,27 +3401,94 @@ final class UsagePopoverLabelTests: XCTestCase {
         XCTAssertEqual(label(15 * 60), "in 15m")
         // Minutes round up: half a minute left is not "in 0m".
         XCTAssertEqual(label(30), "in 1m")
-        XCTAssertEqual(label(3 * 3600), "in 3h")
-        // Hours go down, because this is a countdown: 3h 59m has not turned into
-        // four hours yet.
-        XCTAssertEqual(label(3 * 3600 + 59 * 60), "in 3h")
-        // Where the two rules meet. The minutes round up to 60 of them here, and
-        // `in 60m` is an hour written the long way — while the hours branch on its
-        // own floors this to `in 0h`.
-        XCTAssertEqual(label(3599), "in 1h", "the last minute below an hour is not an hour")
-        XCTAssertEqual(label(3540), "in 59m", "the minute before that was carried too")
-        XCTAssertEqual(label(3541), "in 1h")
+        XCTAssertEqual(label(3539), "in 59m")
+        // Where the two rounding rules meet. The minutes round up to 60 of them
+        // here, and `in 60m` is an hour written the long way — while the branch
+        // below floors and would write `in 0h 59m` for the same instant.
+        XCTAssertEqual(label(3599), "in 1h 0m", "the last minute below an hour stayed 60 minutes")
+        XCTAssertEqual(label(3541), "in 1h 0m")
+        // The carry stops one second short of that, and the seam is arithmetic
+        // rather than a choice: 3540 s *is* fifty-nine minutes, and rounding an
+        // exact figure up leaves it where it is.
+        XCTAssertEqual(label(3540), "in 59m", "the carry took a minute that was already exact")
+        XCTAssertEqual(label(3600), "in 1h 0m")
+        XCTAssertEqual(label(5400), "in 1h 30m")
+        XCTAssertEqual(label(4 * 3600), "in 4h 0m")
+        // The remainder floors like everything above it: this is a countdown, and
+        // 3h 59m 59s has turned neither into four hours nor into `in 3h 60m`.
+        XCTAssertEqual(label(3 * 3600 + 59 * 60 + 59), "in 3h 59m")
+        XCTAssertEqual(label(86_399), "in 23h 59m")
+        XCTAssertEqual(label(86_400), "in 1d 0h")
+        XCTAssertEqual(label(123_456), "in 1d 10h")
         XCTAssertEqual(label(3 * 86_400 + 7 * 3600), "in 3d 7h")
         XCTAssertEqual(label(5 * 86_400 + 20 * 60), "in 5d 0h",
                        "a whole number of days dropped the hours and became ambiguous again")
         XCTAssertEqual(label(86_400 + 23 * 3600 + 59 * 60), "in 1d 23h",
                        "the last hour before two days was rounded up into them")
-        // And the carry above stops at that one seam: the hour before a day is
-        // still floored, or every countdown would round up all the way.
-        XCTAssertEqual(label(86_399), "in 23h")
         XCTAssertEqual(label(0), "resets now")
         XCTAssertEqual(label(-60), "resets now")
         XCTAssertEqual(UsagePopoverView.resetLabel(nil, now: now), "")
+    }
+
+    /// And no input at all writes a floor on its own, a unit that overflowed, or a
+    /// leading zero: swept second by second from the reset itself out to two hours
+    /// and then coarsely, a step of 61 seconds, out to forty days.
+    ///
+    /// The dense window is where the seams are — `resets now`, the minutes on their
+    /// own, the carry into `in 1h 0m`, the whole of the first hour written both
+    /// ways — and it starts at zero so that `resets now` is a shape the sweep
+    /// actually reaches. Past two hours nothing changes shape until the day, so the
+    /// coarse step carries the property there instead: second by second all the way
+    /// to three days was 311 thousand calls and the slowest test in the suite, for
+    /// a stretch where every second reads like the one before it. The step is 61
+    /// rather than 60 so that it does not land on the same minute boundary over and
+    /// over.
+    ///
+    /// The assertions above are the seams the rule was written around; this is what
+    /// says there are no others. The defect being removed was not at a seam at all:
+    /// `in 1h` stood for everything from 3541 seconds to 7199 of them, and the old
+    /// test asserted it at two of those points *on purpose*. More boundaries do not
+    /// catch a shape nobody questioned, so the shape is what gets swept — four are
+    /// allowed, and `in Nh` on its own is the shape that was wrong.
+    func testNoResetTimeIsAFloorOnItsOwn() {
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        // The label with every figure replaced by `N`: `in 1h 5m` and `in 400h 5m`
+        // are one shape, and the shape is what the rule is about.
+        func shape(_ label: String) -> String {
+            label.split(separator: " ")
+                .map { $0.first?.isNumber == true ? "N" + $0.drop(while: \.isNumber) : String($0) }
+                .joined(separator: " ")
+        }
+        func figures(_ label: String) -> [Int] {
+            label.split(separator: " ").compactMap { Int($0.prefix(while: \.isNumber)) }
+        }
+        var wrong: [String] = []
+        func check(_ seconds: TimeInterval) {
+            let label = UsagePopoverView.resetLabel(now.addingTimeInterval(seconds), now: now)
+            let numbers = figures(label)
+            let ok: Bool
+            switch shape(label) {
+            // Reached because the sweep starts at the reset itself: `resetLabel`
+            // writes this for anything that is not still ahead.
+            case "resets now": ok = numbers.isEmpty
+            // Minutes on their own are the one place a bare unit is not a floor:
+            // there is nothing below them to be floored away.
+            case "in Nm": ok = numbers.count == 1 && (1...59).contains(numbers[0])
+            case "in Nh Nm": ok = numbers.count == 2 && (1...23).contains(numbers[0])
+                && (0...59).contains(numbers[1])
+            case "in Nd Nh": ok = numbers.count == 2 && numbers[0] >= 1
+                && (0...23).contains(numbers[1])
+            default: ok = false
+            }
+            if !ok { wrong.append("\(Int(seconds)) s → \"\(label)\"") }
+        }
+        for seconds in 0...7200 { check(TimeInterval(seconds)) }
+        for seconds in stride(from: 7200, through: 40 * 86_400, by: 61) {
+            check(TimeInterval(seconds))
+        }
+        XCTAssertEqual(wrong.count, 0,
+                       "\(wrong.count) inputs wrote a unit that is a floor, an overflow or a "
+                       + "leading zero, first of them \(wrong.prefix(3).joined(separator: ", "))")
     }
 
     /// What `resetLabel` writes is drawn whole in its slot.
@@ -3345,12 +3504,21 @@ final class UsagePopoverLabelTests: XCTestCase {
     /// chart's widest period and cap nothing here, and `resetLabel` prints as many
     /// days as the gateway names. Hence the last probe — a reset 56 years out,
     /// which is the same call and still inside the slot.
+    ///
+    /// `in 23h 59m` and `in 20h 44m` are on the list because the minutes beside the
+    /// hours are new (§4): the widest string a plausible reset can produce is no
+    /// longer a day count, and a slot measured only against day counts would say
+    /// nothing about the shape that now fills every row under a day. Two of them
+    /// and not one, because this label has no `monospacedDigit` and the width is
+    /// the digits' own: over all 1380 strings of the shape the widest is not the
+    /// latest hour but `in 20h 44m` at 53.75 pt, against `in 23h 59m`'s 53.25.
     func testTheResetTimeFitsItsSlotWhole() throws {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
         XCTAssertEqual(UsagePopoverView.resetLabel(now.addingTimeInterval(1_786_800_000), now: now),
                        "in 20680d 13h",
                        "the days are capped somewhere after all")
-        for string in ["in 30d 23h", "resets now", "in 5d 0h", "in 15m", "in 20680d 13h"] {
+        for string in ["in 20h 44m", "in 23h 59m", "in 30d 23h", "resets now", "in 5d 0h",
+                       "in 15m", "in 20680d 13h"] {
             let text = Text(string).font(.system(size: 10)).lineLimit(1)
             let free = try XCTUnwrap(inkWidth(text.fixedSize()),
                                      "\"\(string)\" drew nothing at all")
@@ -3828,8 +3996,7 @@ final class UsagePopoverPaintTests: XCTestCase {
         return found
     }
 
-    /// Whether a patch is the size of a frame the view asked for, to a pixel on
-    /// each side.
+    /// Whether a patch is exactly the size of a frame the view asked for.
     ///
     /// The size comes from the view, and that is the half that carries the weight:
     /// a copy of the number here is what failed both colour tests with "the
@@ -3838,14 +4005,15 @@ final class UsagePopoverPaintTests: XCTestCase {
     /// constant, plain equality survives that change: measured, a whole number of
     /// points is a whole number of pixels at this scale, 16 for 8 as 14 for 7.
     ///
-    /// The pixel of slack earns its place on the other patch. `fleetMarkerSize` is
-    /// 2.5 points tall, which is not a whole number of pixels at every scale —
-    /// checked by raising this class's `scale` to 3, where the marker is 7.5 px
-    /// tall: with equality no patch can be that and the headline's test fails with
-    /// "0 patches", with the slack the class stays green.
+    /// A pixel of slack stood here for the sample of the bold line, which was 2.5
+    /// points tall and therefore not a whole number of pixels at every scale. The
+    /// sample is gone (§4) and the slack went with it — checked by mutation, the
+    /// class is green with equality — because the one size still asked for is a
+    /// whole number of points. A fractional one would need the slack back, and
+    /// would announce itself as "drew 0 dots".
     private func isSized(_ blob: Blob, _ size: CGSize, in canvas: Canvas) -> Bool {
-        abs(Double(blob.width) - Double(size.width) * canvas.scale) <= 1
-            && abs(Double(blob.height) - Double(size.height) * canvas.scale) <= 1
+        Double(blob.width) == Double(size.width) * canvas.scale
+            && Double(blob.height) == Double(size.height) * canvas.scale
     }
 
     /// The account dots, in the order they are drawn down the popover.
@@ -4020,6 +4188,105 @@ final class UsagePopoverPaintTests: XCTestCase {
         return (UsagePopoverView(usage: store, history: history), store, history)
     }
 
+    // MARK: - The headline's caption on one line
+
+    /// The caption under the big figure is drawn on one line, whatever the figure
+    /// says.
+    ///
+    /// Which is what the headline was rebuilt for (§4). Beside the figure the
+    /// caption fitted only while the figure was short: measured, it is 205.5 pt of
+    /// ink on a 292 pt line, `52%` leaves it 219 pt and `100%` leaves 199.5, so the
+    /// wide figure wrapped it — and a wrapped caption is the complaint itself,
+    /// three digits being exactly the reading somebody opens this popover for. On
+    /// its own row it has the whole width.
+    ///
+    /// Measured the way the reset slot is (§4): the same string drawn twice, once
+    /// on its own and once where it lives. The top of the popover is three lines of
+    /// ink — the figure, the caption, the bar — and the middle one has to be as wide
+    /// as the caption drawn free, which is the caption having a line to itself and
+    /// filling it.
+    ///
+    /// The *place* is half the measurement, and it is not spare rigour: putting the
+    /// caption back beside the figure and asking only "is there a band this wide"
+    /// passes at 100%, where the figure and the first wrapped line come out as one
+    /// band of 205.50 pt against the caption's own 205.5 — the same figure to the
+    /// pixel, by coincidence. Held as the middle of three, that layout fails at both
+    /// figures: 239.00, 292.00, 292.00 at the dash, and 205.50, 84.50, 292.00 at
+    /// 100%, where the second band is the tail of the wrapped caption.
+    ///
+    /// Over the widest figure and over none, because the two are what the layout
+    /// has to hold at once.
+    func testTheHeadlineCaptionIsDrawnOnOneLine() async throws {
+        let caption = Text(UsagePopoverView.headlineCaption)
+            .font(.system(size: UsagePopoverView.headlineCaptionSize))
+        let alone = inkBands(in: try canvas(caption))
+        XCTAssertEqual(alone.count, 1, "the caption drew \(alone.count) lines on its own")
+        let whole = try XCTUnwrap(alone.first)
+        let content = Double(UsagePopoverView.width - 2 * UsagePopoverView.padding)
+
+        for mean in [nil, 100.0] as [Double?] {
+            var snapshot = try snapshot(labels: ["acc1"])
+            snapshot.fleetSevenDayMean = mean
+            let cache = UsageCache()
+            cache.store(snapshot)
+            let history = UsageHistoryModel(client: flatHistoryClient(readings: ["acc1": 90],
+                                                                     silentOnUnknown: true),
+                                           defaults: freshDefaults())
+            history.open(labels: ["acc1"])
+            await history.fetchTask?.value
+            defer { history.close() }
+            let view = UsagePopoverView(usage: UsageStore(config: .default, cache: cache),
+                                        history: history)
+            // The top three bands and no further: the rule below the bar is a
+            // full-width line too, and the account names under that are text. Counted
+            // rather than cut off at a height, because a height has headroom in one
+            // direction only — the bar ends at 79 pt, so an 80 pt window leaves 1 pt
+            // above it, and anything drawn a little taller fails this test in a place
+            // it is not looking (at a 36 pt figure the cut clipped the bar's rounded
+            // end and the third band came out 289.00 pt instead of 292.00).
+            let bands = Array(inkBands(in: try canvas(view)).prefix(3))
+            let widths = bands.map { String(format: "%.2f", $0) }.joined(separator: ", ")
+            let figure = mean.map { "\(Int($0))%" } ?? "—"
+            XCTAssertEqual(bands.count, 3,
+                           "with the figure at \(figure) the top of the popover is \(bands.count) "
+                           + "lines of ink (\(widths) pt wide) rather than figure, caption and bar")
+            guard bands.count == 3 else { continue }
+            XCTAssertEqual(bands[1], whole, accuracy: 0.5,
+                           "with the figure at \(figure) the line under it is \(bands[1]) pt wide "
+                           + "against the caption's \(whole): it was wrapped, cut, or is not the "
+                           + "caption at all (lines \(widths))")
+            XCTAssertEqual(bands[2], content, accuracy: 0.5,
+                           "the third line is \(bands[2]) pt wide, not the bar's \(content): the "
+                           + "three lines measured are not the ones named (lines \(widths))")
+        }
+    }
+
+    /// How wide each line of ink in a rendering is, in points, top to bottom: rows
+    /// that have anything drawn in them, grouped by the empty rows between them, each
+    /// measured from its leftmost inked column to its rightmost.
+    private func inkBands(in canvas: Canvas) -> [Double] {
+        var widths: [Double] = []
+        var run: (minX: Int, maxX: Int)?
+        for y in 0..<canvas.height {
+            var minX = Int.max
+            var maxX = Int.min
+            for x in 0..<canvas.width where canvas.alpha(x, y) > 8.0 / 255 {
+                minX = min(minX, x)
+                maxX = max(maxX, x)
+            }
+            if minX <= maxX {
+                run = run.map { (min($0.minX, minX), max($0.maxX, maxX)) } ?? (minX, maxX)
+            } else if let current = run {
+                widths.append(Double(current.maxX - current.minX + 1) / canvas.scale)
+                run = nil
+            }
+        }
+        if let current = run {
+            widths.append(Double(current.maxX - current.minX + 1) / canvas.scale)
+        }
+        return widths
+    }
+
     // MARK: - The mean line is ink
 
     /// The mean is drawn in ink, and no account may be handed that colour.
@@ -4027,8 +4294,8 @@ final class UsagePopoverPaintTests: XCTestCase {
     /// Which is the whole reason the chart declares its own colour scale: without
     /// `chartForegroundStyleScale` the mean is a series like any other and Charts
     /// hands it a hue out of its palette, at which point the one line this popover
-    /// exists to show is a colour among colours and the marker beside the headline
-    /// — a `Capsule` of `fleetColor` — points at nothing in the picture.
+    /// exists to show is a colour among colours — and the number in the headline,
+    /// which is that line's last point, names nothing in the picture.
     ///
     /// The rule held nothing after the legend was hidden: the test that had
     /// covered it named the legend's first entry, and it went with the legend. The
@@ -4066,8 +4333,8 @@ final class UsagePopoverPaintTests: XCTestCase {
     /// `styleDomain` puts the mean's key at the head and the accounts after it, so
     /// a key an account can also hold puts the same string in the domain twice.
     /// Charts keeps the last colour for a repeated key, and the mean is then drawn
-    /// in that account's hue while the marker beside the headline points at
-    /// nothing. Measured with the key spelled `average`, over the accounts
+    /// in that account's hue, one hue among hues rather than the one line in
+    /// ink. Measured with the key spelled `average`, over the accounts
     /// `["average", "acc2"]`: the domain came out `["average", "acc2", "average"]`,
     /// the range `[primary, blue, orange]`, and the mean's line took the orange —
     /// the colliding account's own hue, measured as 0.097 in the mean's band.
@@ -4199,44 +4466,6 @@ final class UsagePopoverPaintTests: XCTestCase {
             XCTAssertTrue(lines.contains { abs($0 - dot.hue) < 0.02 },
                           "a dot of hue \(dot.hue) names none of the lines \(lines)")
         }
-    }
-
-    // MARK: - The sample of the bold line beside the headline
-
-    /// The headline carries a sample of the chart's bold line, and it is drawn in
-    /// ink rather than in a colour out of the palette.
-    ///
-    /// It is the only thing left tying that line to the number above it: the
-    /// chart's legend is hidden and the caption that used to spell the rule out
-    /// under the plot is gone (§4). And nothing held it — deleting the `Capsule`
-    /// failed not one test of the suite, and filling it with `Color.pink`, which is
-    /// the marker pointing at an account's line instead of at the mean's, failed
-    /// none either.
-    ///
-    /// Found as one opaque patch the size of `fleetMarkerSize`: everything else in
-    /// the headline is either text, whose strokes are nothing like 10 by 2.5
-    /// points, or the bar under it, which with no reading to show is a track at
-    /// 12%. The hue is not asked for — `Color.primary` has none, and that is the
-    /// whole assertion.
-    func testTheHeadlineCarriesAnInkSampleOfTheBoldLine() async throws {
-        let (view, _, history) = try await popover(named: ["acc1"],
-                                                   asked: ["acc1"],
-                                                   readings: ["acc1": 90])
-        defer { history.close() }
-        let picture = try canvas(view.headline)
-        // Half strength, not "opaque": `Color.primary` is `labelColor`, which is
-        // black at 85% — measured, and at a threshold of 0.9 this rendering has no
-        // opaque patch in it at all. The caption beside the marker is
-        // `.secondary`, and its glyphs sit under this line.
-        let markers = blobs(in: picture) { $0.alpha > 0.5 }
-            .filter { isSized($0, UsagePopoverView.fleetMarkerSize, in: picture) }
-        XCTAssertEqual(markers.count, 1,
-                       "the headline holds \(markers.count) patches the size of the line's sample: "
-                       + "the marker that explains the bold line is not there")
-        guard let marker = markers.first else { return }
-        XCTAssertLessThan(marker.saturation, 0.1,
-                          "the sample beside the caption is a hue (saturation \(marker.saturation)) "
-                          + "rather than ink: it points at an account's line, not at the mean's")
     }
 
     // MARK: - The divider over a silent footer
