@@ -133,7 +133,7 @@ struct FleetSeries: Sendable, Equatable {
     /// The key this line's colour and its place in the scale hang on. Nothing on
     /// screen reads it any more — the legend is hidden (§4) and the marker beside
     /// the headline's caption is what names this line now — but the scale still
-    /// needs a domain entry no account can be handed.
+    /// needs a domain entry no label anybody would configure can equal.
     ///
     /// Hence the NUL: an account's label comes out of the gateway's config, and
     /// a plain word is a label somebody may already have. `average` was one, and
@@ -142,6 +142,10 @@ struct FleetSeries: Sendable, Equatable {
     /// account's hue while the marker beside the headline points at nothing. No
     /// palette test notices: both lines are then chromatic and both dots still
     /// match a line of their own hue.
+    ///
+    /// Unreachable in practice rather than impossible: JSON spells a NUL as
+    /// `\u0000` and the decoding path takes it, so a label written that way on
+    /// purpose brings the collision straight back.
     static let label = "\u{0}average"
 
     /// The mean of the readings there are, and nothing at all when there are
@@ -818,7 +822,7 @@ struct UsagePopoverView: View {
             // An explicit scale rather than the automatic one, for the one thing
             // it decides that the picture depends on: which colour each key gets
             // — the mean's is ink itself, and no account may be handed it, which
-            // is why `FleetSeries.label` is a key no account label can equal.
+            // is why `FleetSeries.label` is a key no configured label equals.
             //
             // The account colours are keyed on the snapshot's list of accounts,
             // not on the position in `history.series`: the dots beside the names

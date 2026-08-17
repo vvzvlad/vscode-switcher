@@ -4069,7 +4069,8 @@ final class UsagePopoverPaintTests: XCTestCase {
     /// in that account's hue while the marker beside the headline points at
     /// nothing. Measured with the key spelled `average`, over the accounts
     /// `["average", "acc2"]`: the domain came out `["average", "acc2", "average"]`,
-    /// the range `[primary, orange, blue]`, and the mean's line took the blue.
+    /// the range `[primary, blue, orange]`, and the mean's line took the orange —
+    /// the colliding account's own hue, measured as 0.097 in the mean's band.
     ///
     /// Which is why every other test on this palette stays green through it: both
     /// lines are chromatic, and each dot still matches a line of its own hue. Only
