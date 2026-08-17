@@ -240,7 +240,7 @@ final class SwitcherViewModel: ObservableObject {
         let windows = Self.ordered(snapshot.openWindows, by: windowOrder)
             .filter { Self.matches($0, needle) }
         if !windows.isEmpty {
-            result.append(SwitcherSection(title: "Открытые окна", rows: windows))
+            result.append(SwitcherSection(title: "Open windows", rows: windows))
         }
 
         // Every project, in the order frozen when the panel appeared — the one
@@ -253,7 +253,7 @@ final class SwitcherViewModel: ObservableObject {
         let projects = Self.ordered(snapshot.projects, by: projectOrder)
             .filter { Self.matches($0, needle) }
         if !projects.isEmpty {
-            result.append(SwitcherSection(title: "Проекты", rows: projects))
+            result.append(SwitcherSection(title: "Projects", rows: projects))
         }
         return result
     }
@@ -417,7 +417,7 @@ struct SwitcherView: View {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
                     .font(.system(size: 12, weight: .medium))
-                TextField("Поиск проекта или темы", text: $model.query)
+                TextField("Search project or topic", text: $model.query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
                     .focused($searchFocused)
@@ -473,7 +473,7 @@ struct SwitcherView: View {
                     }
                 }
                 if sections.isEmpty {
-                    Text(model.snapshot.generatedAt == .distantPast ? "Загрузка…" : "Ничего не найдено")
+                    Text(model.snapshot.generatedAt == .distantPast ? "Loading…" : "Nothing found")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -499,7 +499,8 @@ private struct AccessibilityBanner: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
                 .font(.system(size: 11))
-            Text("Нет доступа к Accessibility — окна не видны, состояния агентов видны. Нажмите, чтобы выдать")
+            Text("No Accessibility access — windows are not listed; agent states still are. "
+                 + "Click to grant")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading)
@@ -800,7 +801,7 @@ struct SwitcherRowView: View {
 
         if !row.sessions.isEmpty {
             lines.append("")
-            lines.append("Чаты:")
+            lines.append("Chats:")
             for session in row.sessions {
                 var parts = [Self.stateLabel(for: session.state)]
                 if let topic = shorten(session.topic, 56) { parts.append(topic) }
@@ -815,7 +816,7 @@ struct SwitcherRowView: View {
 
         if !row.subagentDescriptions.isEmpty {
             lines.append("")
-            lines.append("Фоновые агенты:")
+            lines.append("Background agents:")
             lines.append(contentsOf: row.subagentDescriptions.map { "• " + $0 })
         }
 
@@ -847,7 +848,7 @@ struct SwitcherRowView: View {
         guard let total = usageLabel(for: row), let usage = row.usage else { return [] }
         let counters = [("in", usage.input), ("out", usage.output),
                         ("cache write", usage.cacheCreation), ("cache read", usage.cacheRead)]
-        return ["", "Токены (input-equivalent): \(total)"]
+        return ["", "Tokens (input-equivalent): \(total)"]
             + counters.map { "• \($0.0) \($0.1.map { compactTokens(Double($0)) } ?? "?")" }
     }
 
@@ -856,11 +857,11 @@ struct SwitcherRowView: View {
     /// the vocabulary lives.
     static func stateLabel(for state: AgentState) -> String {
         switch state {
-        case .question: return "Задал вопрос"
-        case .permission: return "Ждёт разрешения"
-        case .waiting: return "Ответил, ждёт реакции"
-        case .working: return "Работает"
-        case .idle: return "Простаивает"
+        case .question: return "Asked a question"
+        case .permission: return "Waiting for permission"
+        case .waiting: return "Replied, waiting for you"
+        case .working: return "Working"
+        case .idle: return "Idle"
         }
     }
 

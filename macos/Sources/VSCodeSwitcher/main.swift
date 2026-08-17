@@ -9,13 +9,14 @@ let arguments = Array(CommandLine.arguments.dropFirst())
 
 if arguments.contains("--help") || arguments.contains("-h") {
     print("""
-    VSCodeSwitcher — панель переключения окон VSCode.
+    VSCodeSwitcher: a switcher panel for VSCode windows.
 
-      (без аргументов)  запустить агент в строке меню
-      --no-windows      запустить без окон редактора: список собирается только из
-                        проектов и живых сессий, как без доступа к Accessibility
-      --dump            напечатать собранную модель и выйти
-      --dump --json     то же самое в JSON
+      (no arguments)    run the menu bar agent
+      --no-windows      run without editor windows: the list is built from
+                        projects and live sessions only, as when Accessibility
+                        access is missing
+      --dump            print the assembled model and exit
+      --dump --json     the same, as JSON
     """)
     exit(0)
 }

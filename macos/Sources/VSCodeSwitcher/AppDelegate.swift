@@ -241,13 +241,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         let menu = NSMenu()
-        menu.addItem(menuItem("Показать панель", #selector(showPanel), key: ""))
+        menu.addItem(menuItem("Show panel", #selector(showPanel), key: ""))
         menu.addItem(.separator())
-        menu.addItem(menuItem("Открыть конфиг", #selector(openConfig), key: ""))
-        menu.addItem(menuItem("Установить хуки", #selector(installHooks), key: ""))
-        menu.addItem(menuItem("Проверить разрешения", #selector(checkPermissions), key: ""))
+        menu.addItem(menuItem("Open config", #selector(openConfig), key: ""))
+        menu.addItem(menuItem("Install hooks", #selector(installHooks), key: ""))
+        menu.addItem(menuItem("Check permissions", #selector(checkPermissions), key: ""))
         menu.addItem(.separator())
-        menu.addItem(menuItem("Выход", #selector(quit), key: "q"))
+        menu.addItem(menuItem("Quit", #selector(quit), key: "q"))
         statusMenu = menu
         statusItem = item
 
@@ -433,7 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                       options: [.prettyPrinted, .sortedKeys])
                 try data.write(to: url, options: .atomic)
             } catch {
-                presentAlert(title: "Не удалось создать конфиг",
+                presentAlert(title: "Could not create config",
                              message: "\(url.path)\n\n\(error.localizedDescription)")
                 return
             }
@@ -454,8 +454,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             let count = VSCodeWindows.listWindows(bundleID: bundleID).count
             DispatchQueue.main.async { [weak self] in
-                self?.presentAlert(title: "Accessibility выдан",
-                                   message: "Видно окон \(bundleID): \(count).")
+                self?.presentAlert(title: "Accessibility granted",
+                                   message: "Windows visible for \(bundleID): \(count).")
             }
         }
     }
@@ -528,9 +528,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func installHooks() {
         guard let script = Self.installHooksScriptURL() else {
-            presentAlert(title: "Скрипт не найден",
-                         message: "install-hooks.sh нет ни в бандле, ни рядом с бинарником. "
-                                + "Запустите scripts/install-hooks.sh из репозитория вручную.")
+            presentAlert(title: "Script not found",
+                         message: "install-hooks.sh is neither in the bundle nor beside the binary. "
+                                + "Run scripts/install-hooks.sh from the repository by hand.")
             return
         }
         // The script shells out to jq and rewrites ~/.claude/settings.json, so
@@ -538,8 +538,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Self.run(script: script)
             DispatchQueue.main.async { [weak self] in
-                self?.presentAlert(title: result.status == 0 ? "Хуки установлены" : "Установка не удалась",
-                                   message: result.output.isEmpty ? "Код возврата \(result.status)." : result.output)
+                self?.presentAlert(title: result.status == 0 ? "Hooks installed" : "Install failed",
+                                   message: result.output.isEmpty ? "Exit code \(result.status)." : result.output)
             }
         }
     }
@@ -608,7 +608,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// field's, and the debt is settled when the modal ends. Done here with a
     /// bare `NSApp.activate`, this was the third activator of an app that has no
     /// window of its own once the alert is dismissed — §4's defect by the
-    /// shortest route there is: press "Проверить разрешения", read the answer,
+    /// shortest route there is: press "Check permissions", read the answer,
     /// click OK, and the app stays frontmost with nothing on screen while the
     /// keystrokes go nowhere. No exception for a modal was found: hiding is
     /// unsafe *during* `runModal` (`canHideApp` answers no while
