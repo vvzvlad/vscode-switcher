@@ -1,7 +1,13 @@
 import AppKit
 
 /// The status item's picture: one bar for the fleet's weekly quota, and that
-/// quota as a number.
+/// quota as a number under it.
+///
+/// Stacked rather than side by side, and that is the user's call: side by side
+/// the item was 57 points wide and took a visible slice of a menu bar it shares
+/// with a dozen others. The number stays — it is the reading; only its place
+/// changed, which costs two points of the font size and buys thirty points of
+/// menu bar.
 ///
 /// No app glyph in front of it. There was one, and the user threw it out on
 /// sight: an icon identifying the app says nothing a menu bar full of icons
@@ -26,10 +32,13 @@ enum MenuBarIcon {
 
     /// The height a status item image is drawn at.
     static let height: CGFloat = 18
-    static let barWidth: CGFloat = 20
+    /// How tall the bar is drawn. Six points rather than five, because the fill
+    /// *is* the reading: `insetBy(dy: 1.5)` leaves 3 pt of it at six and 2 pt at
+    /// five, a third of the ink for nothing — the stack fits either way
+    /// (`6 + 1 + 11 = 18`, exactly the height).
     static let barHeight: CGFloat = 6
-    /// Between the bar and the number.
-    static let gap: CGFloat = 4
+    /// Between the bar and the number under it.
+    static let gap: CGFloat = 1
 
     /// The number's own column, measured off `100%` — the widest string it can
     /// ever hold — and reserved whether or not there is a number to put in it.
@@ -43,21 +52,47 @@ enum MenuBarIcon {
     static let numberColumnWidth: CGFloat = ceil(NSAttributedString(string: "100%",
                                                                    attributes: attributes).size().width)
 
-    /// The whole picture, always this wide.
-    static var width: CGFloat { barWidth + gap + numberColumnWidth }
+    /// The whole picture, always this wide: the number's column, with the bar
+    /// drawn across all of it. There is no second candidate — a floor of 20 pt
+    /// stood here and could never win against a column of 27.
+    static var width: CGFloat { numberColumnWidth }
 
-    /// Where the bar sits, vertically centred.
+    /// The line the number occupies, as the font lays it out.
+    static var numberHeight: CGFloat { ceil(label(forPercent: 100).size().height) }
+
+    /// Bar, gap, number — what has to fit inside `height`, and at these constants
+    /// fills it exactly. Which is why there is no centring inset in this layout:
+    /// there is no spare row to centre in, and each of the two things drawn is
+    /// pinned to the edge it belongs to — the number to the bottom, the bar to the
+    /// top. The gap between them is what is left over, and the only part of the
+    /// stack that can afford to lose a point.
+    static var contentHeight: CGFloat { barHeight + gap + numberHeight }
+
+    /// Where the bar sits: on top, across the whole width.
+    ///
+    /// Measured down from the top edge rather than up from the number, and the
+    /// difference is what happens the day the system font lays `100%` out one
+    /// point taller. Stacked from the bottom (`numberHeight + gap`) the bar's top
+    /// would be at 19 in a picture 18 points tall, and the row clipped off is
+    /// bar *fill* — the reading itself, of which `insetBy(dy: 1.5)` leaves only
+    /// 3 points. From the top edge the extra point comes out of the gap instead,
+    /// which is the one part of the stack that is there to be spent. At today's
+    /// figures the two are the same rect (`18 - 6 == 11 + 1`), and
+    /// `contentHeight == height` is the test that notices when they stop being.
     static var barRect: NSRect {
-        NSRect(x: 0, y: ((height - barHeight) / 2).rounded(),
-               width: barWidth, height: barHeight)
+        NSRect(x: 0, y: height - barHeight, width: width, height: barHeight)
     }
 
-    /// Where the number may draw, and nowhere else.
-    static var numberColumn: ClosedRange<CGFloat> { (width - numberColumnWidth)...width }
+    /// Where the number may draw, and nowhere else — in points from the *bottom*
+    /// edge, which is the way this picture is drawn (`lockFocusFlipped(false)`).
+    static var numberRows: ClosedRange<CGFloat> { 0...numberHeight }
 
     // MARK: - Labels
 
-    static let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+    /// Two points smaller than the row beside it used to be, and that is what
+    /// makes the stack fit: `100%` at 11 pt is 33 points wide, at 9 pt it is 27,
+    /// and the width of the picture is now the width of this string.
+    static let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
 
     private static let attributes: [NSAttributedString.Key: Any] = [
         .font: font,
@@ -133,8 +168,8 @@ enum MenuBarIcon {
         // status item picture that is not a template is a flat black blob on a
         // dark menu bar.
         image.isTemplate = true
-        image.accessibilityDescription = percent.map { "Недельная квота: \($0)%" }
-            ?? "Недельная квота: нет данных"
+        image.accessibilityDescription = percent.map { "Weekly quota: \($0)%" }
+            ?? "Weekly quota: no data"
         return image
     }
 
@@ -144,8 +179,9 @@ enum MenuBarIcon {
         let label = label(forPercent: percent)
         let size = label.size()
         // Flush with the right edge of the picture, which is the right edge of
-        // the column: the digits grow leftwards and the `%` never moves.
-        label.draw(at: NSPoint(x: width - size.width, y: ((height - size.height) / 2).rounded()))
+        // the column: the digits grow leftwards and the `%` never moves. And on
+        // the bottom row of the stack, under the bar.
+        label.draw(at: NSPoint(x: width - size.width, y: 0))
     }
 
     /// The bar. Filled in proportion when there is a reading, empty and dashed

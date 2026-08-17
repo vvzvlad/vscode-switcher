@@ -64,9 +64,20 @@ final class UsageStore: ObservableObject {
     /// queued, because the next one is only a minute away.
     private var pollInFlight = false
 
+    /// The store publishes whatever its cache already holds, rather than starting
+    /// at `.empty`.
+    ///
+    /// The cache is this store's own last pass, read synchronously by
+    /// `DataSource.build()` (§6); a store built over one that has a value in it
+    /// and publishing nothing would put the two out of step for as long as the
+    /// first pass takes. In the app the cache is made alongside the store and is
+    /// empty, so there this line is `.empty` — its other reader is
+    /// `UsagePopoverPaintTests`, which puts a landed poll on screen this way and
+    /// is why `apply` did not have to stop being private.
     init(config: Config, cache: UsageCache) {
         client = UsageClient(baseURL: config.resolvedUsageBaseURL)
         self.cache = cache
+        snapshot = cache.snapshot
     }
 
     // MARK: - Lifecycle
@@ -105,14 +116,13 @@ final class UsageStore: ObservableObject {
     /// figures can arrive while the session figures time out. Whatever did not
     /// arrive stays at its previous value and is blamed in its own half of the
     /// snapshot; the quota half, the only one drawn with its age beside it,
-    /// keeps the stamp it arrived under. Only `checkedAt` moves on every pass: it
-    /// is the age of the attempt, and saying it out loud over unchanged numbers
-    /// is what made the footer call hour-old figures fresh.
+    /// keeps the stamp it arrived under rather than the stamp of the attempt —
+    /// moving it along with the attempt is what made the footer call hour-old
+    /// figures fresh.
     nonisolated static func poll(client: UsageClient,
                                  previous: UsageSnapshot,
                                  now: Date = Date()) async -> UsageSnapshot {
         var result = previous
-        result.checkedAt = now
 
         do {
             let report = try await client.usage()
@@ -166,7 +176,6 @@ final class UsageStore: ObservableObject {
         // spare.
         guard semaphore.wait(timeout: .now() + 20) == .success else {
             var stalled = UsageSnapshot.empty
-            stalled.checkedAt = now
             // Neither half answered, so both are blamed: nothing about a pass
             // that never came back is specific to one endpoint.
             stalled.quotaFailure = "the pass did not finish in 20 s"
@@ -176,6 +185,12 @@ final class UsageStore: ObservableObject {
         return box.value
     }
 
+    /// A finished pass, published, cached, and the latch released.
+    ///
+    /// Private, and the latch is the reason it has to be: a caller from outside
+    /// the pass would clear `pollInFlight` under a pass still running, which is
+    /// the one thing that guard exists to prevent. A test that needs a landed
+    /// poll on screen seeds the cache and builds the store over it instead.
     private func apply(_ value: UsageSnapshot) {
         snapshot = value
         // Written on a failed pass too: the value carries the previous numbers

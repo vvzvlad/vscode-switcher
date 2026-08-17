@@ -1003,7 +1003,6 @@ final class UsageWiringTests: XCTestCase {
 
         let cache = UsageCache()
         var polled = UsageSnapshot.empty
-        polled.checkedAt = Date()
         polled.tokensBySlug = [ClaudeSessions.slug(forPath: project.path): TokenCounts(input: 10, output: 2,
                                                         cacheCreation: 0, cacheRead: 0)]
         cache.store(polled)
@@ -1064,7 +1063,6 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.since, Date(timeIntervalSince1970: 1_786_761_516))
         XCTAssertEqual(snapshot.fleetSevenDayMean, 58.667)
         XCTAssertEqual(snapshot.accounts.map(\.label), ["acc2"])
-        XCTAssertEqual(snapshot.checkedAt, now)
         XCTAssertEqual(snapshot.quotaFetchedAt, now)
     }
 
@@ -1074,7 +1072,9 @@ final class UsageStoreTests: XCTestCase {
     /// And the stamp stays with the numbers it belongs to. Moving it along with
     /// the attempt is what had the popover describing hour-old figures as
     /// fetched a moment ago, with the reason they were not standing right
-    /// underneath.
+    /// underneath. The pass keeps no stamp of the attempt at all any more: what
+    /// says a failed pass ran are the numbers it left standing and the blame it
+    /// wrote, both of them here.
     func testAFailedPassKeepsThePreviousNumbersAndTheirStamps() async {
         let earlier = Date(timeIntervalSince1970: 1_786_700_000)
         var previous = UsageSnapshot.empty
@@ -1090,7 +1090,6 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.fleetSevenDayMean, 42)
         XCTAssertEqual(snapshot.quotaFailure?.contains("/gw/usage"), true)
         XCTAssertEqual(snapshot.sessionsFailure?.contains("/gw/sessions"), true)
-        XCTAssertEqual(snapshot.checkedAt, now, "the attempt is what just happened")
         XCTAssertEqual(snapshot.quotaFetchedAt, earlier, "the figures did not change hands")
     }
 

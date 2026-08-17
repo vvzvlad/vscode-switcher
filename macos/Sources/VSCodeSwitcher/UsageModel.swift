@@ -306,6 +306,16 @@ struct HistoryPoint: Sendable, Decodable, Equatable {
         fiveHour = try container.decodeIfPresent(Double.self, forKey: .fiveHour)
         sevenDay = try container.decodeIfPresent(Double.self, forKey: .sevenDay)
     }
+
+    /// A sample with a reading of our own in it. Its one use is
+    /// `UsageHistoryModel.despiked`, which replaces a sample's `util_7d` with
+    /// the median of it and its neighbours; the wire format is otherwise the
+    /// only maker of these values.
+    init(timestamp: Date, fiveHour: Double?, sevenDay: Double?) {
+        self.timestamp = timestamp
+        self.fiveHour = fiveHour
+        self.sevenDay = sevenDay
+    }
 }
 
 /// The body of `GET /gw/usage/{label}/history`.
@@ -348,10 +358,14 @@ struct HistorySeries: Sendable, Decodable {
 /// an indicator and a number with no age beside either. A stamp nobody reads is
 /// a field to keep in step with every future change of the merge rule, in
 /// exchange for nothing.
+///
+/// Which is why there is no stamp for the *attempt* either. One stood here, and
+/// the footer line that read it — "checked N ago", beside the age of the figures
+/// — is the line §4 removed: with both halves polled once a minute the two
+/// sentences moved together and said the same thing twice. The popover's own
+/// `UsageHistoryModel.checkedAt` is a different field with a live reader (its
+/// refresh schedule) and is not this one.
 struct UsageSnapshot: Sendable {
-    /// When the last pass ran, whatever came of it. This is the age of the
-    /// attempt, never the age of the numbers — read `quotaFetchedAt` for that.
-    var checkedAt: Date
     /// When `/gw/usage` last answered, or `nil` if it never has. The account
     /// figures, the fleet mean and the accounts list are all as of this moment.
     var quotaFetchedAt: Date?
@@ -388,8 +402,7 @@ struct UsageSnapshot: Sendable {
     var sessionsFailure: String?
 
     /// Nothing polled yet.
-    static let empty = UsageSnapshot(checkedAt: .distantPast,
-                                     quotaFetchedAt: nil,
+    static let empty = UsageSnapshot(quotaFetchedAt: nil,
                                      since: .distantPast,
                                      truncated: false,
                                      fleetSevenDayMean: nil,

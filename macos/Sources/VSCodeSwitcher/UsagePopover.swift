@@ -116,10 +116,10 @@ struct FleetSeries: Sendable, Equatable {
         /// own `fleet` block, for the same reason.
         ///
         /// Nothing on screen shows it: the chart has no place to say it that is
-        /// not a second scale in one picture (§4), and the caption under it says
-        /// the rule instead. It is here because the tests are entitled to ask
-        /// which accounts a point is a mean of — "the mean did not silently
-        /// become a mean of one" is not visible in the value alone.
+        /// not a second scale in one picture (§4). It is here because the tests
+        /// are entitled to ask which accounts a point is a mean of — "the mean
+        /// did not silently become a mean of one" is not visible in the value
+        /// alone.
         var accounts: Int
     }
 
@@ -130,8 +130,23 @@ struct FleetSeries: Sendable, Equatable {
 
     var isEmpty: Bool { points.isEmpty }
 
-    /// What the legend calls this line, and the key its colour hangs on.
-    static let label = "среднее"
+    /// The key this line's colour and its place in the scale hang on. Nothing on
+    /// screen reads it any more — the legend is hidden (§4) and the marker beside
+    /// the headline's caption is what names this line now — but the scale still
+    /// needs a domain entry no label anybody would configure can equal.
+    ///
+    /// Hence the NUL: an account's label comes out of the gateway's config, and
+    /// a plain word is a label somebody may already have. `average` was one, and
+    /// the collision is silent in the worst way — the domain gets the same key
+    /// twice, Charts keeps the last colour for it, and the mean is drawn in that
+    /// account's hue while the marker beside the headline points at nothing. No
+    /// palette test notices: both lines are then chromatic and both dots still
+    /// match a line of their own hue.
+    ///
+    /// Unreachable in practice rather than impossible: JSON spells a NUL as
+    /// `\u0000` and the decoding path takes it, so a label written that way on
+    /// purpose brings the collision straight back.
+    static let label = "\u{0}average"
 
     /// The mean of the readings there are, and nothing at all when there are
     /// none: the average of no accounts is not zero — the rule `FleetWindow`
@@ -225,12 +240,12 @@ final class UsageHistoryModel: ObservableObject {
     @Published private(set) var failure: String?
     /// When the lines on screen arrived, or `nil` while there are none.
     ///
-    /// The age of the *series*, never the age of the attempt — the same split
-    /// `UsageSnapshot` makes between `quotaFetchedAt` and `checkedAt`, and for
-    /// the same reason. One stamp for both moved on every pass that finished,
-    /// including the one where not a single account answered, and the chart then
-    /// reported that the period held no data on the strength of an answer nobody
-    /// had given.
+    /// The age of the *series*, never the age of the attempt: the attempt has its
+    /// own stamp below, and the two are kept apart for the same reason
+    /// `UsageSnapshot.quotaFetchedAt` dates the figures rather than the pass. One
+    /// stamp for both moved on every pass that finished, including the one where
+    /// not a single account answered, and the chart then reported that the period
+    /// held no data on the strength of an answer nobody had given.
     @Published private(set) var fetchedAt: Date?
     /// When the last pass finished, whatever came of it. Not published: it is
     /// the refresh schedule's clock, and the schedule has to go on ticking
@@ -254,7 +269,7 @@ final class UsageHistoryModel: ObservableObject {
     /// AGENTS.md keeps a note about; removing it changed no test, which is the
     /// point.
     private(set) var seriesPeriod: HistoryPeriod?
-    /// Ticks while the popover is open, so "updated N ago" stays true without a
+    /// Ticks while the popover is open, so "as of N ago" stays true without a
     /// timer running behind a popover nobody is looking at.
     @Published private(set) var now: Date = Date()
 
@@ -269,7 +284,7 @@ final class UsageHistoryModel: ObservableObject {
 
     /// How often the series are asked for again while the popover stays open.
     static let refreshSeconds: TimeInterval = 60
-    /// How often the clock behind "updated N ago" is nudged. Coarse on purpose:
+    /// How often the clock behind "as of N ago" is nudged. Coarse on purpose:
     /// the footer's own wording is not finer than a minute.
     static let tickSeconds: TimeInterval = 15
 
@@ -381,7 +396,11 @@ final class UsageHistoryModel: ObservableObject {
                 group.addTask {
                     do {
                         let answer = try await client.history(label: label, since: since)
-                        return Fetched(label: label, points: answer.points, failure: nil)
+                        // Filtered once, here, and both the lines and the mean
+                        // are built from the result below: filtered twice, or on
+                        // one path only, the bold line and the lines under it
+                        // would describe different data.
+                        return Fetched(label: label, points: despiked(answer.points), failure: nil)
                     } catch {
                         return Fetched(label: label, points: [], failure: "\(label): \(error)")
                     }
@@ -400,6 +419,66 @@ final class UsageHistoryModel: ObservableObject {
         return Loaded(series: answered.map { AccountSeries.make(label: $0.label, points: $0.points) },
                       fleet: FleetSeries.make(from: answered.map(\.points)),
                       failure: failures.isEmpty ? nil : failures.joined(separator: "; "))
+    }
+
+    /// The gateway's samples with the sawtooth taken out of `util_7d`: each
+    /// reading replaced by the median of itself and its two neighbours.
+    ///
+    /// The teeth are real and they are not the quota's. A sample carries the
+    /// `source` it was taken from — `poll` (the gateway asked the API for the
+    /// state of the quota) or `headers` (the figure was read out of the headers of
+    /// an ordinary request) — and the two disagree by exactly one point per cent,
+    /// systematically: over the week measured, neighbouring pairs inside 60 s went
+    /// `poll → headers` −1 in 108 cases and `headers → poll` +1 in 99. Shuffled
+    /// together in time they draw a ±1 comb over lines that are otherwise smooth.
+    ///
+    /// A median of three is what removes it: 259 single teeth over three accounts
+    /// (96, 134, 29 samples changed), every one of amplitude 1, and the genuine
+    /// steps survive — a quota reset from 100 to 0 is a step, not a tooth, and a
+    /// median keeps it whole. Re-measured against the live gateway the same day:
+    /// 99, 134 and 34 teeth, all of them gone afterwards, with the count of
+    /// samples the filter changed equal to the count of teeth — which is also
+    /// what says the teeth are isolated rather than a run of alternation, the one
+    /// shape a median of three moves the phase of instead of flattening.
+    ///
+    /// Filtering by `source` was tried and rejected: `poll` alone throws away two
+    /// thirds of the samples (1192 of 1862 on one account) and guts the resolution
+    /// of the short windows, and `headers` alone leaves the 15 teeth of the 259
+    /// that sit inside `headers` runs. The numbers and the method are in SPEC §4.
+    ///
+    /// Two things it deliberately does not touch. A window containing a sample
+    /// with no reading is left alone: a `null` is a real hole (§4), and smoothing
+    /// across one would invent a reading where the gateway took none. And the
+    /// first and last samples are never changed, which is a requirement rather
+    /// than an omission: the last reading of the series is the "last known value"
+    /// the end of the bold line is made of, and that end has to be the figure in
+    /// the headline (the rule in §4).
+    ///
+    /// Those two exemptions are the same exemption, and together they are what
+    /// makes the requirement hold for a series whose *array* ends in holes. The
+    /// last reading a series knows either sits at the end of the array, where this
+    /// window does not reach, or has a `null` after it — and then the guard below
+    /// declines it. So there is no such thing here as a last reading inside the
+    /// window: `testTheLastKnownReadingIsNeverMoved` asks it in both forms, and
+    /// `testTheEndsOfTheSeriesAreNeverMoved` holds the plain case.
+    ///
+    /// `util_5h` is left as it came: no line on this chart is drawn from it.
+    nonisolated static func despiked(_ points: [HistoryPoint]) -> [HistoryPoint] {
+        guard points.count > 2 else { return points }
+        var filtered = points
+        // Read from `points` and written to `filtered`, so every median is taken
+        // over the samples as they arrived rather than over ones already moved.
+        for index in 1..<(points.count - 1) {
+            guard let previous = points[index - 1].sevenDay,
+                  let value = points[index].sevenDay,
+                  let next = points[index + 1].sevenDay else { continue }
+            let median = max(min(previous, value), min(max(previous, value), next))
+            guard median != value else { continue }
+            filtered[index] = HistoryPoint(timestamp: points[index].timestamp,
+                                           fiveHour: points[index].fiveHour,
+                                           sevenDay: median)
+        }
+        return filtered
     }
 
     private func apply(_ loaded: Loaded, period: HistoryPeriod) {
@@ -464,8 +543,8 @@ final class UsageHistoryModel: ObservableObject {
 // MARK: - Popover
 
 /// What the left click on the status item opens: the fleet's weekly quota in
-/// full size, then each account's two windows, then utilisation over time, then
-/// how old all of it is.
+/// full size, then each account's two windows, then utilisation over time — and,
+/// only when there is something to say about it, how old all of it is.
 struct UsagePopoverView: View {
 
     @ObservedObject var usage: UsageStore
@@ -475,21 +554,69 @@ struct UsagePopoverView: View {
     /// reset time on the same line as its bar.
     static let width: CGFloat = 320
 
+    /// The inset around everything in the popover. Named rather than written into
+    /// `body`, because it is also the answer to "how wide is a full-width rule
+    /// here": `UsagePopoverPaintTests` measures a `Divider` against the content
+    /// width, and against the picture's width the same rule would be a different
+    /// figure every time this number changed.
+    static let padding: CGFloat = 14
+
     /// The one symbol in this view. Held by `testEverySymbolNameActuallyResolves`
     /// along with the row's four: an unknown name draws nothing at all.
     static let failureSymbolName = "exclamationmark.triangle.fill"
 
+    /// The slot the reset time gets at the right end of a window row. Wide enough
+    /// for everything `resetLabel` writes about a quota window, which is measured
+    /// rather than asserted (`testTheResetTimeFitsItsSlotWhole`): a truncated
+    /// `in 5d 0h` would be an hour count reading as a day count, which is the very
+    /// defect the hours were added for.
+    ///
+    /// Not "the longest thing the function can write" — there is no such thing.
+    /// The 30 days of the chart's widest period cap the *chart*; `resetLabel`
+    /// prints as many days as the gateway names, and 56 years of them still fit
+    /// (§4 records the figures). What is measured is the slot.
+    static let resetColumnWidth: CGFloat = 74
+
+    /// The dot in front of an account's name — the sample of that account's line
+    /// on the chart, which is why the chart has no legend.
+    ///
+    /// A constant because the test that holds the colours finds the dots by their
+    /// size: nothing else in this view is both opaque and coloured in a square
+    /// this small. Written into the frame in two places, the number would be a
+    /// copy in the test, and changing the dot — pure decoration — would fail a
+    /// test about the palette.
+    static let accountDotSize: CGFloat = 7
+
+    /// The sample of the bold line that stands in front of the headline's caption:
+    /// a `Capsule` of `fleetColor`, this wide and this tall. Read by the test that
+    /// holds the marker, for the reason the dot's size is.
+    static let fleetMarkerSize = CGSize(width: 10, height: 2.5)
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        // Worked out once here rather than inside `footer`, because the divider
+        // above it depends on the answer: a footer with nothing to say must not
+        // leave a rule hanging across the bottom of the popover.
+        let age = Self.footerAgeLabel(quotaFetchedAt: usage.snapshot.quotaFetchedAt,
+                                      quotaFailed: usage.snapshot.quotaFailure != nil,
+                                      chartFetchedAt: history.fetchedAt,
+                                      seriesPeriod: history.seriesPeriod,
+                                      period: history.period,
+                                      chartFailed: history.failure != nil,
+                                      now: history.now)
+        let failure = Self.failureText(quota: usage.snapshot.quotaFailure,
+                                       history: history.failure)
+        return VStack(alignment: .leading, spacing: 12) {
             headline
             Divider()
             accounts
             Divider()
             chart
-            Divider()
-            footer
+            if !Self.footerIsSilent(age: age, failure: failure) {
+                Divider()
+                footer(age: age, failure: failure)
+            }
         }
-        .padding(14)
+        .padding(Self.padding)
         .frame(width: Self.width)
         // The accounts come from the summary poll, which runs whether or not
         // this view is up; an account appearing under an open popover should get
@@ -514,17 +641,39 @@ struct UsagePopoverView: View {
     /// a dash over the account rows right below it, which go on showing their
     /// stored percentages — two contradicting statements on one screen, and the
     /// dash was the false one: the number is known, it is merely old.
-    private var headline: some View {
+    /// Not private, for the reason `plot` is not: the marker in front of the
+    /// caption is the whole explanation of the bold line on the chart, and nothing
+    /// but a rendering can be asked whether it is there and whether it is ink
+    /// (`testTheHeadlineCarriesAnInkSampleOfTheBoldLine`).
+    var headline: some View {
         let percent = Self.headlinePercent(for: usage.snapshot)
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(percent.map { "\($0)%" } ?? "—")
                     .font(.system(size: 30, weight: .semibold))
                     .monospacedDigit()
-                Text("недельная квота, среднее по флоту")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    // The chart's bold line, in front of the words it is the
+                    // same quantity as. This is the whole explanation of that
+                    // line now: the legend is hidden and the caption that used
+                    // to spell the rule out under the chart is gone, so what
+                    // ties the ink-coloured line to this number is a sample of
+                    // it standing next to the number.
+                    //
+                    // A shape has no baseline of its own, and left to itself it
+                    // would sit *on* the text's, which reads as a full stop
+                    // rather than as a line. Three points above it is roughly
+                    // the middle of the lower-case letters beside it.
+                    Capsule()
+                        .fill(Self.fleetColor)
+                        .frame(width: Self.fleetMarkerSize.width,
+                               height: Self.fleetMarkerSize.height)
+                        .alignmentGuide(.firstTextBaseline) { dimensions in dimensions[.bottom] + 3 }
+                    Text("weekly quota, average across accounts")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             QuotaBar(fraction: percent.map { Double($0) / 100 }, height: 8)
         }
@@ -538,13 +687,23 @@ struct UsagePopoverView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         } else {
+            let labels = usage.snapshot.accounts.map(\.label)
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(usage.snapshot.accounts, id: \.label) { account in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(account.label)
-                            .font(.system(size: 12, weight: .semibold))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                        HStack(spacing: 5) {
+                            // This account's line on the chart below, which is
+                            // why the chart has no legend of its own: a row of
+                            // swatches under the plot said the same thing twice
+                            // as far from the names as it could be put.
+                            Circle()
+                                .fill(Self.accountColor(for: account.label, in: labels))
+                                .frame(width: Self.accountDotSize, height: Self.accountDotSize)
+                            Text(account.label)
+                                .font(.system(size: 12, weight: .semibold))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
                         windowRow("5h", account.fiveHour)
                         windowRow("7d", account.sevenDay)
                     }
@@ -572,7 +731,7 @@ struct UsagePopoverView: View {
             Text(Self.resetLabel(window?.resetsAt, now: history.now))
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
-                .frame(width: 74, alignment: .trailing)
+                .frame(width: Self.resetColumnWidth, alignment: .trailing)
                 .lineLimit(1)
         }
     }
@@ -591,18 +750,6 @@ struct UsagePopoverView: View {
 
             plot
                 .frame(height: 130)
-
-            // The bold line and the big number above it are one quantity, and
-            // the caption says by what rule — not because the reader has to
-            // recompute it, but because "the mean of the accounts" is ambiguous
-            // exactly where it matters: an account nobody has read yet is left
-            // out rather than counted as zero, and one that has not been read
-            // lately keeps its last reading.
-            Text("Жирная линия — то же среднее, что и число вверху: "
-                 + "по последнему известному значению каждого аккаунта.")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -631,23 +778,23 @@ struct UsagePopoverView: View {
                     // One series per run of readings, so a `null` sample leaves
                     // a gap instead of a line drawn through a period nobody
                     // measured. The colour is keyed on the account, so all the
-                    // runs of one account share it and the legend has one entry
-                    // per account rather than one per run.
+                    // runs of one account share it rather than getting one hue
+                    // per run.
                     ForEach(account.segments) { segment in
                         if segment.readings.count == 1, let only = segment.readings.first {
                             // A run of one draws no line at all — a reading
                             // alone between two holes would simply be missing.
-                            PointMark(x: .value("время", only.timestamp),
+                            PointMark(x: .value("time", only.timestamp),
                                       y: .value("%", only.value))
-                            .foregroundStyle(by: .value("аккаунт", account.label))
+                            .foregroundStyle(by: .value("account", account.label))
                             .symbolSize(8)
                             .opacity(Self.accountOpacity)
                         } else {
                             ForEach(segment.readings, id: \.timestamp) { reading in
-                                LineMark(x: .value("время", reading.timestamp),
+                                LineMark(x: .value("time", reading.timestamp),
                                          y: .value("%", reading.value),
-                                         series: .value("отрезок", "\(account.label)#\(segment.id)"))
-                                .foregroundStyle(by: .value("аккаунт", account.label))
+                                         series: .value("segment", "\(account.label)#\(segment.id)"))
+                                .foregroundStyle(by: .value("account", account.label))
                                 .lineStyle(StrokeStyle(lineWidth: Self.accountLineWidth))
                                 .opacity(Self.accountOpacity)
                             }
@@ -658,25 +805,35 @@ struct UsagePopoverView: View {
                 // about ends up on top of the ones that explain it rather than
                 // under whichever account happens to cross it.
                 if history.fleet.points.count == 1, let only = history.fleet.points.first {
-                    PointMark(x: .value("время", only.timestamp),
+                    PointMark(x: .value("time", only.timestamp),
                               y: .value("%", only.value))
-                    .foregroundStyle(by: .value("аккаунт", FleetSeries.label))
+                    .foregroundStyle(by: .value("account", FleetSeries.label))
                     .symbolSize(24)
                 } else {
                     ForEach(history.fleet.points, id: \.timestamp) { point in
-                        LineMark(x: .value("время", point.timestamp),
+                        LineMark(x: .value("time", point.timestamp),
                                  y: .value("%", point.value),
-                                 series: .value("отрезок", FleetSeries.label))
-                        .foregroundStyle(by: .value("аккаунт", FleetSeries.label))
+                                 series: .value("segment", FleetSeries.label))
+                        .foregroundStyle(by: .value("account", FleetSeries.label))
                         .lineStyle(StrokeStyle(lineWidth: Self.fleetLineWidth))
                     }
                 }
             }
-            // An explicit scale rather than the automatic one, for two things it
-            // decides that the picture depends on: the mean comes first in the
-            // legend, and its colour is one no account can be handed.
+            // An explicit scale rather than the automatic one, for the one thing
+            // it decides that the picture depends on: which colour each key gets
+            // — the mean's is ink itself, and no account may be handed it, which
+            // is why `FleetSeries.label` is a key no configured label equals.
+            //
+            // The account colours are keyed on the snapshot's list of accounts,
+            // not on the position in `history.series`: the dots beside the names
+            // upstairs are keyed the same way, and the two lists are not the same
+            // list. `series` holds the accounts that *answered* the history
+            // request, so one account failing would shift every colour after it
+            // by one and the dot beside a name would then lie about which line is
+            // that account's.
             .chartForegroundStyleScale(domain: Self.styleDomain(history.series),
-                                       range: Self.styleRange(history.series))
+                                       range: Self.styleRange(history.series,
+                                                              labels: usage.snapshot.accounts.map(\.label)))
             .chartYScale(domain: 0...100)
             .chartYAxis {
                 AxisMarks(values: [0, 50, 100]) {
@@ -687,7 +844,12 @@ struct UsagePopoverView: View {
             .chartXAxis {
                 AxisMarks(values: .automatic(desiredCount: 3))
             }
-            .chartLegend(position: .bottom, spacing: 4)
+            // No legend. It said what the dots beside the account names now say,
+            // as far from those names as the popover could put it, and it cost
+            // the plot about 16 of its 130 points: with it gone the plot area
+            // runs to 84% of the picture's height instead of 72% (§4, where the
+            // tests' measured bands are recorded).
+            .chartLegend(.hidden)
             .font(.system(size: 9))
         }
     }
@@ -708,41 +870,55 @@ struct UsagePopoverView: View {
     /// else on this surface.
     static let fleetColor = Color.primary
 
-    /// The accounts, taken in the order the model keeps them (by label), so a
-    /// colour belongs to an account for as long as the fleet does not change
-    /// rather than for one pass. Cycled, because how many accounts there are is
-    /// the gateway's business.
+    /// The accounts, taken in the order the snapshot keeps them (by label), so a
+    /// colour belongs to an account for as long as the account list does not
+    /// change rather than for one pass. Cycled, because how many accounts there
+    /// are is the gateway's business.
     static let accountColors: [Color] = [.blue, .orange, .green, .purple, .pink, .teal]
 
-    /// The mean first — this is the legend's order as well as the scale's.
+    /// The colour of one account, everywhere it is drawn: its line on the chart
+    /// and the dot beside its name.
+    ///
+    /// Keyed on the account's place in the snapshot's list, which is the one list
+    /// both surfaces have. The dots are drawn from the snapshot and the lines from
+    /// the accounts that answered the history request, and those two differ
+    /// exactly when an account did not answer — keyed on its own list, each side
+    /// would then hand out a different colour from the same palette, and the dot
+    /// beside a name would point at somebody else's line.
+    ///
+    /// An account the snapshot does not list has no place in the palette at all,
+    /// and grey is the answer: a line whose account the poll no longer names is
+    /// not worth a hue that belongs to somebody.
+    static func accountColor(for label: String, in labels: [String]) -> Color {
+        guard let index = labels.firstIndex(of: label) else { return .gray }
+        return accountColors[index % accountColors.count]
+    }
+
+    /// The mean first — the scale's order, and the one place the mean's own key
+    /// gets its colour.
     static func styleDomain(_ series: [AccountSeries]) -> [String] {
         [FleetSeries.label] + series.map(\.label)
     }
 
     /// One colour per entry of `styleDomain`, in the same order: a shorter range
     /// would leave the tail of the domain unstyled.
-    static func styleRange(_ series: [AccountSeries]) -> [Color] {
-        [fleetColor] + series.indices.map { accountColors[$0 % accountColors.count] }
+    static func styleRange(_ series: [AccountSeries], labels: [String]) -> [Color] {
+        [fleetColor] + series.map { accountColor(for: $0.label, in: labels) }
     }
 
     // MARK: Footer
 
-    private var footer: some View {
+    /// How old what is on screen is, and why it might be stale — and neither line
+    /// when there is nothing to say. Both are worked out by `body`, which needs
+    /// the answers before it to decide whether to draw the divider above.
+    private func footer(age: String?, failure: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(Self.ageLabel(fetchedAt: usage.snapshot.quotaFetchedAt,
-                               checkedAt: usage.snapshot.checkedAt,
-                               failed: usage.snapshot.quotaFailure != nil,
-                               now: history.now))
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-            Text(Self.chartAgeLabel(fetchedAt: history.fetchedAt,
-                                    seriesPeriod: history.seriesPeriod,
-                                    period: history.period,
-                                    now: history.now))
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-            if let failure = Self.failureText(quota: usage.snapshot.quotaFailure,
-                                              history: history.failure) {
+            if let age {
+                Text(age)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            if let failure {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Image(systemName: Self.failureSymbolName)
                         .font(.system(size: 9))
@@ -777,16 +953,39 @@ struct UsagePopoverView: View {
         value.map { "\(Int($0.rounded()))%" } ?? "—"
     }
 
-    /// When a window starts over, in the coarsest unit that still separates two
-    /// of them. Empty when the gateway named no reset — the row has a dash in
-    /// the percentage already, and a second one adds nothing.
+    /// When a window starts over, to the hour. Empty when the gateway named no
+    /// reset — the row has a dash in the percentage already, and a second one adds
+    /// nothing.
+    ///
+    /// To the hour because whole days do not answer the question. `in 1d` covers
+    /// everything from 24 hours to 48 of them, which is the difference between
+    /// "wait until tomorrow morning" and "wait until the day after" — the user
+    /// asked what `1d` meant, "19 hours? 26?", and the honest answer was that the
+    /// label could not tell him.
+    ///
+    /// So the hours are printed even when there are none of them: `in 5d 0h` is
+    /// five days and change measured to the hour, while a bare `in 5d` is exactly
+    /// the ambiguity this rule removes.
     static func resetLabel(_ date: Date?, now: Date) -> String {
         guard let date else { return "" }
         let seconds = date.timeIntervalSince(now)
-        guard seconds > 0 else { return "сброс вот-вот" }
-        if seconds < 3600 { return "через \(Int((seconds / 60).rounded(.up))) мин" }
-        if seconds < 86_400 { return "через \(Int(seconds / 3600)) ч" }
-        return "через \(Int(seconds / 86_400)) д"
+        guard seconds > 0 else { return "resets now" }
+        // Minutes round up, so a window with 30 seconds left says `in 1m` rather
+        // than `in 0m`; days and hours go down, because they are a countdown and
+        // rounding one up would promise time that is not there.
+        let minutes = Int((seconds / 60).rounded(.up))
+        if minutes < 60 { return "in \(minutes)m" }
+        // The one place the two rounding rules meet, and the one place it has to
+        // be said out loud: the last minute below an hour rounds up to 60 of
+        // them, and `in 60m` is an hour written the long way. Carried into the
+        // hour by hand, because the branch below floors — 3599 s would be
+        // `in 0h`. Only this seam; rounding the whole countdown up to the minute
+        // instead would carry into the days as well and turn 1d 23h 59m into
+        // `in 2d 0h`, which is the promise of time that is not there.
+        if seconds < 3600 { return "in 1h" }
+        if seconds < 86_400 { return "in \(Int(seconds / 3600))h" }
+        let days = Int(seconds / 86_400)
+        return "in \(days)d \(Int((seconds - Double(days) * 86_400) / 3600))h"
     }
 
     /// What a section with nothing in it says, and the middle state is the whole
@@ -799,7 +998,7 @@ struct UsagePopoverView: View {
     /// lie: a gateway that was down at launch never lands a first answer, and
     /// the reason is spelled out in the failure line right underneath.
     static func emptyLabel(landed: Bool, failed: Bool, nothing: String) -> String {
-        guard landed else { return failed ? "Шлюз не ответил" : "Загрузка…" }
+        guard landed else { return failed ? "Gateway did not answer" : "Loading…" }
         return nothing
     }
 
@@ -813,7 +1012,7 @@ struct UsagePopoverView: View {
     static func accountsEmptyLabel(_ snapshot: UsageSnapshot) -> String {
         emptyLabel(landed: snapshot.quotaFetchedAt != nil,
                    failed: snapshot.quotaFailure != nil,
-                   nothing: "Аккаунтов шлюз не назвал")
+                   nothing: "The gateway named no accounts")
     }
 
     /// What the chart says when it has no line to draw.
@@ -836,7 +1035,7 @@ struct UsagePopoverView: View {
     /// And "landed" is also about the period being asked about right now. The
     /// lines from the tab before are an answer to a different question, so
     /// between a change of period and the pass that answers it this section has
-    /// nothing landed at all — which is "Загрузка…", not "the period held no
+    /// nothing landed at all — which is "Loading…", not "the period held no
     /// data" about a period nobody has asked the gateway for yet. The other half
     /// of `landed` needs no such clause: an empty account list means there is
     /// nobody to ask for any period.
@@ -849,35 +1048,7 @@ struct UsagePopoverView: View {
             || (snapshot.quotaFetchedAt != nil && snapshot.accounts.isEmpty)
         return emptyLabel(landed: landed,
                           failed: snapshot.quotaFailure != nil || historyFailure != nil,
-                          nothing: "За этот период данных нет")
-    }
-
-    /// How old the chart's lines are, said apart from the quota's age above
-    /// because they are fetched apart: the quota is polled for the whole life of
-    /// the process, the lines only while the popover is open — and they survive
-    /// its closing, so a chart drawn from a pass made three popovers ago is the
-    /// ordinary case rather than the odd one.
-    ///
-    /// No "the last check failed" clause of its own, unlike `ageLabel`: the
-    /// reason is in the failure line two rows down, and `fetchedAt` here already
-    /// refuses to move for a pass that brought no lines, so this sentence cannot
-    /// contradict it.
-    ///
-    /// The same pair `plotEmptyLabel` is given, and for the same reason one row
-    /// up: between a tap on `30d` and the answer to it the stamp in hand belongs
-    /// to the previous window's lines, which the plot above is no longer
-    /// drawing. Dated all the same, the footer said "график обновлён N назад"
-    /// directly under "Загрузка…" — reachable on every change of period, for as
-    /// long as the gateway takes, and surviving the popover's closing with the
-    /// lines it dates. So in that state the chart is not dated at all, in the
-    /// words of a chart that has no lines yet: it has none for the window being
-    /// asked about.
-    static func chartAgeLabel(fetchedAt: Date?,
-                              seriesPeriod: HistoryPeriod?,
-                              period: HistoryPeriod,
-                              now: Date) -> String {
-        guard let fetchedAt, seriesPeriod == period else { return "график ещё не обновлялся" }
-        return "график обновлён \(ago(fetchedAt, now: now))"
+                          nothing: "No data for this period")
     }
 
     /// The reasons behind what this view draws, all of them at once.
@@ -896,31 +1067,69 @@ struct UsagePopoverView: View {
         return both.isEmpty ? nil : both.joined(separator: "; ")
     }
 
-    /// How old the figures above are, and — separately — how the last attempt at
-    /// them went.
+    /// Below this age the footer says nothing about it at all.
     ///
-    /// Two stamps rather than one, because they are two facts: `fetchedAt` is
-    /// when these numbers arrived, `checkedAt` is when we last asked for any. A
-    /// failed pass keeps the numbers and moves only the second, so a single
-    /// stamp had the footer calling hour-old figures fresh while the orange line
-    /// under it said the gateway was unreachable.
+    /// Two polling intervals: both halves of this view are asked for again once a
+    /// minute (`UsageHistoryModel.refreshSeconds`, and `UsageStore` on the same
+    /// interval), so anything younger than two of them is the poll running
+    /// normally rather than data going stale. A footer that reported it would be
+    /// a line of text saying "everything is fine", redrawn four times a minute,
+    /// under numbers that are already as fresh as they can be.
+    static let footerStaleSeconds: TimeInterval = 120
+
+    /// How old the oldest thing on this surface is — or `nil` when the footer has
+    /// no business saying.
     ///
-    /// Not finer than a minute, because that is how often they are asked for: a
-    /// footer counting seconds would spend most of its life saying something
-    /// that stopped being true a moment after it was drawn.
-    static func ageLabel(fetchedAt: Date?, checkedAt: Date, failed: Bool, now: Date) -> String {
-        let age = fetchedAt.map { "обновлено \(ago($0, now: now))" } ?? "ещё не обновлялось"
-        guard failed else { return age }
-        return "\(age); последняя проверка \(ago(checkedAt, now: now)) не удалась"
+    /// One line, not two. The quota and the chart used to be dated separately, and
+    /// with both halves polled once a minute under an open popover the two
+    /// sentences moved together and said the same thing twice. What is left is the
+    /// **older** of the two, because the age of a screen is the age of the oldest
+    /// thing on it.
+    ///
+    /// The chart only counts while its lines answer the period being asked about:
+    /// after a tap on `30d` the stamp in hand belongs to the previous window's
+    /// lines, which the plot is no longer drawing, and it says "Loading…" itself.
+    ///
+    /// Silence has two reasons and they are different. Nothing fetched at all is
+    /// not a matter of age — the sections above say "Loading…" or name the
+    /// gateway's failure — so there is nothing to date. Fresh data is silence
+    /// because there is nothing to warn about. A failed last check breaks the
+    /// second one at any age: with the numbers standing still and the checks
+    /// failing, how old they are is the only thing telling live figures from
+    /// frozen ones, and `footerStaleSeconds` would hide it for the first two
+    /// minutes of every outage.
+    static func footerAgeLabel(quotaFetchedAt: Date?,
+                               quotaFailed: Bool,
+                               chartFetchedAt: Date?,
+                               seriesPeriod: HistoryPeriod?,
+                               period: HistoryPeriod,
+                               chartFailed: Bool,
+                               now: Date) -> String? {
+        let chart = seriesPeriod == period ? chartFetchedAt : nil
+        guard let oldest = [quotaFetchedAt, chart].compactMap({ $0 }).min() else { return nil }
+        guard quotaFailed || chartFailed
+                || now.timeIntervalSince(oldest) >= footerStaleSeconds else { return nil }
+        return "as of \(ago(oldest, now: now))"
+    }
+
+    /// Whether the footer has nothing at all to draw — in which case the divider
+    /// above it is not drawn either. A rule hanging across the bottom of the
+    /// popover with nothing under it is worse than no rule.
+    static func footerIsSilent(age: String?, failure: String?) -> Bool {
+        age == nil && failure == nil
     }
 
     /// How long ago a moment was, in the coarsest unit that still says anything.
+    ///
+    /// Not finer than a minute, because that is how often the figures are asked
+    /// for: a footer counting seconds would spend most of its life saying
+    /// something that stopped being true a moment after it was drawn.
     static func ago(_ moment: Date, now: Date) -> String {
         let seconds = max(0, now.timeIntervalSince(moment))
-        if seconds < 60 { return "меньше минуты назад" }
-        if seconds < 3600 { return "\(Int(seconds / 60)) мин назад" }
-        if seconds < 86_400 { return "\(Int(seconds / 3600)) ч назад" }
-        return "\(Int(seconds / 86_400)) д назад"
+        if seconds < 60 { return "less than a minute ago" }
+        if seconds < 3600 { return "\(Int(seconds / 60))m ago" }
+        if seconds < 86_400 { return "\(Int(seconds / 3600))h ago" }
+        return "\(Int(seconds / 86_400))d ago"
     }
 }
 

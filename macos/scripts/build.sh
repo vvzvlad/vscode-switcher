@@ -4,7 +4,7 @@
 #   macos/scripts/build.sh              build the binary and assemble the bundle
 #   macos/scripts/build.sh --skip-build reuse the binary already in .build
 #
-# The bundle also carries the hooks and the hook installer, so "Установить хуки"
+# The bundle also carries the hooks and the hook installer, so "Install hooks"
 # in the menu works for an app copied to /Applications.
 set -euo pipefail
 
