@@ -226,7 +226,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// attached for the length of one `performClick` instead, which is what
     /// keeps the button highlighted while the menu is down.
     private func installStatusItem() {
-        // Not `squareLength`: the picture is a glyph, a bar and a number.
+        // Not `squareLength`: the picture is a bar and a number, and it is wider
+        // than it is tall. No app glyph in front of them — that one was thrown
+        // out on sight (`MenuBarIcon`).
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = MenuBarIcon.image(forPercent: nil)
         // No `toolTip` on purpose: the tag popped up on every pass of the

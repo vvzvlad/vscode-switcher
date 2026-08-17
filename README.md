@@ -153,7 +153,10 @@ tccutil reset Accessibility xyz.vvzvlad.vscode-switcher
 ### Как избавиться от этой пляски навсегда
 
 Самоподписанный сертификат даёт бандлу стабильный designated requirement, и разрешение
-переживает пересборки. Создать его нужно один раз, руками — операция интерактивная:
+переживает пересборки. Создать его нужно один раз — мышью в Keychain Access либо целиком
+из терминала.
+
+**Вариант 1 — Keychain Access.**
 
 1. Открыть **Keychain Access** (Связка ключей).
 2. Меню **Keychain Access → Certificate Assistant → Create a Certificate…**
@@ -163,15 +166,109 @@ tccutil reset Accessibility xyz.vvzvlad.vscode-switcher
 5. Найти его в списке, открыть двойным кликом → раздел **Trust** → **Code Signing: Always
    Trust**. Закрыть окно (потребуется пароль).
 
-Дальше ничего делать не надо: `macos/scripts/build.sh` сам ищет identity с именем
-`VSCodeSwitcher Dev` и подписывает ею, а если не находит — честно предупреждает и падает
-обратно на ad-hoc. Имя можно переопределить: `SIGN_IDENTITY='My Identity' make app`.
+**Вариант 2 — то же самое из терминала.** Ключ и сертификат делает `openssl`, в связку
+`login` их кладёт `security`.
 
-Проверить, что сертификат виден сборке:
+Рецепт написан под OpenSSL 3, а системный `/usr/bin/openssl` — LibreSSL: флага `-legacy`
+у него нет, вторая команда завершается с кодом 1 и печатает usage, зато первая проходит
+(`-addext` LibreSSL понимает), так что споткнуться можно уже после создания ключа. Стоит
+проверить, какой `openssl` первым в `PATH`, и если LibreSSL — поставить OpenSSL 3
+(`brew install openssl@3`) и сделать первым в `PATH` либо звать полным путём
+`"$(brew --prefix openssl@3)"/bin/openssl`.
 
 ```sh
-security find-identity -v -p codesigning | grep 'VSCodeSwitcher Dev'
+openssl version   # нужен «OpenSSL 3.x», а не «LibreSSL»
 ```
+
+Дальше — в отдельном временном каталоге: ключ создаётся незашифрованным (`-nodes`),
+в рабочем дереве ему делать нечего, а `mktemp -d` даёт уникальный каталог с правами `0700`.
+Файлы нужны до последнего шага включительно — доверие читает `cert.pem`.
+
+```sh
+tmpd=$(mktemp -d) && cd "$tmpd"
+
+openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+  -keyout key.pem -out cert.pem -subj "/CN=VSCodeSwitcher Dev" \
+  -addext "basicConstraints=critical,CA:true" \
+  -addext "keyUsage=critical,digitalSignature,keyCertSign" \
+  -addext "extendedKeyUsage=critical,codeSigning" &&
+
+openssl pkcs12 -export -out cert.p12 -inkey key.pem -in cert.pem \
+  -name "VSCodeSwitcher Dev" -passout pass:PASS \
+  -legacy -macalg sha1 -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES &&
+
+security import cert.p12 -k ~/Library/Keychains/login.keychain-db -P PASS \
+  -T /usr/bin/codesign -A &&
+
+security add-trusted-cert -r trustRoot -p codeSign \
+  -k ~/Library/Keychains/login.keychain-db cert.pem
+
+cd - >/dev/null && rm -rf "$tmpd"
+```
+
+`PASS` — временный пароль, он нужен только чтобы передать ключ в связку файлом. `-A` по
+`man security` — «allow any application to access the imported key without warning (insecure,
+not recommended!)»; рядом с ним `-T /usr/bin/codesign`, разрешающий доступ одному названному
+бинарнику, уже ничего не добавляет. Проверено: импорт с этой парой флагов прошёл, и
+`make app` затем подписал без единого диалога.
+
+Четыре команды сцеплены через `&&` намеренно: иначе после сбоя (тот же LibreSSL на
+`-legacy`) шаг доверия отработал бы сам — он от импорта не зависит — и оставил бы в связке
+доверенный корень без закрытого ключа. Уборка же в конце отдельная, не звено цепочки: блок
+исполняется целиком, после сбоя каталог сносится вместе с ключом и начинать надо заново
+с первой команды. В связке остаются импортированные сертификат и ключ, недоверенные, — но
+только если упала сама `add-trusted-cert`; на более ранних обрывах связка не тронута.
+
+Последний шаг — доверие, и он обязателен: сразу после импорта
+`security find-identity -v -p codesigning` показывает `0 valid identities` (сертификат есть,
+но не доверен), после `add-trusted-cert` — `1 valid identities found`. Этим же списком
+`macos/scripts/build.sh` выбирает identity, гейтом
+`security find-identity -v -p codesigning | grep -qF "\"$SIGN_IDENTITY\""`: не найдя имени
+(по умолчанию `VSCodeSwitcher Dev`, переопределяется `SIGN_IDENTITY='My Identity' make app`),
+сборка предупреждает и уходит на ad-hoc. Тем же вызовом и проверяется, что сертификат виден
+сборке, — больше настраивать нечего. `sudo` не нужен: без `-d` правятся пользовательские
+настройки доверия, но `man security` предупреждает, что для их правки «user authentication
+is required via an authentication dialog» — диалог может появиться.
+
+> **Грабля.** Экспорт в p12 проверялся набором флагов целиком. С дефолтными настройками
+> экспорта, без legacy-набора, `security import` падает с
+> `SecKeychainItemImport: MAC verification failed during PKCS12 import (wrong password?)`
+> при верном пароле — сообщение врёт про причину. За MAC отвечает `-legacy`: без флагов
+> файл получается с `MAC: sha256` и PBES2/AES-256-CBC, с одним `-legacy` — уже `MAC: sha1`.
+> Нужен ли каждый из трёх алгоритмических флагов по отдельности, не выяснялось.
+
+А что подпись даёт устойчивое требование, видно в самом бандле — смотреть после `make app`,
+подписанного уже новым сертификатом: на бандле от прошлой ad-hoc-сборки `codesign -d -r-`
+печатает `# designated => cdhash H"…"`, ровно тот случай, от которого уходим.
+
+```sh
+codesign -d -r- macos/VSCodeSwitcher.app
+```
+
+Строка `designated => identifier "xyz.vvzvlad.vscode-switcher" and certificate leaf = H"…"`
+означает привязку к сертификату, а не к `cdhash`.
+
+Это не рассуждение, а замер: 17.08.2026 на машине автора (macOS 15.7.4, build 24G517)
+подписанный бандл переустановили дважды подряд, `CDHash` менялся
+(`29595a3f…` → `5bf42fb2…` → снова `29595a3f…`; вторая сборка отличалась только
+`CFBundleVersion`: `APP_BUILD=9999 make install`, затем обычный `make install`), и выданный
+Accessibility не слетел. Различающая переустановка, впрочем, одна — первая: под гипотезой
+«TCC всё равно держится за `cdhash`» доступ сломала бы она, а вторая возвращает бандл к тому
+самому хешу, под которым разрешение и выдавали (`tccutil reset` сделали сразу после
+установки сборки с `CFBundleVersion` 138 и `CDHash 29595a3f…`, дальше до замера бандл
+не менялся), —
+под той же гипотезой доступ уцелел бы и без сертификата, так что не проверяет ничего.
+
+Что доступ на месте, видно по служебному флагу `accessibilityPromptShown` в `UserDefaults`:
+он появляется, когда доступа не видно — при старте без него или по клику на плашку, — и
+снимается, как только доступ виден, потому его отсутствие и есть доказательство. Старт
+обеспечивает сам `make install` (`pkill -x VSCodeSwitcher`, затем `open`), а ставится флаг
+с задержкой 0.4 с — читали не
+раньше чем через 6 с после запуска, после каждой из двух переустановок:
+`defaults read xyz.vvzvlad.vscode-switcher accessibilityPromptShown` отвечал
+`does not exist`. Общее обещание «переживает пересборки» держится на виде designated
+requirement (привязка к `certificate leaf`), а замером покрыта одна различающая пересборка
+на одной машине.
 
 После первой подписи новым сертификатом разрешение придётся выдать ещё один раз (лучше через
 `tccutil reset`, см. выше) — зато следующие пересборки его уже не собьют.
@@ -218,7 +315,8 @@ scripts/install-hooks.sh --uninstall
   "panelHeightFraction": 0.7,
   "subagentActiveSeconds": 600,
   "transcriptTailBytes": 524288,
-  "editorBundleID": "com.microsoft.VSCode"
+  "editorBundleID": "com.microsoft.VSCode",
+  "usageBaseURL": "http://127.0.0.1:8788"
 }
 ```
 
@@ -231,8 +329,9 @@ scripts/install-hooks.sh --uninstall
 | `panelWidth` | ширина панели в точках |
 | `panelHeightFraction` | высота панели как доля рабочей области экрана; та же доля задаёт высоту зоны срабатывания у левого края |
 | `subagentActiveSeconds` | сабагент считается активным, пока его последняя запись не говорит об остановке (финальный ответ `end_turn`/`stop_sequence` **или** маркер прерывания) и его транскрипт трогали не дольше стольких секунд назад; остановку ловит запись, а не часы, — возраст тут страховка на те хвосты, по которым её не видно |
-| `transcriptTailBytes` | сколько байт читать с конца транскрипта (они бывают по 24 МБ) |
+| `transcriptTailBytes` | сколько байт читать с конца транскрипта (самый большой на машине — 40 МБ, замер 17.08.2026) |
 | `editorBundleID` | bundle id редактора, чьи окна перечисляются |
+| `usageBaseURL` | адрес шлюза claude_gw, откуда берётся расход токенов и квоты. По умолчанию локальный релей `http://127.0.0.1:8788`, который форвардит на шлюз через WireGuard; когда релей не поднят — сам шлюз, `http://10.20.30.1:8787`. Принимаются только `http` и `https` и только с хостом, всё остальное молча заменяется значением по умолчанию. Шлюза нет — приложение работает как раньше, без чисел расхода |
 
 Изменения подхватываются при перезапуске приложения.
 

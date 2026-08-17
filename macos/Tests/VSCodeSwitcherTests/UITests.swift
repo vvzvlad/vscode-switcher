@@ -2630,8 +2630,126 @@ final class UsageHistoryTests: XCTestCase {
                              "the lines never came back once they answered the new period")
     }
 
-    /// Inked pixels, over an area the size the popover gives the plot.
-    private func ink(_ view: some View) throws -> Int {
+    /// A gateway that answers every account with one flat line at the level it
+    /// is handed, ten samples a minute apart. Flat, so where ink lands in the
+    /// picture is a fact about the chart rather than about the fixture.
+    private func client(flat readings: [String: Double]) -> UsageClient {
+        UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            // .../gw/usage/<label>/history
+            let label = url.pathComponents.dropLast().last ?? ""
+            let value = readings[label] ?? 0
+            let points = (0..<10).map { index in
+                "{\"ts\": \(1_786_700_000 + index * 60), \"util_7d\": \(value)}"
+            }
+            let body = "{\"label\": \"\(label)\", \"since\": 1786700000,"
+                + " \"points\": [\(points.joined(separator: ","))]}"
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            return (Data(body.utf8), response)
+        }
+    }
+
+    /// A chart of the given flat accounts, drawn and read back.
+    private func plotInk(flat readings: [String: Double],
+                         band: ClosedRange<Double> = 0...1) async throws -> (inked: Int, coverage: Double) {
+        let history = UsageHistoryModel(client: client(flat: readings), defaults: freshDefaults())
+        let usage = UsageStore(config: .default, cache: UsageCache())
+        history.open(labels: readings.keys.sorted())
+        await history.fetchTask?.value
+        defer { history.close() }
+        return try rendered(UsagePopoverView(usage: usage, history: history).plot, band: band)
+    }
+
+    /// The band the mean of 100 and 20 runs through, and nothing else does.
+    ///
+    /// Measured off the rendering rather than reasoned about: with the y scale
+    /// pinned to 0…100 the plot area runs from 2% of the picture's height (the
+    /// 100 grid line) to 72% (the 0 one), the legend and the x labels take the
+    /// rest, so 60% of the quota lands at 28%. The row profile, in 2% steps:
+    /// 592 and 3552 inked in the two steps from 26%, against 2 and 12 with the
+    /// mean line moved out of the band. The account lines are at 0% and 57%, the
+    /// 50 grid line at 36% — none of them is inside.
+    private static let meanBand = 0.24...0.32
+
+    /// The mean line is on the chart, and it is drawn where the mean is.
+    ///
+    /// Read off a bitmap, the way the row's ladder is measured (§4): a `Charts`
+    /// tree has no ink of its own to inspect, and "the line is in the view
+    /// hierarchy" is not the claim — the claim is that it is visible. Two flat
+    /// accounts at 100 and 20 put their own lines at the top and the middle of
+    /// the plot and their mean between them, in a band nothing else crosses;
+    /// moving both accounts to 100 takes the mean out of that band with the rest
+    /// of the picture unchanged, and what is left is the difference the mean
+    /// line makes.
+    func testTheMeanLineIsDrawnWhereTheMeanIs() async throws {
+        let apart = try await plotInk(flat: ["acc1": 100, "acc2": 20], band: Self.meanBand)
+        let together = try await plotInk(flat: ["acc1": 100, "acc2": 100], band: Self.meanBand)
+        XCTAssertGreaterThan(apart.inked, 1000,
+                             "nothing was drawn between the two accounts: the mean line is missing "
+                             + "(\(apart.inked) inked against \(together.inked) with the mean elsewhere)")
+        XCTAssertLessThan(together.inked, 100,
+                          "something other than the mean draws in the band: the measurement is not "
+                          + "about the mean line at all (\(together.inked) inked)")
+    }
+
+    /// And it is the one line drawn at full strength: wider than the accounts
+    /// and not dimmed, so the eye lands on it first.
+    ///
+    /// The same picture, one band lower: the mean's band against the band the
+    /// second account's own line runs through. Weighed by coverage rather than
+    /// counted as ink, because both halves of "heavier" have to be in the
+    /// measurement — a line at 55% alpha covers exactly as many pixels as one at
+    /// full strength, so counting pixels alone would hold the width and let the
+    /// dimming go.
+    ///
+    /// The threshold is set between the three measurements, not guessed: as
+    /// drawn, 2508.8 of coverage against 652.3, which is 3.85 times. With the
+    /// mean's width taken back down to an account's, 1.54; with the accounts
+    /// undimmed and the width kept, 2.11. Both halves fail it, which is what
+    /// makes both of them load-bearing rather than one plus a decoration.
+    func testTheMeanIsHeavierThanTheLinesItIsTheMeanOf() async throws {
+        let readings = ["acc1": 100.0, "acc2": 20.0]
+        let mean = try await plotInk(flat: readings, band: Self.meanBand)
+        // 20% of the quota lands at 58% of the picture — one account line, drawn
+        // the way an account is drawn.
+        let account = try await plotInk(flat: readings, band: 0.55...0.61)
+        XCTAssertGreaterThan(account.coverage, 100,
+                             "the account's own band is empty: the two are not being compared")
+        XCTAssertGreaterThan(mean.coverage, account.coverage * 3,
+                             "the mean is drawn no heavier than the accounts behind it "
+                             + "(\(mean.coverage) against \(account.coverage))")
+    }
+
+    /// The legend puts the mean at the head of the row, where a legend is read
+    /// from: it is the line the chart is about, and the accounts explain it.
+    ///
+    /// The order is not ours to state in the drawing code — `Charts` builds the
+    /// legend out of the foreground-style scale — so it is measured off the
+    /// picture. The mean's swatch is the only mark drawn in ink itself; every
+    /// account gets a hue, and the labels beside them are grey text that is
+    /// never as dark as the swatch. Removing `chartForegroundStyleScale` leaves
+    /// the mean with a hue of its own and the legend in the scale's inferred
+    /// order, and this fails.
+    func testTheLegendNamesTheMeanFirst() async throws {
+        let history = UsageHistoryModel(client: client(flat: ["main": 100, "acc2": 20, "acc3": 55]),
+                                        defaults: freshDefaults())
+        let usage = UsageStore(config: .default, cache: UsageCache())
+        history.open(labels: ["acc2", "acc3", "main"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        let marks = try legendMarks(UsagePopoverView(usage: usage, history: history).plot)
+        let mean = try XCTUnwrap(marks.mean, "no swatch in the legend is drawn in ink: the mean has a hue")
+        let account = try XCTUnwrap(marks.account, "no account swatch in the legend at all")
+        XCTAssertLessThan(mean, account, "the accounts are listed in front of their own mean")
+    }
+
+    /// Where the legend's first ink-coloured swatch starts, and where its first
+    /// hued one does, in points from the left edge.
+    private func legendMarks(_ view: some View) throws -> (mean: Int?, account: Int?) {
         let renderer = ImageRenderer(content: view.frame(width: UsagePopoverView.width, height: 130))
         renderer.scale = 2
         let bitmap = try XCTUnwrap(renderer.cgImage, "ImageRenderer produced nothing")
@@ -2644,9 +2762,205 @@ final class UsageHistoryTests: XCTestCase {
                                               space: CGColorSpaceCreateDeviceRGB(),
                                               bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
         context.draw(bitmap, in: CGRect(x: 0, y: 0, width: bitmap.width, height: bitmap.height))
-        return stride(from: 3, to: pixels.count, by: 4).reduce(into: 0) { total, offset in
-            if pixels[offset] > 8 { total += 1 }
+        // The legend's own rows: the x-axis labels above it end at 84% of the
+        // height (measured, see `meanBand`).
+        var mean: Int?
+        var account: Int?
+        for row in Int(0.88 * Double(bitmap.height))..<bitmap.height {
+            for column in 0..<bitmap.width {
+                let offset = (row * bitmap.width + column) * 4
+                let alpha = Int(pixels[offset + 3])
+                // Solid pixels only, so the antialiased skirt of a hue cannot be
+                // mistaken for ink or the other way round.
+                guard alpha > 200 else { continue }
+                let channels = [Int(pixels[offset]), Int(pixels[offset + 1]), Int(pixels[offset + 2])]
+                if let top = channels.max(), let bottom = channels.min() {
+                    if top < 40 { mean = min(mean ?? column, column) }
+                    if top - bottom > 60 { account = min(account ?? column, column) }
+                }
+            }
         }
+        return (mean, account)
+    }
+
+    /// Inked pixels, over an area the size the popover gives the plot.
+    private func ink(_ view: some View) throws -> Int {
+        try rendered(view).inked
+    }
+
+    /// What a rendering put down, over all of the plot or a horizontal band of
+    /// it given as fractions of the height from the top edge.
+    ///
+    /// Two numbers, because the chart says two things with them. `inked` counts
+    /// pixels that carry anything at all, which is where a line is and how wide;
+    /// `coverage` adds up how much of each, which is the only one of the two a
+    /// change of opacity moves — a line at 55% alpha is as "inked" as one at
+    /// 100% and half as heavy.
+    private func rendered(_ view: some View,
+                          band: ClosedRange<Double> = 0...1) throws -> (inked: Int, coverage: Double) {
+        let renderer = ImageRenderer(content: view.frame(width: UsagePopoverView.width, height: 130))
+        renderer.scale = 2
+        let bitmap = try XCTUnwrap(renderer.cgImage, "ImageRenderer produced nothing")
+        var pixels = [UInt8](repeating: 0, count: bitmap.width * bitmap.height * 4)
+        let context = try XCTUnwrap(CGContext(data: &pixels,
+                                              width: bitmap.width,
+                                              height: bitmap.height,
+                                              bitsPerComponent: 8,
+                                              bytesPerRow: bitmap.width * 4,
+                                              space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(bitmap, in: CGRect(x: 0, y: 0, width: bitmap.width, height: bitmap.height))
+        // Row 0 of a bitmap context's buffer is the top of the image, whichever
+        // way the context's own coordinate system runs.
+        let first = Int(band.lowerBound * Double(bitmap.height))
+        let last = min(bitmap.height, Int((band.upperBound * Double(bitmap.height)).rounded(.up)))
+        guard first < last else { return (0, 0) }
+        var inked = 0
+        var coverage = 0.0
+        for offset in stride(from: first * bitmap.width * 4 + 3, to: last * bitmap.width * 4, by: 4) {
+            guard pixels[offset] > 8 else { continue }
+            inked += 1
+            coverage += Double(pixels[offset]) / 255
+        }
+        return (inked, coverage)
+    }
+}
+
+/// The chart's main line: the mean of the accounts, and the arithmetic that has
+/// to agree with the number over it.
+@MainActor
+final class FleetMeanTests: XCTestCase {
+
+    /// A moment, `index` minutes into the window the fixtures use.
+    private func moment(_ index: Int) -> Date {
+        Date(timeIntervalSince1970: 1_786_700_000 + Double(index) * 60)
+    }
+
+    /// One account's samples as the gateway sends them: a moment and a reading
+    /// that may be missing. Decoded rather than constructed, because
+    /// `HistoryPoint` has only the wire format's initialiser — and a hole is a
+    /// thing only the wire format can say.
+    private func samples(_ readings: [(Int, Double?)]) throws -> [HistoryPoint] {
+        let body = readings.map { index, value in
+            "{\"ts\": \(1_786_700_000 + index * 60), \"util_7d\": \(value.map { "\($0)" } ?? "null")}"
+        }
+        return try UsageFixtures.decode("[\(body.joined(separator: ","))]", as: [HistoryPoint].self)
+    }
+
+    /// The accounts are not sampled at the same moments, and between its samples
+    /// an account is worth the last reading taken of it: utilisation moves when
+    /// the gateway looks, not in between.
+    func testEachAccountsLastReadingIsCarriedForward() throws {
+        let fleet = FleetSeries.make(from: [try samples([(0, 10)]), try samples([(1, 20)])])
+        XCTAssertEqual(fleet.points.map(\.timestamp), [moment(0), moment(1)])
+        XCTAssertEqual(fleet.points.map(\.accounts), [1, 2])
+        XCTAssertEqual(try XCTUnwrap(fleet.points.first).value, 10, accuracy: 0.001)
+        // 15, and not the 20 of the account that happened to be sampled last:
+        // skipping the accounts with no sample at this exact moment would make
+        // the line jump about with the gateway's polling order.
+        XCTAssertEqual(try XCTUnwrap(fleet.points.last).value, 15, accuracy: 0.001)
+    }
+
+    /// Carried forward, never backwards. An account nobody has read yet has no
+    /// value to average in, and a zero in its place is a reading that was never
+    /// taken — the same rule `FleetWindow` and `UsageWindow` follow one type up.
+    func testAnAccountNobodyHasReadYetIsLeftOutRatherThanCountedAsZero() throws {
+        let fleet = FleetSeries.make(from: [try samples([(0, 60), (2, 60)]), try samples([(2, 0)])])
+        let first = try XCTUnwrap(fleet.points.first)
+        XCTAssertEqual(first.value, 60, accuracy: 0.001,
+                       "an account with no reading yet was averaged in as a zero")
+        XCTAssertEqual(first.accounts, 1, "the point claims accounts it has no reading for")
+
+        // And once it has been read it counts, zero and all: 0 is a reading here.
+        let last = try XCTUnwrap(fleet.points.last)
+        XCTAssertEqual(last.value, 30, accuracy: 0.001)
+        XCTAssertEqual(last.accounts, 2)
+    }
+
+    /// The picture the user pointed at: a week rolls over, one account drops
+    /// from a full quota to an empty one, and the mean falls by its share. The
+    /// account beside it is not sampled at that moment at all — a reset must not
+    /// take the others out of the mean along with it.
+    func testAQuotaResetIsCarriedLikeAnyOtherReading() throws {
+        let fleet = FleetSeries.make(from: [try samples([(0, 100), (2, 0.5)]),
+                                            try samples([(1, 50)])])
+        XCTAssertEqual(fleet.points.map(\.timestamp), [moment(0), moment(1), moment(2)],
+                       "the reset left a hole in the line")
+        XCTAssertEqual(fleet.points.map(\.accounts), [1, 2, 2])
+        for (point, expected) in zip(fleet.points, [100.0, 75.0, 25.25]) {
+            XCTAssertEqual(point.value, expected, accuracy: 0.001)
+        }
+    }
+
+    /// A moment nobody has a reading for is no point at all — the line starts
+    /// where the measurements start. Drawn as a zero it would state a full quota
+    /// where the gateway had said nothing.
+    func testAMomentWithNoReadingAtAllIsAGapAndNotAZero() throws {
+        let fleet = FleetSeries.make(from: [try samples([(0, nil), (1, 40)]),
+                                            try samples([(0, nil), (2, 60)])])
+        XCTAssertEqual(fleet.points.map(\.timestamp), [moment(1), moment(2)],
+                       "the line began at a moment nobody had a reading for")
+        XCTAssertFalse(fleet.points.contains { $0.value == 0 }, "the gap was drawn as a zero")
+        XCTAssertNil(FleetSeries.mean(of: []), "the mean of nothing is not zero")
+        XCTAssertTrue(FleetSeries.make(from: []).isEmpty)
+        XCTAssertTrue(FleetSeries.make(from: [try samples([(0, nil), (1, nil)])]).isEmpty,
+                      "nothing but holes drew a line")
+
+        // A hole *after* a reading is not a hole in this line: it says the
+        // gateway took no reading at that moment, not that the account's quota
+        // changed. The account line breaks there — that one is about what was
+        // measured — and the mean carries on at the last measurement.
+        let carried = FleetSeries.make(from: [try samples([(0, 40), (1, nil), (2, 40)])])
+        XCTAssertEqual(carried.points.map(\.timestamp), [moment(0), moment(1), moment(2)])
+        XCTAssertEqual(carried.points.map(\.accounts), [1, 1, 1])
+        XCTAssertEqual(AccountSeries.make(label: "acc1",
+                                          points: try samples([(0, 40), (1, nil), (2, 40)])).segments.count,
+                       2,
+                       "the account's own line stopped breaking at a hole")
+    }
+
+    /// The end of the line and the number over it are one quantity, and this is
+    /// what holds them together.
+    ///
+    /// They cannot be one call: the headline is `fleet.seven_day.mean` from
+    /// `/gw/usage`, the line is built from `/gw/usage/{label}/history`. So what
+    /// is held is the rule — the mean of the last known reading of every account
+    /// — computed by the one function both sides of it go through. Two accounts
+    /// here were last sampled before the third, which is what makes carrying the
+    /// difference between agreeing and not.
+    func testTheLastPointOfTheMeanIsTheHeadlineFigure() throws {
+        let accounts = [try samples([(0, 99), (9, 100)]),
+                        try samples([(1, 5)]),
+                        try samples([(4, 71), (7, 71.5)])]
+        let fleet = FleetSeries.make(from: accounts)
+        let last = try XCTUnwrap(fleet.points.last)
+        XCTAssertEqual(last.accounts, 3, "the last point is not a mean of the whole fleet")
+
+        // What the gateway averages for the headline: the reading each account
+        // currently stands at, which is the last one taken of it.
+        let current = accounts.compactMap { $0.compactMap(\.sevenDay).last }
+        XCTAssertEqual(current, [100, 5, 71.5])
+        var snapshot = UsageSnapshot.empty
+        snapshot.fleetSevenDayMean = FleetSeries.mean(of: current)
+        XCTAssertEqual(UsagePopoverView.headlinePercent(for: snapshot), 59)
+        XCTAssertEqual(UsagePopoverView.headlinePercent(for: snapshot), Int(last.value.rounded()),
+                       "the end of the line and the figure above it are two different statements")
+    }
+
+    /// The legend gets its entry for the mean from the account list, so a chart
+    /// with account lines and no mean line would name a line that is not there.
+    /// It cannot happen — both are built from the same samples — and this is the
+    /// invariant that makes the empty case unreachable rather than handled.
+    func testALineOnTheChartAlwaysHasAMeanOverIt() throws {
+        let drawable = try samples([(0, nil), (1, 42)])
+        XCTAssertFalse(AccountSeries.make(label: "acc1", points: drawable).isEmpty)
+        XCTAssertFalse(FleetSeries.make(from: [drawable]).isEmpty)
+
+        // And the other way about: what draws no account line draws no mean
+        // either, which is the state the plot puts its "no data" words up for.
+        let holes = try samples([(0, nil), (1, nil)])
+        XCTAssertTrue(AccountSeries.make(label: "acc1", points: holes).isEmpty)
+        XCTAssertTrue(FleetSeries.make(from: [holes]).isEmpty)
     }
 }
 

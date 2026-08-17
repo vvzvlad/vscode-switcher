@@ -95,9 +95,9 @@ xattr -cr "$APP_BUNDLE"
 # changes with every single rebuild. That, and nothing else, is why the
 # permission has to be re-granted after each `make app`. A self-signed
 # certificate gives the bundle a designated requirement that survives rebuilds,
-# and the grant survives with it. Creating the certificate is an interactive
-# Keychain Access operation and is left to the user (see README); this picks it
-# up automatically once it exists.
+# and the grant survives with it. Creating that certificate is left to the
+# user; the README describes both ways, through Keychain Access and from the
+# terminal. This picks the certificate up automatically once it exists.
 SIGN_IDENTITY="${SIGN_IDENTITY:-VSCodeSwitcher Dev}"
 if security find-identity -v -p codesigning 2>/dev/null | grep -qF "\"$SIGN_IDENTITY\""; then
     echo "==> Codesigning with '$SIGN_IDENTITY'..."

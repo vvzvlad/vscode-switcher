@@ -93,6 +93,113 @@ struct AccountSeries: Identifiable, Sendable, Equatable {
     var isEmpty: Bool { segments.isEmpty }
 }
 
+/// The fleet's utilisation over time: the chart's main line.
+///
+/// Worked out here rather than fetched. The gateway has no such series and does
+/// not need one — the quantity is a function of the account series already in
+/// hand, and it is the same quantity the headline states in one number: the mean
+/// over the accounts that have a reading.
+///
+/// Carried forward, never interpolated. Utilisation moves only when the gateway
+/// takes a sample; between two samples an account is worth its last reading.
+/// Interpolating would invent readings nobody took, which is the same lie a line
+/// drawn across a `null` tells one type up.
+struct FleetSeries: Sendable, Equatable {
+
+    /// One moment of the line.
+    struct Point: Sendable, Equatable {
+        var timestamp: Date
+        var value: Double
+        /// How many accounts had a reading by this moment. A mean over two
+        /// accounts and a mean over three are different statements, and this is
+        /// what tells them apart — the gateway keeps the same count beside its
+        /// own `fleet` block, for the same reason.
+        ///
+        /// Nothing on screen shows it: the chart has no place to say it that is
+        /// not a second scale in one picture (§4), and the caption under it says
+        /// the rule instead. It is here because the tests are entitled to ask
+        /// which accounts a point is a mean of — "the mean did not silently
+        /// become a mean of one" is not visible in the value alone.
+        var accounts: Int
+    }
+
+    /// In time order, and one run rather than several: see `make`.
+    var points: [Point]
+
+    static let empty = FleetSeries(points: [])
+
+    var isEmpty: Bool { points.isEmpty }
+
+    /// What the legend calls this line, and the key its colour hangs on.
+    static let label = "среднее"
+
+    /// The mean of the readings there are, and nothing at all when there are
+    /// none: the average of no accounts is not zero — the rule `FleetWindow`
+    /// applies to the gateway's own mean, applied to ours.
+    ///
+    /// Named and shared rather than written inline, because this is the
+    /// arithmetic the headline figure is made of upstream. The two numbers come
+    /// from two endpoints and cannot be computed in one place, so what is held
+    /// instead is the rule: `testTheLastPointOfTheMeanIsTheHeadlineFigure` feeds
+    /// this the same last-known readings the last point of the line is built
+    /// from, and requires the two to agree to the rounding.
+    static func mean(of values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0, +) / Double(values.count)
+    }
+
+    /// Averages the accounts over the union of their sample times.
+    ///
+    /// Takes the raw samples rather than the drawn `AccountSeries`, and the
+    /// difference is the moments at which a sample said nothing (`util_7d:
+    /// null`): those moments belong in the union. Before anybody's first reading
+    /// such a moment has no mean at all, and no point is emitted for it — the
+    /// line starts where the measurements start, rather than at a zero nobody
+    /// measured. A `null` later on is not a hole in this line, though: it says
+    /// the gateway took no reading then, not that the account's reading changed,
+    /// so the account keeps the value it was last measured at.
+    ///
+    /// The head is the only hole there can be, which is why this is one run of
+    /// points and not the list of runs `AccountSeries` keeps: from an account's
+    /// first reading onwards its value is carried for ever, so every later
+    /// moment in the union has at least that one account in it.
+    ///
+    /// Each account's samples are taken in the order the gateway sent them,
+    /// which is ascending — the same assumption `AccountSeries.make` already
+    /// makes when it cuts them into runs.
+    static func make(from samples: [[HistoryPoint]]) -> FleetSeries {
+        let moments = Set(samples.flatMap { $0.map(\.timestamp) }).sorted()
+        guard !moments.isEmpty else { return .empty }
+        // One cursor and one carried reading per account: the walk is a merge
+        // over the union, so every account's samples are consumed once in total
+        // rather than once per moment.
+        var cursors = [Int](repeating: 0, count: samples.count)
+        var carried = [Double?](repeating: nil, count: samples.count)
+        var points: [Point] = []
+        points.reserveCapacity(moments.count)
+        for moment in moments {
+            var values: [Double] = []
+            for account in samples.indices {
+                let series = samples[account]
+                while cursors[account] < series.count, series[cursors[account]].timestamp <= moment {
+                    // The seven-day window, the one the headline and the menu bar
+                    // show — the same choice, for the same reason, as
+                    // `AccountSeries.make`.
+                    if let value = series[cursors[account]].sevenDay { carried[account] = value }
+                    cursors[account] += 1
+                }
+                // An account nobody has read yet is left out entirely. Counting
+                // it as zero would drag the mean down with a figure that was
+                // never measured.
+                if let value = carried[account] { values.append(value) }
+            }
+            guard let value = mean(of: values) else { continue }
+            points.append(Point(timestamp: moment, value: value, accounts: values.count))
+        }
+        return FleetSeries(points: points)
+    }
+}
+
 /// The chart's data: fetched while the popover is open, and never otherwise.
 ///
 /// `UsageStore` polls the two summary endpoints once a minute for the whole life
@@ -108,6 +215,11 @@ final class UsageHistoryModel: ObservableObject {
     /// Utilisation over time, one entry per account, ordered by label so the
     /// chart's colours do not swap between two passes.
     @Published private(set) var series: [AccountSeries] = []
+    /// The mean of those, which is the line the chart is mainly about. Computed
+    /// in the same pass and assigned in the same places as `series`, so the two
+    /// can never describe different fetches — a mean of lines that are no longer
+    /// on screen is the picture lying about its own axis one level down.
+    @Published private(set) var fleet: FleetSeries = .empty
     /// Why the last pass was incomplete, if it was. Kept beside the previous
     /// series rather than replacing them, exactly as `UsageStore` does.
     @Published private(set) var failure: String?
@@ -241,31 +353,37 @@ final class UsageHistoryModel: ObservableObject {
     /// main actor whole.
     struct Loaded: Sendable {
         var series: [AccountSeries]
+        var fleet: FleetSeries
         var failure: String?
     }
 
     /// One request per account, in parallel, with each account's failure kept as
     /// text instead of an error: an account the gateway will not answer for is
     /// an ordinary state, and the others still have a chart to draw.
+    ///
+    /// The mean is folded here, off the main actor, and out of the same answers
+    /// the account lines are cut from — an account that did not answer is absent
+    /// from both. Doing it in the view instead would redo the fold on every
+    /// redraw of an open popover, which is once every tick for as long as it is
+    /// up.
     nonisolated static func load(client: UsageClient,
                                  labels: [String],
                                  since: Date) async -> Loaded {
         struct Fetched: Sendable {
-            var series: AccountSeries
+            var label: String
+            var points: [HistoryPoint]
             var failure: String?
         }
-        var series: [AccountSeries] = []
+        var answered: [Fetched] = []
         var failures: [String] = []
         await withTaskGroup(of: Fetched.self) { group in
             for label in labels {
                 group.addTask {
                     do {
                         let answer = try await client.history(label: label, since: since)
-                        return Fetched(series: AccountSeries.make(label: label, points: answer.points),
-                                       failure: nil)
+                        return Fetched(label: label, points: answer.points, failure: nil)
                     } catch {
-                        return Fetched(series: AccountSeries(label: label, segments: []),
-                                       failure: "\(label): \(error)")
+                        return Fetched(label: label, points: [], failure: "\(label): \(error)")
                     }
                 }
             }
@@ -273,13 +391,15 @@ final class UsageHistoryModel: ObservableObject {
                 if let failure = item.failure {
                     failures.append(failure)
                 } else {
-                    series.append(item.series)
+                    answered.append(item)
                 }
             }
         }
-        series.sort { $0.label < $1.label }
+        answered.sort { $0.label < $1.label }
         failures.sort()
-        return Loaded(series: series, failure: failures.isEmpty ? nil : failures.joined(separator: "; "))
+        return Loaded(series: answered.map { AccountSeries.make(label: $0.label, points: $0.points) },
+                      fleet: FleetSeries.make(from: answered.map(\.points)),
+                      failure: failures.isEmpty ? nil : failures.joined(separator: "; "))
     }
 
     private func apply(_ loaded: Loaded, period: HistoryPeriod) {
@@ -290,6 +410,7 @@ final class UsageHistoryModel: ObservableObject {
             // an answer — its entry is here, empty, and the chart may then
             // honestly say the period held no data.
             series = loaded.series
+            fleet = loaded.fleet
             seriesPeriod = period
             fetchedAt = moment
         } else if loaded.failure == nil || seriesPeriod != period {
@@ -302,6 +423,7 @@ final class UsageHistoryModel: ObservableObject {
             // The stamp goes with them: nothing arrived, and a footer dating
             // lines that are not there is the same lie one level down.
             series = []
+            fleet = .empty
             seriesPeriod = nil
             fetchedAt = nil
         }
@@ -470,13 +592,14 @@ struct UsagePopoverView: View {
             plot
                 .frame(height: 130)
 
-            // The difference between the big number above and the lines below is
-            // real and has to be said out loud rather than left to be inferred:
-            // the gateway has no fleet-average series yet (asked for in issue 7),
-            // so the chart can only be per account. Two quantities in one view
-            // with nothing marking the boundary is exactly what §4 took out of
-            // the row.
-            Text("Линии — по аккаунтам; ряда «среднее по флоту» шлюз пока не отдаёт.")
+            // The bold line and the big number above it are one quantity, and
+            // the caption says by what rule — not because the reader has to
+            // recompute it, but because "the mean of the accounts" is ambiguous
+            // exactly where it matters: an account nobody has read yet is left
+            // out rather than counted as zero, and one that has not been read
+            // lately keeps its last reading.
+            Text("Жирная линия — то же среднее, что и число вверху: "
+                 + "по последнему известному значению каждого аккаунта.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -518,17 +641,42 @@ struct UsagePopoverView: View {
                                       y: .value("%", only.value))
                             .foregroundStyle(by: .value("аккаунт", account.label))
                             .symbolSize(8)
+                            .opacity(Self.accountOpacity)
                         } else {
                             ForEach(segment.readings, id: \.timestamp) { reading in
                                 LineMark(x: .value("время", reading.timestamp),
                                          y: .value("%", reading.value),
                                          series: .value("отрезок", "\(account.label)#\(segment.id)"))
                                 .foregroundStyle(by: .value("аккаунт", account.label))
+                                .lineStyle(StrokeStyle(lineWidth: Self.accountLineWidth))
+                                .opacity(Self.accountOpacity)
                             }
                         }
                     }
                 }
+                // The mean, drawn last so that the line this whole popover is
+                // about ends up on top of the ones that explain it rather than
+                // under whichever account happens to cross it.
+                if history.fleet.points.count == 1, let only = history.fleet.points.first {
+                    PointMark(x: .value("время", only.timestamp),
+                              y: .value("%", only.value))
+                    .foregroundStyle(by: .value("аккаунт", FleetSeries.label))
+                    .symbolSize(24)
+                } else {
+                    ForEach(history.fleet.points, id: \.timestamp) { point in
+                        LineMark(x: .value("время", point.timestamp),
+                                 y: .value("%", point.value),
+                                 series: .value("отрезок", FleetSeries.label))
+                        .foregroundStyle(by: .value("аккаунт", FleetSeries.label))
+                        .lineStyle(StrokeStyle(lineWidth: Self.fleetLineWidth))
+                    }
+                }
             }
+            // An explicit scale rather than the automatic one, for two things it
+            // decides that the picture depends on: the mean comes first in the
+            // legend, and its colour is one no account can be handed.
+            .chartForegroundStyleScale(domain: Self.styleDomain(history.series),
+                                       range: Self.styleRange(history.series))
             .chartYScale(domain: 0...100)
             .chartYAxis {
                 AxisMarks(values: [0, 50, 100]) {
@@ -542,6 +690,39 @@ struct UsagePopoverView: View {
             .chartLegend(position: .bottom, spacing: 4)
             .font(.system(size: 9))
         }
+    }
+
+    // MARK: Chart styling
+
+    /// The mean is the figure this popover exists to show, so it is the one line
+    /// drawn at full strength; the accounts explain it and stay behind it. Two
+    /// differences rather than one, because either alone is weak on a 320 pt
+    /// chart: width separates the lines where they run apart, opacity where they
+    /// run together.
+    static let fleetLineWidth: CGFloat = 2.5
+    static let accountLineWidth: CGFloat = 1
+    static let accountOpacity: Double = 0.55
+
+    /// Ink itself, so the mean is the one line that is not a hue among hues —
+    /// and semantic, so it follows light and dark appearance like everything
+    /// else on this surface.
+    static let fleetColor = Color.primary
+
+    /// The accounts, taken in the order the model keeps them (by label), so a
+    /// colour belongs to an account for as long as the fleet does not change
+    /// rather than for one pass. Cycled, because how many accounts there are is
+    /// the gateway's business.
+    static let accountColors: [Color] = [.blue, .orange, .green, .purple, .pink, .teal]
+
+    /// The mean first — this is the legend's order as well as the scale's.
+    static func styleDomain(_ series: [AccountSeries]) -> [String] {
+        [FleetSeries.label] + series.map(\.label)
+    }
+
+    /// One colour per entry of `styleDomain`, in the same order: a shorter range
+    /// would leave the tail of the domain unstyled.
+    static func styleRange(_ series: [AccountSeries]) -> [Color] {
+        [fleetColor] + series.indices.map { accountColors[$0 % accountColors.count] }
     }
 
     // MARK: Footer
