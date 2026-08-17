@@ -983,8 +983,22 @@ enum ClaudeSessions {
     ///
     /// Each one is a pair of `agent-<id>.jsonl` and `agent-<id>.meta.json` inside
     /// `<transcript dir>/<sessionId>/subagents/`. A subagent counts as active
-    /// while its transcript was touched recently and its last record is not a
-    /// finished answer.
+    /// while its transcript was touched within `subagentActiveSeconds` and its
+    /// last record does not say it stopped — either a final answer (`end_turn`
+    /// or `stop_sequence`) or the interrupt marker.
+    ///
+    /// The meaningful half is that last record: work ends there, so a subagent
+    /// that stopped goes quiet at once, whatever the threshold is set to. The
+    /// age only guards the tails where the stop is not visible in the shape,
+    /// and silence is not a stopped subagent — a thinking model writes nothing
+    /// for minutes — so the threshold is deliberately generous (the number,
+    /// what the age actually guards and the price are in `Config` and SPEC §3.1).
+    ///
+    /// The cheap check is written first on purpose. The two are a conjunction,
+    /// so the order cannot change the answer, but lining the code up with the
+    /// prose above would call `isFinished` for every ancient transcript as
+    /// well: one more `stat` and a 64 KB tail read each, across the same set of
+    /// files the paragraph below counts.
     ///
     /// The directory listing and the `.meta.json` parses are cached against the
     /// directory's own mtime, which moves exactly when an entry is added or
@@ -992,7 +1006,10 @@ enum ClaudeSessions {
     /// re-listing nine directories and re-parsing 152 metadata files on every
     /// snapshot, about 9 ms of a 44 ms build. Only the freshness of each
     /// transcript is re-read, because that is what changes between snapshots.
-    static func subagents(slug: String, sessionId: String, config: Config) -> [SubagentInfo] {
+    static func subagents(slug: String,
+                          sessionId: String,
+                          config: Config,
+                          projectsDirectory: URL = ClaudeSessions.projectsDirectory) -> [SubagentInfo] {
         let directory = projectsDirectory
             .appendingPathComponent(slug)
             .appendingPathComponent(sessionId)
@@ -1039,9 +1056,10 @@ enum ClaudeSessions {
 
     private static let subagentFinishedCache = FileDerivedCache<Bool>()
 
-    /// A subagent transcript ends with an assistant message that stopped on its
-    /// own once the agent has delivered its answer. Cached like the session
-    /// transcripts: an unchanged file cannot have finished since last time.
+    /// A subagent transcript ends either with an assistant message that stopped
+    /// on its own, once the agent has delivered its answer, or with the marker
+    /// left where the user cut it short. Cached like the session transcripts:
+    /// an unchanged file cannot have finished since last time.
     private static func isFinished(transcriptPath: String) -> Bool {
         subagentFinishedCache.value(atPath: transcriptPath) {
             uncachedIsFinished(transcriptPath: transcriptPath)
@@ -1052,12 +1070,37 @@ enum ClaudeSessions {
         let lines = tailLines(atPath: transcriptPath, maxBytes: 64 * 1024)
         guard let last = lines.last,
               let object = try? JSONC.parse(last),
-              let record = object as? [String: Any],
-              record["type"] as? String == "assistant",
-              let message = record["message"] as? [String: Any],
-              let stopReason = message["stop_reason"] as? String
+              let record = object as? [String: Any]
         else { return false }
-        return stopReason == "end_turn" || stopReason == "stop_sequence"
+
+        switch record["type"] as? String {
+        case "user":
+            // An interrupt all but ends a subagent — 19 of the 185 markers on
+            // this machine got something appended after them, against 789 of
+            // 793 on the main chain. Correctness does not rest on that ratio:
+            // whatever is appended becomes the tail and is read instead, and
+            // all 19 continuations are the parent re-tasking the subagent with
+            // a string `content`, which `interruptVerdict` reads as `false`
+            // (SPEC §2.5). Both shapes of the marker are already parsed by
+            // `interruptVerdict`, so there is no second parser here.
+            return interruptVerdict(record: record) == true
+        case "assistant":
+            // A whitelist on purpose. The tempting addition is the assistant
+            // record that carries text and `stop_reason: null` — by its
+            // content a delivered answer ("## Done — …") — but read whole,
+            // every record of all 2786 subagent transcripts on this machine,
+            // that shape sits mid-turn 22204 times against 245 as a last
+            // record, with identical fields and `stop_details: null`. Nothing
+            // tells the two apart, so calling it an ending would blank the
+            // indicator over a subagent that is still working. That class
+            // stays with the clock (§3.1).
+            guard let message = record["message"] as? [String: Any],
+                  let stopReason = message["stop_reason"] as? String
+            else { return false }
+            return stopReason == "end_turn" || stopReason == "stop_sequence"
+        default:
+            return false
+        }
     }
 }
 
