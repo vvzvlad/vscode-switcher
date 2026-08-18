@@ -96,7 +96,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// than inside it: one is disk-bound and runs every second, the other talks
     /// to the network once a minute. They meet in `UsageCache`.
     private let usage: UsageStore
-    /// Utilisation over time, fetched only while the popover is open.
+    /// Utilisation over time for the popover's chart. **This object** fetches
+    /// only while the popover is open — the endpoint behind it is not that
+    /// exclusive, `usage` above reads the same histories every ten minutes for
+    /// the load figure (`UsageClient.history`).
     private let history: UsageHistoryModel
     private let trigger: EdgeTrigger
     private let panel: PanelController
@@ -111,6 +114,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the instant it is being shown — see `showStatusMenu`.
     private var statusMenu: NSMenu?
     private var screenObserver: (any NSObjectProtocol)?
+    /// Light and dark are an input to the picture now that it is not a template
+    /// (`MenuBarIcon`), so a change of them is a reason to redraw it.
+    private var appearanceObserver: NSKeyValueObservation?
     private var cancellables = Set<AnyCancellable>()
 
     /// Remembers that the one-shot system prompt has already been shown, so
@@ -152,6 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.onPanelMoved = { [weak self] frame in self?.trigger.panelDidMove(frame: frame) }
         panel.onGrantAccessibility = { [weak self] in self?.requestAccessibility() }
         observeScreenParameters()
+        observeAppearance()
         observeAccessibilityGrant()
 
         store.start()
@@ -174,6 +181,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         history.close()
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
         screenObserver = nil
+        appearanceObserver?.invalidate()
+        appearanceObserver = nil
     }
 
     /// A resolution change, a display being plugged in or the Dock moving all
@@ -206,13 +215,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Draws the status item's picture for the figure it is showing right now.
+    /// The menu bar going from light to dark is the other event that invalidates
+    /// the picture, and it is not the figure changing — nothing in the snapshot
+    /// moves, so `observeUsage` below never fires and the icon would keep its old
+    /// ink until the next poll that happened to say something new. Which can be
+    /// hours: the figure is a rounded percentage and mostly repeats.
     ///
-    /// `MenuBarIcon.percent` rather than a remembered value: the picture is a
-    /// pure function of the snapshot, so asking again cannot disagree with what
-    /// `observeUsage` last drew.
+    /// Since the picture stopped being a template it is drawn against one
+    /// appearance and holds it (`MenuBarIcon.image`), so a stale one is dark ink
+    /// on a dark menu bar.
+    ///
+    /// The button's own appearance and not `NSApp`'s, which is what stood here
+    /// under the reasoning that the two are "a dependency for no difference on a
+    /// machine where the menu bar and the app share an appearance". They do not
+    /// share one: measured 2026-08-18, `NSApp.effectiveAppearance` is
+    /// `NSAppearanceNameDarkAqua` while the status item's button is
+    /// `NSAppearanceNameVibrantDark`, and forcing `NSApp.appearance` to `aqua`
+    /// leaves the button on `VibrantDark` — the menu bar follows the wallpaper,
+    /// not the system theme (`MenuBarIcon.appearance(ofButton:system:)` records
+    /// the whole measurement). Both halves failed together: the picture resolved
+    /// its ink against the wrong appearance, and the theme it watched had not
+    /// changed, so nothing redrew it.
+    ///
+    /// `effectiveAppearance` is KVO-compliant on the button too, which is not a
+    /// thing to assume of a derived property — measured in the same scratch
+    /// process, three changes of the button's own `appearance` (to `darkAqua`,
+    /// to `aqua`, back to inherited) delivered three notifications, while the
+    /// three changes of `NSApp.appearance` delivered none, the button's
+    /// effective appearance not having moved.
+    ///
+    /// No fallback branch to `NSApp`: with no button there is no picture to
+    /// redraw, and an observer that watched the app in that case would be
+    /// keeping a bitmap nobody is showing up to date.
+    private func observeAppearance() {
+        guard let button = statusItem?.button else { return }
+        appearanceObserver = button.observe(\.effectiveAppearance) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.redrawStatusItemImage() }
+        }
+    }
+
+    /// Draws the status item's picture for what it is showing right now.
+    ///
+    /// `MenuBarIcon.reading` rather than a remembered value: the picture is a
+    /// pure function of the snapshot and the clock, so asking again cannot
+    /// disagree with what `observeUsage` last drew.
     private func redrawStatusItemImage() {
-        statusItem?.button?.image = MenuBarIcon.image(forPercent: MenuBarIcon.percent(for: usage.snapshot))
+        statusItem?.button?.image = MenuBarIcon.image(for: MenuBarIcon.reading(for: usage.snapshot),
+                                                      appearance: iconAppearance)
+    }
+
+    /// The appearance the status item's picture is resolved against. See
+    /// `observeAppearance` above for why it is the button's and not the app's.
+    private var iconAppearance: NSAppearance {
+        MenuBarIcon.appearance(ofButton: statusItem?.button, system: NSApp.effectiveAppearance)
     }
 
     // MARK: - Status item
@@ -230,7 +285,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // than it is tall. No app glyph in front of them — that one was thrown
         // out on sight (`MenuBarIcon`).
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = MenuBarIcon.image(forPercent: nil)
+        // Against the button's own appearance from the very first picture, and
+        // that one is asked of `item` rather than of the property: the property
+        // is assigned further down, and a first picture drawn against the app's
+        // appearance would be the wrong ink until something happened to redraw it.
+        item.button?.image = MenuBarIcon.image(
+            for: MenuBarIcon.Reading(),
+            appearance: MenuBarIcon.appearance(ofButton: item.button,
+                                               system: NSApp.effectiveAppearance))
         // No `toolTip` on purpose: the tag popped up on every pass of the
         // pointer over the menu bar and was asked for gone. The picture and the
         // popover behind the click are how the item explains itself.
@@ -266,19 +328,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeUsage()
     }
 
-    /// Redraws the picture when — and only when — the figure behind it changes.
+    /// Redraws the picture when — and only when — what it is drawn from changes.
     ///
     /// `removeDuplicates` over the whole reason for the drawing, not over the
     /// snapshot: a poll lands once a minute and mostly says the same thing, and
-    /// the picture is a pure function of one `Int?` (`MenuBarIcon.percent`), so
-    /// two equal values cannot produce two different pictures. No timer of its
-    /// own — the store's poll is the whole schedule.
+    /// the picture is a pure function of one `MenuBarIcon.Reading`, so two equal
+    /// values cannot produce two different pictures. No timer of its own — the
+    /// store's poll is the whole schedule.
+    ///
+    /// The reading is a pair now, and the second half moves on a schedule of its
+    /// own: the load figure is refetched every ten minutes, so most passes leave
+    /// it exactly where it was and change nothing here. It also has an age
+    /// ceiling, which is why the reading is worked out here rather than carried
+    /// in the snapshot — a load nobody has confirmed for twenty minutes drops out
+    /// of the picture on the next pass that publishes anything, and the poll
+    /// publishes every minute whatever the gateway says.
     private func observeUsage() {
         usage.$snapshot
-            .map(MenuBarIcon.percent(for:))
+            .map { MenuBarIcon.reading(for: $0) }
             .removeDuplicates()
-            .sink { [weak self] percent in
-                self?.statusItem?.button?.image = MenuBarIcon.image(forPercent: percent)
+            .sink { [weak self] reading in
+                guard let self else { return }
+                self.statusItem?.button?.image = MenuBarIcon.image(for: reading,
+                                                                   appearance: self.iconAppearance)
             }
             .store(in: &cancellables)
     }

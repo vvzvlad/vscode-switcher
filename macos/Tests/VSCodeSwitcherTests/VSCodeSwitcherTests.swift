@@ -2679,6 +2679,34 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.resolvedProjectRoots.count, 1)
         XCTAssertFalse(config.resolvedProjectRoots[0].path.contains("~"))
     }
+
+    /// The load window is one key and it carries hours; its length is what picks
+    /// the estimator (§2.7). A file that does not mention it is the state the
+    /// figure was always computed in, which is what makes the default the thing
+    /// nobody has to know about.
+    func testTheLoadWindowIsTunableAndItsAbsenceIsTheDefault() throws {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vscode-switcher-config-\(UUID().uuidString).json")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+
+        try #"{"scanDepth": 3}"#.write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(Config.load(from: url).usageLoadWindowHours, 48,
+                       "a config with no such key is a config that asks for what it always got")
+
+        try #"{"usageLoadWindowHours": 6}"#.write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(Config.load(from: url).usageLoadWindowHours, 6)
+
+        // Under the floor the rate is mostly sawtooth: one point spread over two
+        // hours is 18.6 points of load on a three-account fleet, which is most
+        // of the width of the whole warning band.
+        try #"{"usageLoadWindowHours": 2}"#.write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(Config.load(from: url).usageLoadWindowHours, Config.default.usageLoadWindowHours,
+                       "a window under \(FleetCapacity.minimumRecentWorkHours) h is refused, not honoured")
+
+        try #"{"usageLoadWindowHours": 4}"#.write(to: url, atomically: true, encoding: .utf8)
+        XCTAssertEqual(Config.load(from: url).usageLoadWindowHours, 4,
+                       "the floor itself is a value to stand on, not one to fall through")
+    }
 }
 
 /// Spreading a project's sessions over the windows that show it.

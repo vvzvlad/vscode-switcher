@@ -616,6 +616,19 @@ struct UsagePopoverView: View {
     @ObservedObject var usage: UsageStore
     @ObservedObject var history: UsageHistoryModel
 
+    /// Which plate this popover is drawn on, which is what the load's colour has
+    /// to be legible against (`loadColor(for:on:)`).
+    ///
+    /// From the environment rather than from `NSApp`, because the popover follows
+    /// whatever appearance it is presented in and SwiftUI is the only thing that
+    /// knows it here. The menu bar answers the same question for itself from the
+    /// appearance it rasterises against (`MenuBarIcon.background(for:)`) — the
+    /// two surfaces sit on two different plates and cannot share an answer, only
+    /// the rule that reads it.
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var background: LoadBackground { colorScheme == .dark ? .dark : .light }
+
     /// The width of the popover. Wide enough for the chart's axis labels and a
     /// reset time on the same line as its bar.
     static let width: CGFloat = 320
@@ -639,6 +652,60 @@ struct UsagePopoverView: View {
     /// something else.
     static let headlineCaption = "weekly quota, average across accounts"
     static let headlineCaptionSize: CGFloat = 11
+
+    /// What the headline says when there is a load figure to say it about, and
+    /// it names a different quantity from the caption above: not how much of the
+    /// week is spent, but how much of the week is being asked for. `126%` reads
+    /// "a quarter more than the week holds".
+    ///
+    /// No jargon and no internal vocabulary — the word this metric is called by
+    /// inside the app appears in no string on this surface (§4).
+    static let loadCaption = "of weekly capacity across accounts"
+
+    /// The headline's bar, taller than the ones on the account rows because it
+    /// belongs to the figure this popover is opened for.
+    ///
+    /// A constant for the reason the dot's size is one: the test that holds its
+    /// colour finds it by its size — nothing else in the picture is a patch
+    /// exactly this tall — and a copy of the number in the test would be a test
+    /// about a bar that no longer exists.
+    static let headlineBarHeight: CGFloat = 8
+
+    /// The lead figure and the supporting one under it, and the gap between the
+    /// two readings.
+    ///
+    /// The sizes are what make the pair read as a lead and a second reading
+    /// rather than as twins, and they are named because the tests draw the two
+    /// figures free-standing to measure what the popover drew (a copy of a size
+    /// there would be comparing a rendering with a rendering of something else).
+    /// Measured 2026-08-18 at `scale = 2`: `≥300%` is 104.00 pt of layout at
+    /// 30 pt and 59.50 at 17, and the quota's own `100%` is 84.50 and 49.00 —
+    /// against a content line of 292 pt, so neither figure can crowd its caption
+    /// off its own row, which is the thing this layout was rebuilt for.
+    ///
+    /// `≥300%` is a typical upper end and **not** a ceiling: `FleetCapacity.load`
+    /// clamps nothing and `loadLabel` prints whatever it is handed. What the slot
+    /// can hold is a separate measurement and it is far past that — at 30 pt the
+    /// line takes twelve digits (`≥999999999999%`, 277.59 pt), and the first
+    /// string too wide for it is a thirteenth at 296.92 pt (2026-08-18, layout
+    /// widths). So the figure crowding its caption is not a state this metric can
+    /// reach, and the sizes are chosen against the caption rather than against a
+    /// worst case that does not exist. That each caption does come out on one
+    /// line under its own figure is a rendering and not an inference:
+    /// `testTheHeadlineCaptionIsDrawnOnOneLine` for the lead's and
+    /// `testTheHeadlineDrawsTheLoadAndTheWeeklyQuotaAtOnce` for the pair.
+    ///
+    /// The gap is wider than the 6 pt inside a reading and narrower than the
+    /// 12 pt between the popover's sections: the two belong together, and they
+    /// are still two.
+    static let headlineFigureSize: CGFloat = 30
+    static let supportingFigureSize: CGFloat = 17
+    static let headlineReadingSpacing: CGFloat = 10
+
+    /// The supporting reading's bar — the height an account's window row gets,
+    /// which is the point: the lead's 8 pt says which figure the popover is for,
+    /// and the quota is drawn at the weight of the readings it summarises.
+    static let supportingBarHeight: CGFloat = 6
 
     /// The slot the reset time gets at the right end of a window row. Wide enough
     /// for everything `resetLabel` writes about a quota window, which is measured
@@ -672,9 +739,11 @@ struct UsagePopoverView: View {
                                       seriesPeriod: history.seriesPeriod,
                                       period: history.period,
                                       chartFailed: history.failure != nil,
+                                      loadFailed: usage.snapshot.fleetLoadFailure != nil,
                                       now: history.now)
         let failure = Self.failureText(quota: usage.snapshot.quotaFailure,
-                                       history: history.failure)
+                                       history: history.failure,
+                                       load: usage.snapshot.fleetLoadFailure)
         return VStack(alignment: .leading, spacing: 12) {
             headline
             Divider()
@@ -711,26 +780,108 @@ struct UsagePopoverView: View {
     /// a dash over the account rows right below it, which go on showing their
     /// stored percentages — two contradicting statements on one screen, and the
     /// dash was the false one: the number is known, it is merely old.
-    /// Three rows rather than "figure, caption beside it, bar", and the reason is
-    /// measured (§4): the caption is 206 pt of a 292 pt line, so beside a figure it
-    /// only fits while the figure is short. `52%` leaves it 219 pt and `100%` leaves
-    /// 199.5 — the caption then wraps, and a wrapped caption is the complaint this
-    /// headline was rebuilt for. On its own row it has the whole width and one line
-    /// is one line whatever the figure says.
+    /// Three rows to a reading rather than "figure, caption beside it, bar", and
+    /// the reason is measured (§4): the caption is 206 pt of a 292 pt line, so
+    /// beside a figure it only fits while the figure is short. `52%` leaves it
+    /// 219 pt and `100%` leaves 199.5 — the caption then wraps, and a wrapped
+    /// caption is the complaint this headline was rebuilt for. On its own row it
+    /// has the whole width and one line is one line whatever the figure says.
+    ///
+    /// What stands in the lead three is the load when there is one, and the mean
+    /// utilisation when there is not — and all three rows switch together. The
+    /// caption names the figure and the bar is that figure drawn, so a bar left
+    /// showing the mean under a caption that says "capacity" would be the two
+    /// contradicting statements on one screen that this very headline already
+    /// refused once (see `headlinePercent`).
+    ///
+    /// **Two readings, one under the other, and the quota is not the lead any
+    /// more.** The load answers "will the week last", which is why the popover
+    /// gets opened, so it takes the big figure; the weekly quota answers "how
+    /// much is gone", which is a different question and still worth an answer, so
+    /// it keeps a figure, a caption and a bar of its own underneath at
+    /// `supportingFigureSize` against the lead's `headlineFigureSize`. What the
+    /// branch above refused was a *bar* showing one quantity under a caption
+    /// naming the other; a second reading that names itself is the opposite of
+    /// that, and putting the quota back is the owner's call — the branch that
+    /// replaced it took a reading off the screen rather than adding one.
+    ///
+    /// **A `nil` load falls back to exactly the old drawing, and nothing is
+    /// invented in its place.** `FleetCapacity.load` answers `nil` when the
+    /// gateway said nothing, when no account has six hours of history to
+    /// extrapolate from, and when every account spent the whole window pinned at
+    /// its ceiling — and from here those three are one state, because the metric
+    /// hands back no way to tell them apart. Two of them are cases where the
+    /// truthful answer is "unknown" and the third is a fleet in the worst
+    /// trouble it can be in; a number that split the difference would be wrong
+    /// for all three (§2.7). Then the quota is the lead and the supporting block
+    /// is not drawn at all: the fallback already states it, and drawn anyway it
+    /// would be the same percentage twice on one surface.
     private var headline: some View {
+        // The clock the whole popover reads, which ticks while it is open: one
+        // of the load's two rules is an age, so a figure that goes stale under an
+        // open popover has to leave the headline without waiting for a click.
+        let load = Self.headlineLoad(for: usage.snapshot, now: history.now)
         let percent = Self.headlinePercent(for: usage.snapshot)
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: Self.headlineReadingSpacing) {
+            // Past 100 the bar is full and the figure carries the rest: a scale
+            // that stretched to fit 300% would make capacity — the point the
+            // whole reading turns on — a mark a third of the way along.
+            //
+            // The clamp is the only thing this bar shares with the menu bar's,
+            // and calling them one rule was wrong: what fills this one is the
+            // *load*, what fills that one is the mean, and the mean cannot reach
+            // the clamp at all — it tops out at exactly 100. Both are right for
+            // their own surface, because each bar sits under its own number: up
+            // there the number is the mean, here it is whatever this headline is
+            // stating.
+            reading(figure: Self.headlineFigureLabel(for: usage.snapshot, now: history.now),
+                    color: Self.headlineFigureColor(for: usage.snapshot, now: history.now,
+                                                    on: background),
+                    size: Self.headlineFigureSize,
+                    caption: load == nil ? Self.headlineCaption : Self.loadCaption,
+                    fraction: load.map { $0.percent / 100 } ?? percent.map { Double($0) / 100 },
+                    barHeight: Self.headlineBarHeight,
+                    tint: load.map { Self.loadColor(for: $0, on: background) })
+            if load != nil {
+                // The quota exactly as it was drawn before the load arrived,
+                // only smaller: ink for the figure, and the bar left to
+                // `QuotaBar.color(for:)` — that scale's 60 and 85 per cent are
+                // thresholds on *this* quantity, how much of a window is gone,
+                // which is the one reading on this surface they belong to.
+                reading(figure: Self.quotaLabel(for: usage.snapshot),
+                        color: .primary,
+                        size: Self.supportingFigureSize,
+                        caption: Self.headlineCaption,
+                        fraction: percent.map { Double($0) / 100 },
+                        barHeight: Self.supportingBarHeight,
+                        tint: nil)
+            }
+        }
+    }
+
+    /// One reading of the headline: a figure, the words that name it, and the bar
+    /// it draws as. Written once because the two readings are the same shape and
+    /// differ only in their sizes and in what colours them.
+    private func reading(figure: String,
+                         color: Color,
+                         size: CGFloat,
+                         caption: String,
+                         fraction: Double?,
+                         barHeight: CGFloat,
+                         tint: Color?) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             // Tighter than the gap above the bar, because the words belong to the
             // figure: they say which quota it is.
             VStack(alignment: .leading, spacing: 2) {
-                Text(percent.map { "\($0)%" } ?? "—")
-                    .font(.system(size: 30, weight: .semibold))
+                Text(figure)
+                    .font(.system(size: size, weight: .semibold))
                     .monospacedDigit()
-                Text(Self.headlineCaption)
+                    .foregroundStyle(color)
+                Text(caption)
                     .font(.system(size: Self.headlineCaptionSize))
                     .foregroundStyle(.secondary)
             }
-            QuotaBar(fraction: percent.map { Double($0) / 100 }, height: 8)
+            QuotaBar(fraction: fraction, height: barHeight, tint: tint)
         }
     }
 
@@ -1001,6 +1152,544 @@ struct UsagePopoverView: View {
         snapshot.fleetSevenDayPercent
     }
 
+    /// Past this age the load figure is not shown at all — on this surface or on
+    /// the menu bar.
+    ///
+    /// Two of its own polling intervals (`UsageStore.fleetLoadIntervalSeconds`),
+    /// built the same way `footerStaleSeconds` is built out of the fast halves':
+    /// a figure that is *meant* to be up to ten minutes old is not stale at ten
+    /// minutes, and past two intervals nothing is refreshing it at all.
+    ///
+    /// One constant because one rule: `headlineLoad` below is the whole of it and
+    /// `MenuBarIcon.load(for:now:)` is that function under another name.
+    static let loadStaleSeconds: TimeInterval = 2 * UsageStore.fleetLoadIntervalSeconds
+
+    /// The load this headline speaks for, or `nil` when it has to fall back to
+    /// the mean. The one rule both surfaces read.
+    ///
+    /// **A failure of its own half.** The figure is frozen then, and the error is
+    /// not one-directional, which is the whole of it. Measured with `/gw/usage`
+    /// and `/gw/sessions` answering while `/history` returned HTTP 500 — the menu
+    /// bar correctly dropped its colour and this line went on stating a red
+    /// `≥134%` over a full red bar, with nothing on screen saying the figure had
+    /// not been confirmed. A frozen 134% over a fleet that has since calmed down
+    /// is a false alarm; a frozen green 80% over one that has gone to 200% is
+    /// exactly the failure this metric was built to prevent. And the gateway's
+    /// own bodies make it likely rather than exotic: `/gw/usage` is about 3 KB
+    /// against 130–187 KB for one history (measured 2026-08-18), so a slow link
+    /// delivers the quota and loses the histories.
+    ///
+    /// **And an age, because the failure is missing exactly where it is needed.**
+    /// A `/gw/usage` outage skips the load block whole (`UsageStore.poll` needs a
+    /// freshly confirmed account list), so `fleetLoadFailure` stays `nil`, neither
+    /// stamp moves, and a guard on the blame alone presents a two-hour-old figure
+    /// as current under a caption that says "capacity" — with a red frame in the
+    /// menu bar that nothing can clear, since up there the whole load half is
+    /// this one answer. The quiet direction is the same failure mirrored: a
+    /// frozen green figure over a fleet that has since gone over capacity.
+    ///
+    /// Dating it in the footer instead was the other answer and it is not enough
+    /// on its own — it leaves the number itself stating the present, and it
+    /// cannot reach the menu bar, which has no room for a caveat. The stamp is
+    /// the arrival and never the attempt: the attempt moves on a failure and
+    /// would call a frozen figure fresh (`UsageSnapshot.fleetLoadCheckedAt`).
+    /// A figure with no arrival stamp at all is not shown either — every pass
+    /// that produces one stamps it in the same breath, so a load without a stamp
+    /// is a fixture, not a reading.
+    static func headlineLoad(for snapshot: UsageSnapshot, now: Date = Date()) -> FleetLoad? {
+        guard snapshot.fleetLoadFailure == nil,
+              let fetchedAt = snapshot.fleetLoadFetchedAt,
+              now.timeIntervalSince(fetchedAt) < loadStaleSeconds else { return nil }
+        return snapshot.fleetLoad
+    }
+
+    /// The string in the headline's top row: the load when there is one, the
+    /// mean when there is not, and a dash when there is neither.
+    ///
+    /// A named function for the same reason `headlinePercent` is one — the
+    /// fallback is a rule and a rule should be something a test can ask about.
+    /// The rendering cannot: the picture is measured by its lines of ink, and
+    /// `—` drawn where `100%` belongs is the same three lines of the same widths
+    /// (checked by mutation, 2026-08-17 — the paint test stayed green).
+    static func headlineFigureLabel(for snapshot: UsageSnapshot, now: Date = Date()) -> String {
+        if let load = headlineLoad(for: snapshot, now: now) { return loadLabel(for: load) }
+        return quotaLabel(for: snapshot)
+    }
+
+    /// The weekly quota as the headline writes it — the string of the supporting
+    /// reading under the load, and the string the lead falls back to when there
+    /// is no load.
+    ///
+    /// One function for the two of them on purpose. They are the same reading,
+    /// and written twice they could come to disagree — which on a surface that
+    /// draws both at once would be the same number twice in two shapes.
+    static func quotaLabel(for snapshot: UsageSnapshot) -> String {
+        headlinePercent(for: snapshot).map { "\($0)%" } ?? "—"
+    }
+
+    /// The colour of that string: the load's own, or ink when the headline is
+    /// back to being the mean.
+    ///
+    /// Named rather than written into the view, and the reason is that it was
+    /// not: replacing the modifier with a flat `Color.primary` passed all 478
+    /// tests (2026-08-17), which made this the one visible quantity on the
+    /// surface with nothing holding it. The rule is here so a test can ask it,
+    /// and `UsagePopoverPaintTests` asks the rendering as well — a function
+    /// nobody calls would answer correctly for ever.
+    ///
+    /// The quota is deliberately not coloured, wherever it stands. Ink here when
+    /// it is the lead, ink in the supporting reading below the load, and in both
+    /// places for the same reason: `QuotaBar.color(for:)` would give the figure a
+    /// scale of its own — green, orange, red at 60% and 85% of a window — and a
+    /// red `92%` over the load's own colour would be two scales for one number.
+    /// The bar under it does take that scale, which is not the same claim: it is
+    /// the shape of the reading rather than the reading written out, and it is
+    /// drawn exactly as an account's window row is drawn.
+    ///
+    /// The plate travels with the question for the reason it travels with
+    /// `loadColor`: this figure is a colour drawn on the popover, and how dark it
+    /// has to be to be read is a fact about the popover's own background.
+    static func headlineFigureColor(for snapshot: UsageSnapshot,
+                                    now: Date = Date(),
+                                    on background: LoadBackground) -> Color {
+        headlineLoad(for: snapshot, now: now).map { loadColor(for: $0, on: background) } ?? .primary
+    }
+
+    /// The load as the headline writes it.
+    ///
+    /// `≥` when the figure is only a floor: an account sat at its ceiling while
+    /// it was measured, and the demand it turned away never entered its series
+    /// at all, so the truth is at least this (`FleetLoad.isLowerBound`). The
+    /// same symbol, for the same reason, that the panel's row and `--dump` put
+    /// in front of a token sum they know only a lower bound of (§2.7). What it
+    /// does *not* say is by how much — the requests an exhausted account refused
+    /// leave nothing behind to count.
+    static func loadLabel(for load: FleetLoad) -> String {
+        (load.isLowerBound ? "≥" : "") + "\(Int(load.percent.rounded()))%"
+    }
+
+    /// The load the ramp is coldest at, and below which it stops moving.
+    ///
+    /// The three anchors are the owner's, in their words: "≤ 70 cold blue,
+    /// 70 → 100 blue through cyan into green, 100 green, 100 → 130 green through
+    /// yellow and orange, ≥ 130 red". They are loads, not colours — what happens
+    /// between them is `loadColor(for:on:)` interpolating hue, which is what puts
+    /// the cyan in the first stretch and the yellow and the orange in the second
+    /// (§4).
+    static let coldLoadPercent: Double = 70
+    /// Where the ramp is green, and it is capacity itself rather than a second
+    /// copy of that number: a week asked for exactly what it holds is the middle
+    /// of the scale, not a step in it.
+    static let greenLoadPercent: Double = FleetLoad.capacityPercent
+    /// Where the ramp reaches red and stops moving. Not a ceiling on the figure —
+    /// the headline goes on printing 300% — a ceiling on the colour, because past
+    /// half again over capacity there is nothing louder left to say.
+    static let hotLoadPercent: Double = 130
+
+    /// One end of the ramp, as a colour is written in this file.
+    ///
+    /// Hue, saturation and brightness rather than red, green and blue, because
+    /// the ramp interpolates the first of the three and the other two come along
+    /// with it.
+    private struct RampAnchor {
+        var hue: Double
+        var saturation: Double
+        var brightness: Double
+
+        /// The same colour at another brightness, and at another saturation.
+        /// Named because the legibility rule moves one coordinate at a time and
+        /// the hue has to survive both moves untouched.
+        func at(brightness value: Double) -> RampAnchor {
+            RampAnchor(hue: hue, saturation: saturation, brightness: value)
+        }
+
+        func at(saturation value: Double) -> RampAnchor {
+            RampAnchor(hue: hue, saturation: value, brightness: brightness)
+        }
+    }
+
+    /// The three anchors, and they are this project's own colours rather than a
+    /// palette invented for the ramp: measured in `aqua` 2026-08-18, these are
+    /// `Color.blue`, `Color.green` and `Color.red` to four figures of hue —
+    /// exactly the greens and reds `QuotaBar.color(for:)` fills an account's bar
+    /// with. So the ramp *is* the family at its ends and only travels between
+    /// them in the middle.
+    ///
+    /// That holds of what is written here and of nothing that is drawn: **both**
+    /// plates move these numbers, and only the hue survives either of them
+    /// (`legible(_:on:)`). On a light plate the drawn colour is this hue and this
+    /// saturation at a lower brightness — the blue anchor is drawn at brightness
+    /// 0.7955 there and the red at 0.7451. On a dark one brightness is already at
+    /// the top of its scale for two of the three, so the lever is saturation
+    /// instead: measured 2026-08-18, blue is drawn at saturation 0.6383 and red at
+    /// 0.5228, while green — the one anchor that clears the floor as written —
+    /// comes through untouched.
+    ///
+    /// Written out rather than read from the system colours at drawing time, and
+    /// the reason is a measurement too. Resolved in all four appearances
+    /// (2026-08-18), `Color.blue`, `Color.green` and `Color.red` answer the
+    /// `aqua` figures in `vibrantLight` and `vibrantDark` alike — and the status
+    /// item's button reports itself `vibrantDark` on this machine (§4) — so on
+    /// the menu bar a constant is what the dynamic colour resolves to anyway.
+    /// Only `darkAqua` differs, and by 0.04 of saturation on all three, plus 0.04
+    /// of brightness on green and 0.003 of hue on blue: a hair, against the
+    /// alternative, which is an
+    /// `NSColor` with a dynamic provider — and two of those cannot be compared
+    /// for equality, which is exactly what the menu bar and the popover are
+    /// checked against each other with.
+    private static let coldAnchor = RampAnchor(hue: 0.5869, saturation: 1.000, brightness: 1.000)
+    private static let greenAnchor = RampAnchor(hue: 0.3586, saturation: 0.805, brightness: 0.804)
+    private static let hotAnchor = RampAnchor(hue: 0.0089, saturation: 0.812, brightness: 1.000)
+
+    /// The plate a load colour is drawn on, and everything the legibility rule
+    /// below needs to know about it.
+    ///
+    /// Two cases because the app paints on two kinds of plate, and all four were
+    /// measured rather than assumed (2026-08-18, this machine): the menu bar by
+    /// screenshot of a 400 by 20 pixel strip, the popover by rendering
+    /// `NSVisualEffectView` at `.popover` in each appearance.
+    ///
+    ///     light   menu bar rgb 0.883    popover rgb 0.9341
+    ///     dark    menu bar rgb 0.17     popover rgb 0.2274
+    ///
+    /// All four came back a flat neutral grey, one value across every pixel,
+    /// because this machine has "Reduce transparency" on — which is also the only
+    /// reason a plate is a measurable thing at all. Without it the menu bar is
+    /// the wallpaper seen through a wash, and the day that setting goes off these
+    /// four numbers become a typical case rather than the surface itself.
+    ///
+    /// Each case carries the **least favourable** member of its family: the
+    /// darkest light plate and the lightest dark one. A colour that clears the
+    /// floor against these clears it against the other surface of the same kind
+    /// by more, which is what lets one rule serve both.
+    enum LoadBackground {
+        case light
+        case dark
+
+        /// The plate as an sRGB grey. One component says all of it: the four
+        /// measurements are neutral to four decimals.
+        var grey: Double {
+            switch self {
+            case .light: return 0.883
+            case .dark: return 0.2274
+            }
+        }
+
+        /// What the contrast arithmetic asks of it: 0.7541 light, 0.0423 dark.
+        var relativeLuminance: Double {
+            UsagePopoverView.relativeLuminance((grey, grey, grey))
+        }
+
+        /// The calm mark the warning replaces, as it lands on this plate: the
+        /// bar's frame, which is `labelColor` at `calmFrameOpacity`
+        /// (`MenuBarIcon.drawBar`) composited over `grey`.
+        ///
+        /// `labelColor` is black on a light plate and white on a dark one, and
+        /// the opacity is absolute rather than a multiple of the colour's own —
+        /// `withAlphaComponent` replaces the alpha, it does not scale it. So the
+        /// composite is arithmetic rather than a measurement, and the rendering
+        /// agrees with it: 0.397 measured against 0.397 here on the light plate,
+        /// 0.650 against 0.652 on the dark one (2026-08-18, the drawn picture over
+        /// its plate, `testTheWarningIsNeverQuieterThanTheCalmStateItReplaces`).
+        var calmInkGrey: Double {
+            switch self {
+            case .light: return grey * (1 - UsagePopoverView.calmFrameOpacity)
+            case .dark: return grey + UsagePopoverView.calmFrameOpacity * (1 - grey)
+            }
+        }
+    }
+
+    /// The contrast every load colour has to reach against the plate under it.
+    ///
+    /// **A warning may never be less legible than the calm state it replaces**,
+    /// and this is the operational half of that rule. What it replaced was a
+    /// luminance ceiling that clamped the ramp to the green anchor's own
+    /// brightness — and the ceiling was built and quoted in *gamma* space, Rec.
+    /// 709 weights laid straight on sRGB components that WCAG requires
+    /// linearised first, so the contrast it claimed to buy was never the contrast
+    /// on screen. Rendered and measured properly (2026-08-18, on the light menu
+    /// bar plate rgb 0.883): crossing capacity took the number from ink at 11.61
+    /// to 1 down to the ramp's green at 1.62, and the frame from 4.41 to 1.35. The
+    /// picture faded exactly where it was supposed to light up — its worst point
+    /// being 1.35 to 1, which is a shape nobody can see at all.
+    ///
+    /// 4.5 is WCAG's floor for text below 18 pt, and the smallest thing either
+    /// surface paints in this colour is the menu bar's number at 9 pt. It is used
+    /// for everything the ramp paints — the fill, the frame, the popover's figure
+    /// and its bar — rather than giving the graphics their own looser 3 to 1,
+    /// because a picture 27 points wide may not carry two brightnesses of one
+    /// reading. The graphics floor is met with room to spare, which is the point
+    /// of taking the stricter one.
+    static let minimumContrastRatio: Double = 4.5
+
+    /// The opacity the calm bar frame is drawn at (`MenuBarIcon.drawBar`).
+    ///
+    /// It lives here rather than beside the drawing because the floor below is
+    /// derived from what this opacity produces: the rule is about a warning
+    /// against the calm mark it replaces, and the calm mark is `labelColor` at
+    /// this opacity. Two copies of the number would let the rule and the drawing
+    /// disagree about what "the calm state" is, silently.
+    ///
+    /// `nonisolated` so `LoadBackground` — a nested type, which does not inherit
+    /// this view's isolation — can read it. The note on `relativeLuminance` has
+    /// the whole of that argument.
+    nonisolated static let calmFrameOpacity: Double = 0.55
+
+    /// What every colour on the ramp has to reach against the plate it is drawn
+    /// on: the WCAG floor, or the calm state's own contrast when that is higher.
+    ///
+    /// **The floor is derived from the calm state and not fixed, because the rule
+    /// is a comparison and not a number.** "A warning may never be less legible
+    /// than the calm state it replaces" says nothing about 4.5 to 1; it says the
+    /// warning wins against whatever the calm frame measures on this plate. A
+    /// fixed 4.5 happened to satisfy it on the light plate — the calm frame is
+    /// 4.44 there, so the margin was 0.06 of arithmetic coincidence — and failed
+    /// it on the dark one, where the calm frame is 4.69 and the ramp was left at
+    /// 2.83 (cold) and 3.20 (red). Derived, the ordering holds on both by
+    /// construction.
+    ///
+    /// **By construction as `≥`, and at the hot end that is equality**, which is
+    /// worth saying plainly: on the dark plate this floor *is* the analytic calm
+    /// frame, and `legible` moves a colour until it reaches the floor and no
+    /// further, so from 124.9% up the warning frame aims at exactly the number it
+    /// has to beat. The margin that shows on screen comes from antialiasing
+    /// rather than from the rule — rendered, the warning frame measures 4.69 at
+    /// 130% and 150% against the calm frame's 4.67 (2026-08-18) — and it points
+    /// this way because the calm stroke is drawn at `calmFrameOpacity` while the
+    /// warning stroke is opaque, so partial coverage costs the calm one more.
+    ///
+    /// Measured 2026-08-18 on this machine's plates: **4.50 on the light plate**
+    /// (the calm frame is 4.44 there, so `minimumContrastRatio` is what binds) and
+    /// **4.69 on the dark one** (the calm frame binds, and WCAG's floor is what
+    /// does not).
+    ///
+    /// What it deliberately does *not* take for the calm state is the calm
+    /// **number**, which is `labelColor` at full strength — 11.61 to 1 on the
+    /// light plate and 8.57 on the dark one. No colour that keeps a hue reaches
+    /// either: on the dark plate the red would need its saturation down at 0.17 to
+    /// measure 8.57, which is a pink, and the light plate has no room at all. That
+    /// shortfall is real and named rather than hidden — the number over capacity
+    /// is a coloured number, and the price of colour is that it is quieter than
+    /// ink. The frame is what the rule is held to because the frame is what the
+    /// warning replaces mark for mark.
+    static func contrastFloor(on background: LoadBackground) -> Double {
+        max(minimumContrastRatio,
+            contrastRatio(relativeLuminance((background.calmInkGrey,
+                                             background.calmInkGrey,
+                                             background.calmInkGrey)),
+                          background.relativeLuminance))
+    }
+
+    /// WCAG contrast between two relative luminances, in either order.
+    nonisolated static func contrastRatio(_ one: Double, _ other: Double) -> Double {
+        (max(one, other) + contrastOffset) / (min(one, other) + contrastOffset)
+    }
+
+    /// What WCAG adds to both luminances before dividing them. Named because the
+    /// floor is solved for a luminance rather than searched for by ratio, and the
+    /// constant appears on both sides of that arithmetic.
+    nonisolated private static let contrastOffset: Double = 0.05
+
+    /// The colour of a load on the plate it will be drawn on: a ramp from cold
+    /// blue through green to red, pinned at the three anchors above and flat
+    /// outside them, darkened where the plate underneath would otherwise swallow
+    /// it.
+    ///
+    /// **A ramp and not a step, by the owner's decision.** Both surfaces switched
+    /// on one boundary before — green below 100, red at or above — and a single
+    /// step says nothing at all about a fleet at 40% against one at 95%, which is
+    /// the difference between a week with room in it and a week about to run out.
+    /// The hue is what carries the reading; the intermediate colours are not
+    /// picked, they are where linear interpolation lands, which is cyan on the
+    /// way from blue to green and yellow then orange on the way from green to
+    /// red.
+    ///
+    /// **The plate is an argument because the answer depends on it.** The hue
+    /// does not: at every load it is the same on both plates, to the last
+    /// decimal, and it is the hue that carries the reading. What the plate moves
+    /// is how light the colour has to be drawn — down on a light plate, up on a
+    /// dark one — measured at nine loads in
+    /// `testTheRampMeetsItsContrastFloorOnEveryPlate`.
+    static func loadColor(for load: FleetLoad, on background: LoadBackground) -> Color {
+        let anchor = legible(rampAnchor(at: load.percent), on: background)
+        return Color(hue: anchor.hue,
+                     saturation: anchor.saturation,
+                     brightness: anchor.brightness)
+    }
+
+    /// Where the ramp stands at a load, before the plate has had its say.
+    private static func rampAnchor(at percent: Double) -> RampAnchor {
+        if percent <= coldLoadPercent { return coldAnchor }
+        if percent < greenLoadPercent {
+            return mix(coldAnchor, greenAnchor,
+                       (percent - coldLoadPercent) / (greenLoadPercent - coldLoadPercent))
+        }
+        if percent < hotLoadPercent {
+            return mix(greenAnchor, hotAnchor,
+                       (percent - greenLoadPercent) / (hotLoadPercent - greenLoadPercent))
+        }
+        return hotAnchor
+    }
+
+    /// The anchor as it may be drawn on this plate: the same hue, moved until it
+    /// clears `contrastFloor(on:)`.
+    ///
+    /// **The hue never moves, and the direction of everything else follows the
+    /// plate.** A colour is pulled away from a light plate by darkening and away
+    /// from a dark one by lightening, and the plate is what says which. The
+    /// previous rule had only the first half — it lowered brightness and nothing
+    /// else — so on a dark plate it could not reach the floor at all and left the
+    /// ramp raw, which is how crossing capacity came to draw a *dimmer* picture
+    /// than the calm state it replaced: red at 3.20 against the calm frame's 4.67
+    /// (2026-08-18, both rendered off the status item's bitmap). 4.69 is the
+    /// *analytic* calm frame on this plate, and it is also `contrastFloor(.dark)`
+    /// — quoting it beside a rendered 3.20 was comparing two different
+    /// measurements.
+    ///
+    /// Lightening is two levers, in this order, and both keep the hue:
+    ///
+    /// 1. **Brightness up to the top of its scale.** Free, and enough on its own
+    ///    for anything on the green half of the ramp.
+    /// 2. **Saturation down.** At brightness 1 a hue's luminance is fixed by its
+    ///    saturation alone, and lowering it is travel along the tint line towards
+    ///    white — the hue is preserved exactly, which is what "keep the hue"
+    ///    asks for. It is the only lever left once brightness is spent, and two
+    ///    of the three anchors are written at brightness 1 already.
+    ///
+    /// The cost is named rather than hidden: on the dark plate the cold blue is
+    /// drawn at saturation 0.6383 and the red at 0.5228, which is a paler blue and
+    /// a red with white in it. That is what a floor of 4.69 to 1 costs a hue whose
+    /// fully saturated luminance is 0.2126. Desaturating on a *light* plate would
+    /// be the opposite mistake — there the colour has to get further from a light
+    /// background, and washing it out moves it closer — which is why the two
+    /// directions are a `switch` on the plate rather than one rule that guesses.
+    private static func legible(_ anchor: RampAnchor,
+                                on background: LoadBackground) -> RampAnchor {
+        let floor = contrastFloor(on: background)
+        switch background {
+        case .light:
+            let ceiling = (background.relativeLuminance + contrastOffset) / floor - contrastOffset
+            guard luminance(of: anchor) > ceiling else { return anchor }
+            // A ceiling at or under zero would mean no colour can clear the
+            // floor, and the bisection answers that honestly — it converges on
+            // black, the darkest thing there is, and the assertion that every
+            // mark stays chromatic then fails loudly. There is no guard for the
+            // case because a guard here could only return the colour *unchanged*,
+            // which is the silent failure this whole rule exists to end.
+            //
+            // Luminance rises with brightness and never falls, so the largest
+            // brightness under the ceiling is a bisection rather than a search
+            // with an answer to check. Twenty-four halvings of the unit interval
+            // leave 6e-8, three orders under the byte the colour is finally drawn
+            // as.
+            var low = 0.0
+            var high = anchor.brightness
+            for _ in 0..<24 {
+                let middle = (low + high) / 2
+                if luminance(of: anchor.at(brightness: middle)) > ceiling {
+                    high = middle
+                } else {
+                    low = middle
+                }
+            }
+            return anchor.at(brightness: low)
+        case .dark:
+            let target = floor * (background.relativeLuminance + contrastOffset) - contrastOffset
+            guard luminance(of: anchor) < target else { return anchor }
+            let lit = anchor.at(brightness: 1)
+            if luminance(of: lit) >= target {
+                // The dimmest brightness that still clears the floor: the anchor
+                // keeps as much of its own darkness as the plate allows.
+                var low = anchor.brightness
+                var high = 1.0
+                for _ in 0..<24 {
+                    let middle = (low + high) / 2
+                    if luminance(of: anchor.at(brightness: middle)) < target {
+                        low = middle
+                    } else {
+                        high = middle
+                    }
+                }
+                return anchor.at(brightness: high)
+            }
+            // Brightness is spent. Luminance falls as saturation rises, so the
+            // most saturated colour that still clears the floor is the same
+            // bisection the other way round — and if even white cannot reach the
+            // target the answer is white, which is what `low` stays at.
+            var low = 0.0
+            var high = lit.saturation
+            for _ in 0..<24 {
+                let middle = (low + high) / 2
+                if luminance(of: lit.at(saturation: middle)) >= target { low = middle } else { high = middle }
+            }
+            return lit.at(saturation: low)
+        }
+    }
+
+    private static func mix(_ from: RampAnchor, _ to: RampAnchor, _ position: Double) -> RampAnchor {
+        RampAnchor(hue: from.hue + (to.hue - from.hue) * position,
+                   saturation: from.saturation + (to.saturation - from.saturation) * position,
+                   brightness: from.brightness + (to.brightness - from.brightness) * position)
+    }
+
+    private static func luminance(of anchor: RampAnchor) -> Double {
+        relativeLuminance(components(of: anchor))
+    }
+
+    /// The sRGB components of an anchor at a brightness — the standard HSB
+    /// conversion, and the one `Color(hue:saturation:brightness:)` performs.
+    ///
+    /// Checked against it rather than assumed: at the three anchors the round
+    /// trip through `NSColor` gives back the hue, saturation and brightness
+    /// handed in, to the four decimals they are written with.
+    private static func components(of anchor: RampAnchor) -> (red: Double, green: Double, blue: Double) {
+        let brightness = anchor.brightness
+        let sector = (anchor.hue * 6).truncatingRemainder(dividingBy: 6)
+        let falling = 1 - anchor.saturation * abs(sector.truncatingRemainder(dividingBy: 2) - 1)
+        let low = 1 - anchor.saturation
+        let channels: (red: Double, green: Double, blue: Double)
+        switch Int(sector) {
+        case 0: channels = (1, falling, low)
+        case 1: channels = (falling, 1, low)
+        case 2: channels = (low, 1, falling)
+        case 3: channels = (low, falling, 1)
+        case 4: channels = (falling, low, 1)
+        default: channels = (1, low, falling)
+        }
+        return (channels.red * brightness, channels.green * brightness, channels.blue * brightness)
+    }
+
+    /// WCAG relative luminance of an sRGB triple: **linearise each component,
+    /// then weigh**.
+    ///
+    /// The linearisation is the whole of it and it was missing here. Rec. 709
+    /// weights laid on gamma-encoded components produce a number that looks like
+    /// a luminance and is not one, and every contrast quoted from it was wrong in
+    /// a direction that flattered the ramp: the raw colour at 115% reads 1.19 to 1
+    /// that way against 1.39 in truth, and the ceilinged one 1.55 against 2.48.
+    /// The claim built on those figures — that the ceilinged colour has "exactly
+    /// the contrast `Color.green` itself has" — was an artefact of the mistake,
+    /// true only in gamma space because the ceiling was defined in gamma space.
+    /// Linearised the two are 2.48 and 2.12, and neither reaches the 3 to 1 that
+    /// graphics need, let alone the 4.5 of text (all measured 2026-08-18 against
+    /// white, which is the background those figures were quoted against).
+    ///
+    /// `nonisolated` because `LoadBackground` is a nested type and nested types
+    /// do not inherit the enclosing view's main-actor isolation: without it the
+    /// plate's own luminance is a main-actor call from a place that is not on the
+    /// main actor, which under `-strict-concurrency=complete` is a warning and in
+    /// an `async` caller would be the hop §6 records. It reads no state, so there
+    /// is nothing for the isolation to protect.
+    nonisolated static func relativeLuminance(_ colour: (red: Double, green: Double, blue: Double)) -> Double {
+        0.2126 * linearised(colour.red)
+            + 0.7152 * linearised(colour.green)
+            + 0.0722 * linearised(colour.blue)
+    }
+
+    nonisolated private static func linearised(_ component: Double) -> Double {
+        component <= 0.04045 ? component / 12.92 : pow((component + 0.055) / 1.055, 2.4)
+    }
+
     /// A utilisation as the popover writes it. A dash when the gateway had no
     /// reading — never a zero (§2.4: a confidently wrong figure is worse than a
     /// missing one).
@@ -1113,18 +1802,26 @@ struct UsagePopoverView: View {
 
     /// The reasons behind what this view draws, all of them at once.
     ///
-    /// The two halves are the two this popover shows: the quota poll and the
-    /// chart's own requests. `UsageSnapshot.failureText` is the wrong source
-    /// here — it also carries `/gw/sessions`, whose figures live in the panel's
-    /// rows and not one of which is on this surface. Shown instead of the
-    /// chart's own reason (and it was, being first), it left an empty chart with
-    /// its cause named nowhere while explaining a number the user cannot see.
+    /// The three halves are the three this popover shows: the quota poll, the
+    /// chart's own requests, and the histories behind the load figure.
+    /// `UsageSnapshot.failureText` is still the wrong source — it also carries
+    /// `/gw/sessions`, whose figures live in the panel's rows and not one of
+    /// which is on this surface. Shown instead of the chart's own reason (and it
+    /// was, being first), it left an empty chart with its cause named nowhere
+    /// while explaining a number the user cannot see.
     ///
-    /// Both when both failed, for the same reason: they are separate questions,
-    /// and the first non-empty of them is not an answer to the other.
-    static func failureText(quota: String?, history: String?) -> String? {
-        let both = [quota, history].compactMap { $0 }
-        return both.isEmpty ? nil : both.joined(separator: "; ")
+    /// Which is the argument for the load half rather than against it: the test
+    /// is whether the reader can see the figure the reason is about, and this
+    /// one's figure is the largest thing on the screen. Without it the headline
+    /// stated a load nobody had confirmed since the outage began, with the whole
+    /// footer silent about why.
+    ///
+    /// All of them when all of them failed, for the same reason: they are
+    /// separate questions, and the first non-empty of them is not an answer to
+    /// the others.
+    static func failureText(quota: String?, history: String?, load: String?) -> String? {
+        let all = [quota, history, load].compactMap { $0 }
+        return all.isEmpty ? nil : all.joined(separator: "; ")
     }
 
     /// Below this age the footer says nothing about it at all.
@@ -1150,6 +1847,36 @@ struct UsagePopoverView: View {
     /// after a tap on `30d` the stamp in hand belongs to the previous window's
     /// lines, which the plot is no longer drawing, and it says "Loading…" itself.
     ///
+    /// **The load figure is not dated here at all, and that is an exclusion made
+    /// deliberately rather than a consequence of the rule above.**
+    /// `footerStaleSeconds` is 120 s because the two halves it was built for are
+    /// refetched every minute; the load half is refetched every ten. Fold its
+    /// stamp into the maximum and any age from 120 s to `loadStaleSeconds` puts
+    /// an age line under a perfectly healthy popover — a permanent `as of 7m ago`
+    /// that reports nothing except that two schedules exist, and dates the whole
+    /// surface by the one half designed to be minutes old.
+    ///
+    /// The price is real and worth naming rather than arguing away: this line can
+    /// understate the oldest thing on screen by up to `loadStaleSeconds`
+    /// (1200 s), and up to 600 s of that can be the load's schedule **standing
+    /// still** rather than running slowly. `UsageStore.poll` skips the entire
+    /// load block when the quota half fails (`result.quotaFailure == nil` guards
+    /// it), so no attempt is made, neither stamp moves and `fleetLoadFailure`
+    /// stays `nil`. A pass at t=0 stamps everything; the quota lands again at
+    /// t=590; `/gw/usage` starts failing at t=600. At t=1000 the headline still
+    /// draws the figure (1000 < 1200) while this line, broken out of silence by
+    /// the quota failure, reports the quota's age: `as of 6m ago` over a headline
+    /// figure older than sixteen minutes. What closes that gap is
+    /// `loadStaleSeconds` removing the figure, not the footer ageing it — the
+    /// alternative costs a standing age line on every healthy popover, which is
+    /// the trade refused above.
+    ///
+    /// Folding the stamp in on a failure is what stood here, and it
+    /// dated a screen by a figure the same failure had already removed: with
+    /// `/history` down for two hours and everything else seconds old, the footer
+    /// said `as of 2h ago` under a popover where every drawn value was fresh, by
+    /// as much as the process had been running.
+    ///
     /// Silence has two reasons and they are different. Nothing fetched at all is
     /// not a matter of age — the sections above say "Loading…" or name the
     /// gateway's failure — so there is nothing to date. Fresh data is silence
@@ -1157,17 +1884,21 @@ struct UsagePopoverView: View {
     /// second one at any age: with the numbers standing still and the checks
     /// failing, how old they are is the only thing telling live figures from
     /// frozen ones, and `footerStaleSeconds` would hide it for the first two
-    /// minutes of every outage.
+    /// minutes of every outage. `loadFailed` is in that list although the load
+    /// carries no stamp here — what it dates is then the halves that *are* on
+    /// screen, and one of the three having gone quiet is the moment to say how
+    /// old the rest is.
     static func footerAgeLabel(quotaFetchedAt: Date?,
                                quotaFailed: Bool,
                                chartFetchedAt: Date?,
                                seriesPeriod: HistoryPeriod?,
                                period: HistoryPeriod,
                                chartFailed: Bool,
+                               loadFailed: Bool,
                                now: Date) -> String? {
         let chart = seriesPeriod == period ? chartFetchedAt : nil
         guard let oldest = [quotaFetchedAt, chart].compactMap({ $0 }).min() else { return nil }
-        guard quotaFailed || chartFailed
+        guard quotaFailed || chartFailed || loadFailed
                 || now.timeIntervalSince(oldest) >= footerStaleSeconds else { return nil }
         return "as of \(ago(oldest, now: now))"
     }
@@ -1195,13 +1926,32 @@ struct UsagePopoverView: View {
 
 // MARK: - Bar
 
-/// A quota window as a bar. Unlike the menu bar's, this one is allowed a colour:
-/// the picture up there is a template the system tints, this one is on our own
-/// surface where 90% may look like 90%.
+/// A quota window as a bar. Both bars own their colour now — the menu bar's
+/// picture stopped being a template (`MenuBarIcon`, `isTemplate = false`), so
+/// the system tints nothing up there either, and "we may use colour and they
+/// may not" is no longer the difference between the two surfaces.
+///
+/// Nor is the amount of colour each can carry. That stood here — this bar being
+/// a full-width capsule on a surface the user has deliberately opened while the
+/// menu bar's is a few points wide beside the clock, so one could hold a scale
+/// and the other one bit — and the owner overruled it: the load is drawn with a
+/// continuous ramp on both surfaces (`UsagePopoverView.loadColor`), because a
+/// glance that can tell green from red can tell blue from green just as well,
+/// and a step made a fleet at 40% look like a fleet at 95%.
+///
+/// What differs is the *quantity*, which is what `color(for:)` below is about:
+/// it answers "how full is this window", the reading an account's row and the
+/// headline's supporting block draw, and its 60 and 85 per cent are thresholds
+/// on that. A caller filling a bar with anything else hands in its own `tint`.
 struct QuotaBar: View {
     /// 0…1, or `nil` when there is no reading — then the bar is only its track.
     let fraction: Double?
     var height: CGFloat = 6
+    /// The fill colour when the caller has a rule of its own. `nil` leaves it to
+    /// `color(for:)`, which answers "how full is this account's window" — the
+    /// headline's lead bar is filled by a different quantity and coloured by the
+    /// load's ramp (`UsagePopoverView.loadColor`).
+    var tint: Color?
 
     var body: some View {
         GeometryReader { geometry in
@@ -1209,7 +1959,7 @@ struct QuotaBar: View {
                 Capsule().fill(Color.primary.opacity(0.12))
                 if let fraction {
                     Capsule()
-                        .fill(Self.color(for: fraction))
+                        .fill(tint ?? Self.color(for: fraction))
                         .frame(width: geometry.size.width * min(1, max(0, fraction)))
                 }
             }

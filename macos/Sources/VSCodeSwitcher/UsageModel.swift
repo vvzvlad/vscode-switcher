@@ -359,12 +359,20 @@ struct HistorySeries: Sendable, Decodable {
 /// a field to keep in step with every future change of the merge rule, in
 /// exchange for nothing.
 ///
-/// Which is why there is no stamp for the *attempt* either. One stood here, and
-/// the footer line that read it — "checked N ago", beside the age of the figures
-/// — is the line §4 removed: with both halves polled once a minute the two
-/// sentences moved together and said the same thing twice. The popover's own
-/// `UsageHistoryModel.checkedAt` is a different field with a live reader (its
-/// refresh schedule) and is not this one.
+/// Which is why no stamp of the *attempt* is ever drawn. One was, and the footer
+/// line that read it — "checked N ago", beside the age of the figures — is the
+/// line §4 removed: with both halves polled once a minute the two sentences moved
+/// together and said the same thing twice.
+///
+/// There is one attempt stamp left, `fleetLoadCheckedAt`, and it is the exception
+/// that proves the rule: nothing draws it, its single reader is the schedule that
+/// decides whether this pass fetches the histories, and it exists precisely so
+/// that `fleetLoadFetchedAt` may go on meaning "when the figure arrived" while
+/// the retry moves without it. That is the same shape as the popover's own
+/// `UsageHistoryModel.checkedAt` — a live reader, no line on screen — and the
+/// same distinction: a stamp that moves on a failed attempt must never be the one
+/// an age is written from, which is exactly how the footer came to call hour-old
+/// figures fresh.
 struct UsageSnapshot: Sendable {
     /// When `/gw/usage` last answered, or `nil` if it never has. The account
     /// figures, the fleet mean and the accounts list are all as of this moment.
@@ -395,6 +403,40 @@ struct UsageSnapshot: Sendable {
     /// nodes, mostly. Not an error: it is real spend with no local owner.
     var unmatched: TokenCounts
     var unmatchedSessions: Int
+    /// Supply against demand over the week, worked out from the accounts'
+    /// histories (`FleetCapacity`). `nil` while nothing has been worked out yet,
+    /// and `nil` again when a pass asked and found no figure — the metric
+    /// answers `nil` for three different reasons and none of them is a number
+    /// (see the popover's headline, which has to draw all three the same).
+    var fleetLoad: FleetLoad?
+    /// When `fleetLoad` last *arrived*, which is not when it was last asked for.
+    /// Its own stamp because it is on its own schedule: the histories are fetched
+    /// once every `UsageStore.fleetLoadIntervalSeconds`, not once a minute with
+    /// the rest, so this figure is ordinarily the oldest thing the popover holds.
+    ///
+    /// What reads it is the age ceiling both surfaces apply
+    /// (`UsagePopoverView.headlineLoad`): past two of those intervals the figure
+    /// is not drawn at all. It is deliberately not what the footer dates the
+    /// screen by — a stamp may only date something on screen, and by the time
+    /// this one would be worth a line the figure it belongs to is gone.
+    var fleetLoadFetchedAt: Date?
+    /// When the histories were last *asked for*, answered or not. The schedule
+    /// is decided on this one and nothing else reads it.
+    ///
+    /// Two stamps rather than one, because the two questions have opposite
+    /// answers on a failure. "When may we ask again" has to move — a half that
+    /// did not stamp its failed attempt fell back to the once-a-minute poll, and
+    /// one persistently failing account takes the histories from 2.9 MB/h to
+    /// some 19 MB/h, which is the cost the ten-minute cadence exists to avoid
+    /// (`UsageStore.poll` carries the measurement). "How old is the figure" must
+    /// not move, or a frozen number passes for a fresh one — which is the defect
+    /// that took the app's last attempt stamp away, and here it would keep a
+    /// figure past the ceiling that is supposed to drop it.
+    var fleetLoadCheckedAt: Date?
+    /// Why `/gw/usage/<label>/history` did not answer on the last pass that
+    /// tried. Same rule as the other two halves: the previous `fleetLoad` stays
+    /// where it is and only the blame changes.
+    var fleetLoadFailure: String?
     /// Why `/gw/usage` did not answer on the last pass. The account figures next
     /// to it are the previous ones, kept on purpose: slightly stale beats blank.
     var quotaFailure: String?
@@ -411,6 +453,10 @@ struct UsageSnapshot: Sendable {
                                      contested: [],
                                      unmatched: .zero,
                                      unmatchedSessions: 0,
+                                     fleetLoad: nil,
+                                     fleetLoadFetchedAt: nil,
+                                     fleetLoadCheckedAt: nil,
+                                     fleetLoadFailure: nil,
                                      quotaFailure: nil,
                                      sessionsFailure: nil)
 
@@ -429,14 +475,19 @@ struct UsageSnapshot: Sendable {
         fleetSevenDayMean.map { Int($0.rounded()) }
     }
 
-    /// Both reasons as one line, for the places that print a reason rather than
+    /// Every reason as one line, for the places that print a reason rather than
     /// act on one. Deliberately not called `failure`: the readers that *decide*
     /// something — the menu bar picture above all — must name the half they mean,
     /// and the old single field let a failure of `/gw/sessions` blank out a
     /// perfectly fresh quota figure.
+    ///
+    /// All three halves, because its one reader is `--dump`, and a half that
+    /// fails without saying so there is a half nobody can debug: the load
+    /// figure's own requests are the only ones the app makes that no surface
+    /// blames out loud.
     var failureText: String? {
-        let both = [quotaFailure, sessionsFailure].compactMap { $0 }
-        return both.isEmpty ? nil : both.joined(separator: "; ")
+        let all = [quotaFailure, sessionsFailure, fleetLoadFailure].compactMap { $0 }
+        return all.isEmpty ? nil : all.joined(separator: "; ")
     }
 
     /// Everything the gateway reported for the window, matched or not — the

@@ -60,9 +60,19 @@ struct UsageClient: Sendable {
 
     /// Utilisation over time for one account.
     ///
-    /// The series the popover's chart draws. Called from `UsageHistoryModel.load`
-    /// — once per account per pass, and only while the popover is open, which is
-    /// the reason it is not part of the once-a-minute poll.
+    /// Two callers, on schedules an order of magnitude apart, and both ask once
+    /// per account per pass. `UsageHistoryModel.load` draws the popover's chart
+    /// and runs only while the popover is open, on its own minute cadence; it
+    /// smooths what comes back (`withoutSourceLag`) because the chart wants the
+    /// sawtooth gone. `UsageStore.histories` feeds `FleetCapacity` from `poll`,
+    /// once every `UsageStore.fleetLoadIntervalSeconds`, and needs the **raw**
+    /// points — that filter deletes exactly the lone below-ceiling reading that
+    /// keeps a pinned account inside the measurement.
+    ///
+    /// So this endpoint is on the poll after all, but deliberately not on the
+    /// poll's own minute: one round over the live fleet is 481 KB (measured
+    /// 2026-08-18, three accounts over a 48 h window), which is 2.9 MB/h at ten
+    /// minutes and ten times that at one, against about 3 KB for `/gw/usage`.
     func history(label: String, since: Date) async throws -> HistorySeries {
         try await fetch(pathSegments: ["gw", "usage", label, "history"], since: since)
     }
