@@ -47,13 +47,21 @@ final class UsageStore: ObservableObject {
     /// decision; the gateway clamps it to its own retention and reports what it
     /// applied.
     ///
-    /// `nonisolated` is load-bearing, and this is the one line in the file that
-    /// must not lose it. A `static let` on a `@MainActor` type is isolated to
-    /// that actor; reading it from `poll` — which is `nonisolated async` — makes
-    /// the compiler insert a hop to the main actor, silently and with no
-    /// diagnostic under `-strict-concurrency=complete`. Everything after that
-    /// read then runs *on the main thread*: two HTTP calls and a walk over the
-    /// transcript directories, which is exactly what §6 forbids. It showed up as
+    /// `nonisolated` is load-bearing, and there are **two** lines in the file
+    /// that must not lose it: this one and `fleetLoadWindowSeconds` below, whose
+    /// own doc block spells the same failure out with its own timed test. (The
+    /// third, `fleetLoadIntervalSeconds`, also carries the keyword but for a
+    /// different reason — it has no `async` reader, so nothing hangs and a
+    /// warning is what guards it. Its doc says so, and the difference is the
+    /// point.) A `static let` on a `@MainActor` type is isolated to that actor;
+    /// reading it from `poll` — which is `nonisolated async` — makes the
+    /// compiler insert a hop to the main actor, silently and with no diagnostic
+    /// under `-strict-concurrency=complete`. Everything after that read then
+    /// runs *on the main thread*: from here, `/gw/sessions` and the walk over
+    /// the transcript directories; from the hop on `fleetLoadWindowSeconds`,
+    /// which `poll` reads earlier, the whole pass — no longer two HTTP calls but
+    /// 2 + N, `/gw/usage` and `/gw/sessions` plus one history per account on the
+    /// passes that fetch them. Which is exactly what §6 forbids. It showed up as
     /// `--dump` hanging forever — its main thread waits on the pass, the pass
     /// waits for its main thread — and was found by sampling the stuck process.
     /// `UsageTests.testPollDoesNotNeedTheMainThread` holds it.
@@ -100,7 +108,26 @@ final class UsageStore: ObservableObject {
     /// instead of a run that never comes back.
     nonisolated static let fleetLoadWindowSeconds: TimeInterval = 48 * 3600
 
+    /// The span the histories are asked for, which is not the same thing as the
+    /// window the figure is calculated over (`Config.usageLoadWindowHours`).
+    ///
+    /// On the average path they are the same and always were: the estimator
+    /// averages over everything that came back, so asking for the window *is*
+    /// setting the window. On the projection path they part company — the recent
+    /// rate wants a few hours, but classifying the hours of the day wants a whole
+    /// day of them, so the request stays at the fixed span above and the setting
+    /// only picks how far back the recent rate reaches inside it.
+    nonisolated static func historySeconds(loadWindowHours: Double) -> TimeInterval {
+        loadWindowHours < FleetCapacity.projectionWindowHours
+            ? fleetLoadWindowSeconds
+            : loadWindowHours * 3600
+    }
+
     private let client: UsageClient
+    /// The calculation window this store's config asked for, carried as a value
+    /// rather than read from a constant so `poll` stays a pure function of its
+    /// arguments — and so nothing has to reach for `Config` off the main actor.
+    private let loadWindowHours: Double
     private let cache: UsageCache
     private var timer: Timer?
     /// A pass is running; a tick that lands meanwhile is dropped rather than
@@ -119,6 +146,7 @@ final class UsageStore: ObservableObject {
     /// is why `apply` did not have to stop being private.
     init(config: Config, cache: UsageCache) {
         client = UsageClient(baseURL: config.resolvedUsageBaseURL)
+        loadWindowHours = config.usageLoadWindowHours
         self.cache = cache
         snapshot = cache.snapshot
     }
@@ -143,11 +171,14 @@ final class UsageStore: ObservableObject {
         pollInFlight = true
         let client = client
         let previous = snapshot
+        let loadWindowHours = loadWindowHours
         Task { [weak self] in
             // `poll` is `nonisolated async`, so it does not inherit the main
             // actor: the HTTP calls and the transcript walk both happen off the
             // main thread and only the finished value comes back.
-            let value = await UsageStore.poll(client: client, previous: previous)
+            let value = await UsageStore.poll(client: client,
+                                              previous: previous,
+                                              loadWindowHours: loadWindowHours)
             guard let self else { return }
             self.apply(value)
         }
@@ -168,6 +199,7 @@ final class UsageStore: ObservableObject {
     /// previous figure untouched.
     nonisolated static func poll(client: UsageClient,
                                  previous: UsageSnapshot,
+                                 loadWindowHours: Double = Config.default.usageLoadWindowHours,
                                  now: Date = Date()) async -> UsageSnapshot {
         var result = previous
 
@@ -206,10 +238,12 @@ final class UsageStore: ObservableObject {
             result.fleetLoadCheckedAt = now
             do {
                 result.fleetLoad = FleetCapacity.load(
-                    histories: try await histories(client: client,
-                                                   labels: result.accounts.map(\.label),
-                                                   since: now.addingTimeInterval(-fleetLoadWindowSeconds)),
-                    accounts: result.accounts)
+                    histories: try await histories(
+                        client: client,
+                        labels: result.accounts.map(\.label),
+                        since: now.addingTimeInterval(-historySeconds(loadWindowHours: loadWindowHours))),
+                    accounts: result.accounts,
+                    windowHours: loadWindowHours)
                 // The other stamp goes on the arrival, like `quotaFetchedAt` —
                 // and a `nil` from `FleetCapacity.load` is an arrival too. It is
                 // the answer "there is no figure", which is a thing the fleet
@@ -324,7 +358,10 @@ final class UsageStore: ObservableObject {
         let box = PollResult()
         let semaphore = DispatchSemaphore(value: 0)
         Task.detached {
-            box.value = await UsageStore.poll(client: client, previous: .empty, now: now)
+            box.value = await UsageStore.poll(client: client,
+                                              previous: .empty,
+                                              loadWindowHours: config.usageLoadWindowHours,
+                                              now: now)
             semaphore.signal()
         }
         // Three rounds of five seconds — `/gw/usage`, the histories and

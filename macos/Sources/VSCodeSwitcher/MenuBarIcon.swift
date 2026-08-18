@@ -23,19 +23,25 @@ import SwiftUI
 /// is (light, dark, "reduce transparency", a coloured desktop showing through),
 /// and a colour of our own would be fighting that every time — which is why the
 /// colour used to live in the popover alone, where there is room to read it.
-/// The owner gave that up deliberately: the bar's fill is green while the week
-/// holds the demand being put on it and red once it does not, and a glance at
-/// the menu bar without opening anything is the whole reason for having the
-/// figure at all.
+/// The owner gave that up deliberately: the bar's fill says how hard the week is
+/// being pushed, and a glance at the menu bar without opening anything is the
+/// whole reason for having the figure at all.
+///
+/// **What it says is a ramp and not two states.** Green while the week holds and
+/// red once it does not was the first rule here, and it made a fleet at 40% look
+/// like a fleet at 95%; the colour is now one continuous scale over the load —
+/// cold blue, cyan, green at capacity, then yellow, orange, red — written once in
+/// `UsagePopoverView.loadColor` and used by this picture and the popover both.
 ///
 /// What the fill is coloured by is not the number under it. The number is the
-/// quota already spent, 0…100, which reaches the boundary only at its own top;
-/// the colour is `FleetLoad`, demand against supply, which crosses 100 in
-/// ordinary use and is the thing worth a warning. They are two readings of one
-/// week and the picture carries both.
+/// quota already spent, 0…100, which reaches the ramp's green anchor only at its
+/// own top and could never say anything past it; the colour is `FleetLoad`,
+/// demand against supply, which crosses 100 in ordinary use and goes on to the
+/// far end of the ramp. They are two readings of one week and the picture
+/// carries both.
 ///
-/// **Past capacity the frame and the number are red as well, because the fill
-/// may not be there to be red.** The fill's *length* is the mean, and a mean
+/// **Past capacity the frame and the number are coloured as well, because the
+/// fill may not be there to colour.** The fill's *length* is the mean, and a mean
 /// near zero leaves nothing to colour: the fill's own ink, counted off the
 /// bitmap at scale 4 (2026-08-18), is 0.00 pt² at a mean of 0 and 2.12 pt² at 3%
 /// — against 34.50 pt² at 50%. At 1% there is no fill at all, the shape being
@@ -52,11 +58,19 @@ import SwiftUI
 /// every reading would be saying nothing with all of them.
 ///
 /// The price of leaving `isTemplate` behind is the work the system used to do:
-/// nothing here may be drawn in a fixed colour, because black ink vanishes on a
-/// dark menu bar. Every colour is dynamic and everything is drawn inside
-/// `performAsCurrentDrawingAppearance`, and since the appearance is now an
-/// input the picture has to be redrawn when *it* changes and not only when the
-/// figure does — which is `AppDelegate.observeAppearance`.
+/// nothing that stands for *ink* may be drawn in a fixed colour, because black
+/// ink vanishes on a dark menu bar. `labelColor` is dynamic and everything is
+/// drawn inside `performAsCurrentDrawingAppearance`, and since the appearance is
+/// now an input the picture has to be redrawn when *it* changes and not only when
+/// the figure does — which is `AppDelegate.observeAppearance`. The ramp's own
+/// colours are fixed rather than dynamic, and that is not the same hazard: they
+/// are a reading and not ink, and they are the figures this project's system
+/// greens and reds already resolve to on both menu bar appearances. What the
+/// appearance does decide about them is how dark they have to be drawn: each is
+/// held to a contrast floor against the plate it will sit on
+/// (`UsagePopoverView.minimumContrastRatio`, and the plate is
+/// `background(for:)`), which is a second reason the picture is redrawn when the
+/// appearance moves.
 ///
 /// One bar, not two: the user asked for the fleet's seven-day mean and nothing
 /// else in the menu bar. The five-hour windows and the per-account figures are
@@ -169,40 +183,39 @@ enum MenuBarIcon {
     /// dark one, resolved at the moment they are drawn against whatever
     /// appearance `image` made current. Black ink was invisible on a dark menu
     /// bar the instant the picture stopped being a template.
-    ///
-    /// The over-capacity colour is dynamic in the same way and for the same
-    /// reason: it is a system colour reached through the popover, so it is one
-    /// red on both surfaces and it follows the appearance the picture is drawn
-    /// against.
     private static let attributes: [NSAttributedString.Key: Any] = attributes(in: .labelColor)
 
     private static func attributes(in color: NSColor) -> [NSAttributedString.Key: Any] {
         [.font: font, .foregroundColor: color]
     }
 
-    /// Every percentage the icon can ever draw, laid out once — twice over,
-    /// because the number has two colours (see the note at the top of the file).
+    /// Every percentage the icon can ever draw in ink, laid out once.
     ///
     /// The icon is redrawn whenever the figure changes, and laying a string out
     /// is the expensive half of drawing one. An array rather than a dictionary
     /// keyed by the same integer: the index is clamped into range before the
     /// lookup, so there is no absent case to invent an answer for.
-    private static let labels: [NSAttributedString] = labels(in: .labelColor)
-    private static let alertLabels: [NSAttributedString] =
-        labels(in: NSColor(UsagePopoverView.loadColor(overCapacity: true)))
-
-    private static func labels(in color: NSColor) -> [NSAttributedString] {
-        (0...100).map { NSAttributedString(string: "\($0)%", attributes: attributes(in: color)) }
-    }
+    ///
+    /// One table and not two. A second one held the warning colour until the
+    /// colour became a ramp (§4) — there is no longer *a* warning colour to lay
+    /// out, the load picks one out of a continuum, and a table of 101 strings per
+    /// colour is not a table. What replaces it is one string laid out on demand
+    /// below, which the redraw can afford: the figure changes once a minute at
+    /// most, and only while the fleet is over capacity.
+    private static let labels: [NSAttributedString] =
+        (0...100).map { NSAttributedString(string: "\($0)%", attributes: attributes) }
 
     /// The label for a percentage, clamped into the range the table covers.
     /// Above 100 the quota is spent, and `100%` says exactly that.
     ///
-    /// `overCapacity` is about the *load*, which is a different quantity from
-    /// the one being printed: the number is the mean already spent and it can be
-    /// anything at all while the week is being asked for more than it holds.
-    static func label(forPercent value: Int, overCapacity: Bool = false) -> NSAttributedString {
-        (overCapacity ? alertLabels : labels)[min(100, max(0, value))]
+    /// `colour` is about the *load*, which is a different quantity from the one
+    /// being printed: the number is the mean already spent and it can be anything
+    /// at all while the week is being asked for more than it holds. `nil` is ink,
+    /// which is the calm state and the one the table serves.
+    static func label(forPercent value: Int, in colour: NSColor? = nil) -> NSAttributedString {
+        let ink = labels[min(100, max(0, value))]
+        guard let colour else { return ink }
+        return NSAttributedString(string: ink.string, attributes: attributes(in: colour))
     }
 
     // MARK: - Value
@@ -281,26 +294,56 @@ enum MenuBarIcon {
     /// The bar's fill colour.
     ///
     /// Asked of the popover rather than written out again, and that is the whole
-    /// of "matching the popover": the two surfaces cannot drift into two greens
-    /// or two boundaries, because there is one of each and this is a conversion
-    /// of it. `labelColor` when there is no load — a bar drawn in a colour that
-    /// meant something would be answering a question nobody could answer.
-    static func fillColor(for load: FleetLoad?) -> NSColor {
+    /// of "matching the popover": the two surfaces cannot drift into two ramps,
+    /// because there is one and this is a conversion of it. `labelColor` when
+    /// there is no load — a bar drawn in a colour that meant something would be
+    /// answering a question nobody could answer.
+    ///
+    /// The plate goes with the question because the rule needs it: hue and
+    /// saturation are the same on both, and how dark the colour has to be drawn
+    /// is a fact about what it sits on (`UsagePopoverView.loadColor(for:on:)`).
+    static func fillColor(for load: FleetLoad?,
+                          on background: UsagePopoverView.LoadBackground) -> NSColor {
         guard let load else { return .labelColor }
-        return NSColor(UsagePopoverView.loadColor(for: load))
+        return NSColor(UsagePopoverView.loadColor(for: load, on: background))
     }
 
-    /// What everything that is not the fill is drawn in: the bar's frame and the
-    /// number.
+    /// The ramp's colour for a load the picture has to warn about, or `nil` while
+    /// it does not — which is what the frame and the number are drawn in above
+    /// capacity, and the one place a colour rule here is still a step.
     ///
-    /// Ink, until the week stops holding the demand — then the same red the fill
-    /// would be. Which is the whole of the fix at the top of this file: the fill
-    /// is only as big as the mean, and at a mean near zero there is no fill to
-    /// carry a warning. Below capacity this is `labelColor` and the picture
-    /// looks exactly as it did.
-    static func inkColor(for load: FleetLoad?) -> NSColor {
-        guard let load, load.isOverCapacity else { return .labelColor }
-        return NSColor(UsagePopoverView.loadColor(for: load))
+    /// **It is a step about whether to paint rather than about what to paint
+    /// with.** Everything else on both surfaces takes the ramp at any figure
+    /// (§4); this cannot, because the calm state has to stay calm — a menu bar
+    /// that changed colour on every reading would be saying nothing with all of
+    /// them. So the boundary stays where `FleetLoad.isOverCapacity` puts it,
+    /// which is the ramp's own green anchor, and the colour on the far side of it
+    /// comes out of the ramp, where before it was one red the moment it was
+    /// anything.
+    ///
+    /// What the far side actually looks like is a rendering and not a name.
+    /// Measured off the drawn picture 2026-08-18
+    /// (`testTheWarningIsNeverQuieterThanTheCalmStateItReplaces` prints the whole
+    /// table), on a **light** menu bar: green at capacity,
+    /// `rgb(0.091, 0.455, 0.146)`; a darkened yellow with a green cast at 115%,
+    /// `rgb(0.381, 0.416, 0.079)` at hue 66.2 degrees — "yellow" was the word here
+    /// and nobody had rendered it; a darkened amber at 120%,
+    /// `rgb(0.479, 0.384, 0.091)` at 45.2 degrees; red at 130%,
+    /// `rgb(0.745, 0.173, 0.142)`. On a **dark** menu bar nothing is darkened and
+    /// 115% is the ramp's own yellow, `rgb(0.827, 0.902, 0.173)`.
+    ///
+    /// Orange itself — hue 30 degrees — arrives at 123.61% on both plates, because
+    /// that is where the line interpolated between green and red crosses it. No
+    /// plate moves that and the old ceiling never moved it either: what the
+    /// ceiling moved was how dark 115% was drawn, turning a yellow into an olive.
+    ///
+    /// Named once because three things read the same boundary and may not come
+    /// apart: the frame, the number, and the description that reads the picture
+    /// out to somebody who cannot see it.
+    private static func warningColor(for load: FleetLoad?,
+                                     on background: UsagePopoverView.LoadBackground) -> NSColor? {
+        guard let load, load.isOverCapacity else { return nil }
+        return NSColor(UsagePopoverView.loadColor(for: load, on: background))
     }
 
     /// Whether this picture says anything about the load at all.
@@ -326,9 +369,17 @@ enum MenuBarIcon {
     /// what it is for. Measured with the gateway down and a stored load of 60%:
     /// the picture drew no colour anywhere and VoiceOver said "Weekly quota: no
     /// data, 60% of weekly capacity across accounts".
+    /// It asks the boundary rather than the colour, and that is the second half
+    /// of asking it once: `warningColor(for:) != nil` was the same question via a
+    /// colour that then had to be built and thrown away, and with `reading.load
+    /// != nil` in the guard above it the presence of a figure was asked twice —
+    /// half a condition that could not decide anything. `FleetLoad.isOverCapacity`
+    /// is where the boundary is named, so the frame, the number and this still
+    /// read one thing.
     static func showsLoad(_ reading: Reading) -> Bool {
         guard let load = reading.load else { return false }
-        return load.isOverCapacity || fillWidth(forPercent: reading.percent) >= minimumVisibleFillWidth
+        return load.isOverCapacity
+            || fillWidth(forPercent: reading.percent) >= minimumVisibleFillWidth
     }
 
     // MARK: - Drawing
@@ -364,6 +415,19 @@ enum MenuBarIcon {
         button?.effectiveAppearance ?? system
     }
 
+    /// Which plate this picture will be composited onto, told from the appearance
+    /// it is drawn against — and what the ramp's contrast floor is computed
+    /// against (`UsagePopoverView.LoadBackground`).
+    ///
+    /// `bestMatch` rather than the name itself, and the measurement above is
+    /// exactly why: the status item's button reports `NSAppearanceNameVibrantDark`
+    /// on this machine, which is neither of the two names the plates are written
+    /// in terms of, and a comparison against `.darkAqua` would answer "light" for
+    /// the darkest menu bar there is.
+    static func background(for appearance: NSAppearance) -> UsagePopoverView.LoadBackground {
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? .dark : .light
+    }
+
     /// The status item image for one figure. `nil` draws the bar empty and
     /// dashed, with the number's column left blank.
     ///
@@ -396,7 +460,7 @@ enum MenuBarIcon {
         // happened to be current on this thread.
         appearance.performAsCurrentDrawingAppearance {
             NSGraphicsContext.current?.imageInterpolation = .high
-            draw(reading)
+            draw(reading, on: background(for: appearance))
         }
         image.unlockFocus()
         // Not a template any more: the fill's colour is the reading (see the
@@ -417,11 +481,10 @@ enum MenuBarIcon {
         return quota + ", " + UsagePopoverView.loadLabel(for: load) + " " + UsagePopoverView.loadCaption
     }
 
-    private static func draw(_ reading: Reading) {
-        drawBar(reading)
+    private static func draw(_ reading: Reading, on background: UsagePopoverView.LoadBackground) {
+        drawBar(reading, on: background)
         guard let percent = reading.percent else { return }
-        let label = label(forPercent: percent,
-                          overCapacity: reading.load?.isOverCapacity == true)
+        let label = label(forPercent: percent, in: warningColor(for: reading.load, on: background))
         let size = label.size()
         // Flush with the right edge of the picture, which is the right edge of
         // the column: the digits grow leftwards and the `%` never moves. And on
@@ -432,7 +495,7 @@ enum MenuBarIcon {
     /// The bar. Filled in proportion when there is a reading, empty and dashed
     /// when there is not — a shape that reads as "nothing measured" rather than
     /// as a quota nobody has touched.
-    private static func drawBar(_ reading: Reading) {
+    private static func drawBar(_ reading: Reading, on background: UsagePopoverView.LoadBackground) {
         let rect = barRect
         let radius = barHeight / 2
         let outline = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
@@ -440,10 +503,22 @@ enum MenuBarIcon {
         outline.lineWidth = 1
         if reading.percent == nil { outline.setLineDash([2, 2], count: 2, phase: 0) }
         // Ink below capacity: the frame is the shape of the reading rather than
-        // the reading, and a green outline around an empty bar would be saying
+        // the reading, and a coloured outline around an empty bar would be saying
         // something about a fleet nobody measured. Above it the frame is the
         // only thing certain to be drawn, so it is where the warning has to go.
-        inkColor(for: reading.load).withAlphaComponent(0.55).setStroke()
+        //
+        // **And the warning is drawn at full strength while the calm frame keeps
+        // its softening.** The 0.55 belongs to a shape that stands for a reading;
+        // a colour that *is* the warning cannot afford it. Measured 2026-08-18 on
+        // the light plate, the same colours at 0.55 come out at 2.11 to 2.34 to 1
+        // against 4.49 opaque — under the 3 to 1 that graphics need at every load
+        // on the ramp — and darkening cannot rescue them: composited at 0.55 over
+        // a plate of 0.883, even black reaches only 4.41, which is under the floor
+        // the number holds this colour to. Softened, the frame would have to be a
+        // second, darker colour, and one reading may not be two colours in a
+        // picture 27 points wide.
+        (warningColor(for: reading.load, on: background)
+            ?? NSColor.labelColor.withAlphaComponent(0.55)).setStroke()
         outline.stroke()
 
         let inner = barFillBounds
@@ -453,7 +528,7 @@ enum MenuBarIcon {
         // arithmetic, so the description never names a colour that was not put
         // on screen.
         guard filled >= minimumVisibleFillWidth else { return }
-        fillColor(for: reading.load).setFill()
+        fillColor(for: reading.load, on: background).setFill()
         NSBezierPath(roundedRect: NSRect(x: inner.minX, y: inner.minY,
                                          width: filled, height: inner.height),
                      xRadius: inner.height / 2, yRadius: inner.height / 2).fill()

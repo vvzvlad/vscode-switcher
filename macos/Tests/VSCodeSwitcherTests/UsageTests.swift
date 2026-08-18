@@ -1211,6 +1211,29 @@ final class UsageStoreTests: XCTestCase {
 
     // MARK: - The load figure's own half
 
+    /// The span asked for is not the window calculated over, and the two part
+    /// company on exactly one side of the boundary (§2.7).
+    ///
+    /// On the average path the request *is* the window, because that estimator
+    /// averages over whatever comes back. On the projection path the recent rate
+    /// wants a few hours but the hour-of-day split wants a whole day of them, so
+    /// the request stays at the fixed two days and the setting only reaches back
+    /// inside it. Written the obvious way — asking for the window on both paths —
+    /// a six-hour window would fetch six hours and every account would be refused
+    /// for having less than a day of history.
+    func testTheHistoryRequestFollowsTheEstimatorRatherThanTheWindow() {
+        XCTAssertEqual(UsageStore.historySeconds(loadWindowHours: 6),
+                       UsageStore.fleetLoadWindowSeconds,
+                       "six hours of history could not split a day, and a split day is what it needs")
+        XCTAssertEqual(UsageStore.historySeconds(loadWindowHours: 23.9),
+                       UsageStore.fleetLoadWindowSeconds)
+        XCTAssertEqual(UsageStore.historySeconds(loadWindowHours: 24), 24 * 3600,
+                       "at a day the average path takes over, and it averages over what it asked for")
+        XCTAssertEqual(UsageStore.historySeconds(loadWindowHours: 48),
+                       UsageStore.fleetLoadWindowSeconds,
+                       "the default asks for exactly what it always asked for")
+    }
+
     /// The same deadlock, one endpoint further on. `fleetLoadWindowSeconds` is
     /// another `static let` on a `@MainActor` type read straight from the
     /// `nonisolated async` pass, and losing `nonisolated` on it hops the rest of

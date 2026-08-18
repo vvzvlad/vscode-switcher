@@ -96,7 +96,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// than inside it: one is disk-bound and runs every second, the other talks
     /// to the network once a minute. They meet in `UsageCache`.
     private let usage: UsageStore
-    /// Utilisation over time, fetched only while the popover is open.
+    /// Utilisation over time for the popover's chart. **This object** fetches
+    /// only while the popover is open — the endpoint behind it is not that
+    /// exclusive, `usage` above reads the same histories every ten minutes for
+    /// the load figure (`UsageClient.history`).
     private let history: UsageHistoryModel
     private let trigger: EdgeTrigger
     private let panel: PanelController

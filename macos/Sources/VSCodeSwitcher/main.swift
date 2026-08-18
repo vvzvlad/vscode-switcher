@@ -209,11 +209,24 @@ enum ConsoleDump {
     /// it and how deep the shallowest of their histories went, and a dump that
     /// printed the percentage alone would hide an answer measured over one
     /// account out of three.
+    ///
+    /// **It names the estimator, and then everything that estimator was built
+    /// from.** Two of them can produce this figure and the setting that picks
+    /// them is a line in a file (§2.7); without the name, a number that moved
+    /// because the window moved is indistinguishable from one that moved because
+    /// the fleet did. The projection's tail is what it takes to rebuild the
+    /// estimate by hand — both rates, the split of the day, and how many work
+    /// hours the recent rate actually reached back over.
     private static func loadLine(_ load: FleetLoad?) -> String {
         guard let load else { return "-" }
-        return (load.isLowerBound ? ">=" : "")
+        let head = (load.isLowerBound ? ">=" : "")
             + String(format: "%.0f%% of capacity", load.percent)
             + String(format: ", %d accounts over %.1f h", load.accounts, load.measuredHours)
+        guard let projection = load.projection else { return head + ", window average" }
+        return head + String(format: ", projected from %.1f work h at %.3f pp/h",
+                             projection.recentWorkHours, projection.recentWorkRate)
+            + String(format: " + %d sleeping h at %.3f pp/h (work %d h/day)",
+                     projection.sleepHoursPerDay, projection.sleepRate, projection.workHoursPerDay)
     }
 
     /// One set of counters: the input-equivalent total, then the four raw
