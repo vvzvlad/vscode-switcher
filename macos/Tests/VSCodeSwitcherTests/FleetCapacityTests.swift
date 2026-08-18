@@ -594,8 +594,12 @@ final class FleetCapacityProjectionTests: XCTestCase {
     /// same stretch — the endpoints plus a window per reset, which is the method
     /// three reviews approved.
     ///
-    /// The two fixtures are the two ways a reset can sit against the grid, and
-    /// the second is the one that broke the prototype. Measured against the live
+    /// The three fixtures are the three ways a reset can sit against the grid —
+    /// wholly inside one hour, ending exactly on an hour boundary, and straddling
+    /// one — and the second is the one that broke the prototype. This header said
+    /// "two" for one round after the third fixture was added under it; the
+    /// comment inside the function, §2.7 and the memo all said three. Measured
+    /// against the live
     /// gateway on 2026-08-18, reading each hour's own first and last reading and
     /// adding 100 per reset seen between them answers 128 pp on main where the
     /// span method answers 27, and 231 pp over the fleet against 132 — a
@@ -631,12 +635,21 @@ final class FleetCapacityProjectionTests: XCTestCase {
             return total
         }
 
-        // A reset wholly inside one hour, and a reset whose fall is the step
-        // from one hour's last reading to the next hour's first. `phantom` is
-        // what the naive reading gets wrong on each: the boundary case is where
-        // the whole restored window appears out of nothing, and the inside case
-        // is the one it survives — which is exactly the shape of the live
-        // disagreement, acc2 and acc3 out by a point each and main out by 101.
+        // Three ways a reset can sit against the grid, and the third is the one
+        // that makes this test earn its name. `phantom` is what the naive reading
+        // gets wrong on each: the two boundary cases are where the whole restored
+        // window appears out of nothing, and the inside case is the one it
+        // survives — which is exactly the shape of the live disagreement, acc2
+        // and acc3 out by a point each and main out by 101.
+        //
+        // The difference between the second and the third is the whole of the
+        // attribution rule. In the second the fall *ends* on the hour, so the
+        // step lies inside one hour and a pro-rata split would put every part of
+        // it in that same hour — which is why that fixture cannot tell whole
+        // attribution from spreading, and why the claim that it held both cases
+        // was wrong. In the third the fall straddles 10:00 with readings either
+        // side of it, so spreading has something to spread and the rule is
+        // exercised.
         let cases: [(name: String, readings: [(Date, Double?)], phantom: ClosedRange<Double>)] = [
             ("a reset inside a bucket", (0..<(30 * 12)).map { sample in
                 let at = midnight.addingTimeInterval(Double(sample) * 300)
@@ -650,6 +663,15 @@ final class FleetCapacityProjectionTests: XCTestCase {
                 // 99 at 09:55:00, 0 at 10:00:00: the fall is the step that ends
                 // exactly where the hour does.
                 let value: Double = sample < 120 ? min(99, Double(sample) * 0.9) : Double(sample - 120) * 0.1
+                return (at, value)
+            }, 80...110),
+            ("a reset step across a bucket boundary", (0..<(30 * 12)).map { sample in
+                let at = midnight.addingTimeInterval(Double(sample) * 300)
+                // 99 at 09:50:00 and 0 at 10:10:00, with the samples between them
+                // measuring nothing: the fall is one step and 10:00 falls inside
+                // it.
+                if sample > 118 && sample < 122 { return (at, nil) }
+                let value: Double = sample < 120 ? min(99, Double(sample) * 0.9) : Double(sample - 122) * 0.1
                 return (at, value)
             }, 80...110),
         ]
@@ -674,10 +696,50 @@ final class FleetCapacityProjectionTests: XCTestCase {
 
             // And over every contiguous stretch of hours, not only the whole of
             // it: a decomposition that only adds up at the ends is not a
-            // decomposition. The samples are five minutes apart and the hours
-            // are sixty, so every hour boundary falls on a reading and the
-            // stretch's endpoints are exactly the readings that bound it —
-            // there is no straddling step for the comparison to argue about.
+            // decomposition. **Exactly, when the stretch's own edges fall on
+            // readings**, and in these fixtures they always do — the samples are
+            // five minutes apart and start on the hour, so every boundary is a
+            // sample.
+            //
+            // An edge falling *inside* a step is where the two methods part, and
+            // it parts two different ways. A **reset** step is charged whole to
+            // the hour its fall began in, so the stretch holding that hour
+            // carries the entire −99 and 100 while the endpoint method, stopping
+            // at the last reading before the edge, has not seen the fall at all:
+            // the divergence is that step's whole burn. An **ordinary** step is
+            // spread pro rata, so the stretch carries only the part of the change
+            // that fell inside it, and the divergence is that part rather than
+            // the whole. Only the first shape can occur here — the fixtures are
+            // aligned, and the third one widens its reset step on purpose so that
+            // a boundary lands inside it — which is exactly 1 pp on the stretch
+            // ending at 10:00. Live it is the ordinary shape that is the common
+            // one: over the 48 h the app fetches on 2026-08-18, 1 hour boundary
+            // out of 48 / 45 / 48 landed on a reading, 46 / 44 / 47 fell inside
+            // an ordinary step and 1 (main) inside a reset step.
+            let readings: [(at: Date, value: Double)] = points.compactMap { point in
+                point.sevenDay.map { (at: point.timestamp, value: $0) }
+            }
+            /// The burn of the reset step an instant falls strictly inside, when
+            /// that step began at or after `from` — which is when the bucket the
+            /// step was charged to is one of the stretch's own.
+            ///
+            /// **It models the reset case only, and that is correct only for
+            /// these fixtures.** An ordinary step containing the edge diverges
+            /// too, by the pro-rata part of its change the buckets charged inside
+            /// the stretch; here no ordinary step can contain a boundary, because
+            /// the samples are five minutes apart and start on the hour. Move the
+            /// sampling off the grid and this helper starts returning 0 for a
+            /// divergence that is really there, and the assertion below fails
+            /// with a number rather than telling anyone why.
+            func straddled(_ edge: Date, notBefore from: Date) -> Double {
+                for (previous, next) in zip(readings, readings.dropFirst())
+                where previous.at < edge && next.at > edge && previous.at >= from
+                    && previous.value - next.value > FleetCapacity.resetDropThreshold {
+                    return next.value - previous.value + 100
+                }
+                return 0
+            }
+            var straddledStretches = 0
             for start in stride(from: 0, to: hourly.buckets.count - 4, by: 5) {
                 let stretch = Array(hourly.buckets[start..<min(start + 5, hourly.buckets.count)])
                 let from = stretch[0].start
@@ -687,11 +749,18 @@ final class FleetCapacityProjectionTests: XCTestCase {
                 guard let first = inside.first, let last = inside.last, inside.count > 1 else { continue }
                 let resets = zip(inside, inside.dropFirst())
                     .filter { $0 - $1 > FleetCapacity.resetDropThreshold }.count
+                let carried = straddled(to, notBefore: from)
+                if carried != 0 { straddledStretches += 1 }
                 XCTAssertEqual(FleetCapacity.burn(over: stretch),
-                               last - first + 100 * Double(min(resets, 1)),
+                               last - first + 100 * Double(min(resets, 1)) + carried,
                                accuracy: 0.0001,
-                               "\(name): hours \(start)…\(start + 5) do not add up to their own endpoints")
+                               "\(name): hours \(start)…\(start + 5) do not add up to their own "
+                               + "endpoints (a step straddling the edge is worth \(carried) pp)")
             }
+            XCTAssertEqual(straddledStretches, name.hasSuffix("across a bucket boundary") ? 1 : 0, """
+                \(name): the fixture has to put a step across a stretch edge exactly where the \
+                qualification says it can, or the qualification is untested
+                """)
         }
     }
 
@@ -1036,16 +1105,82 @@ final class FleetCapacityProjectionTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(load.projection).workHoursPerDay, 0)
     }
 
+    /// **A projection's `recentWorkHours` is always something that was measured**,
+    /// never the sentinel the fold starts from — and this is the invariant that
+    /// replaced a branch pretending otherwise.
+    ///
+    /// `recentWorkHours: shortestRecent == .greatestFiniteMagnitude ? 0 : shortestRecent`
+    /// stood in `projected` and could not execute: the `min` runs immediately
+    /// before `contributors += 1`, and the only way past the guard below is for
+    /// that line to have run. Removing it broke nothing, which is exactly what
+    /// the memo warns about — so what holds it now is the invariant rather than
+    /// the branch, asked of every shape this path answers for, degenerate ones
+    /// included. The zero case is real and is not a sentinel: a fleet with no
+    /// work hours never opens the recent window at all.
+    ///
+    /// **What this test can actually catch is narrower than its first assertion
+    /// message claims, and the message is the part that is wrong.** "Which is the
+    /// sentinel escaping" cannot happen on any of the four fixtures below: the
+    /// sentinel survives only when `recentWorkWindow` answers `nil` for *every*
+    /// account while `contributors` is positive, and no fixture here takes that
+    /// branch — each of them has work hours and a window long enough to fill.
+    /// Measured rather than argued (2026-08-18, mutation on a copy of
+    /// `FleetCapacity.swift`, restored by copy and checked by sha256): moving
+    /// `contributors += 1` above the guard — which is exactly what makes the
+    /// sentinel reachable — leaves **this test green** and is caught by
+    /// `testFewerUsableWorkHoursThanTheFloorIsRefused`, whose failure prints the
+    /// escaped `recentWorkHours: 1.7976931348623157e+308` in full. So what these
+    /// four fixtures hold are the two bounds asked below — no deeper than the
+    /// history, and either zero or at or over the floor — and the sentinel is
+    /// held by the ordering of `min` before the counter, one test along. Closing
+    /// that gap here needs a fixture where every account has work hours but a
+    /// window shorter than `minimumRecentWorkHours`, and adding one is a change
+    /// to the code rather than to this comment.
+    func testAProjectionNeverReportsASentinelAsItsRecentWorkHours() throws {
+        var evening = Array(repeating: 0.05, count: 24)
+        for hour in [18, 19, 20, 21, 22, 23] { evening[hour] = 4 }
+        let shapes: [(name: String, series: [HistorySeries], labels: [String])] = [
+            ("at rest", [try shaped("main", rates: Array(repeating: 0.0, count: 24), days: 2)], ["main"]),
+            ("around the clock",
+             [try shaped("main", rates: Array(repeating: 1.0, count: 24), days: 2)], ["main"]),
+            ("an ordinary day", [try shaped("main", rates: evening, days: 2)], ["main"]),
+            ("two accounts, one of them silent",
+             [try shaped("main", rates: evening, days: 2),
+              try shaped("acc2", rates: Array(repeating: 0.0, count: 24), days: 2)], ["main", "acc2"]),
+        ]
+        for (name, series, labels) in shapes {
+            let load = try XCTUnwrap(FleetCapacity.load(histories: histories(series),
+                                                        accounts: try fleet(labels),
+                                                        windowHours: projecting, timeZone: utc), name)
+            let projection = try XCTUnwrap(load.projection, name)
+            XCTAssertLessThanOrEqual(projection.recentWorkHours, load.measuredHours,
+                                     "\(name): the recent window cannot be deeper than the history "
+                                     + "it was taken from — \(projection.recentWorkHours) h against "
+                                     + "\(load.measuredHours) h, which is the sentinel escaping")
+            if projection.workHoursPerDay == 0 {
+                XCTAssertEqual(projection.recentWorkHours, 0, accuracy: 0.0001,
+                               "\(name): no work hours, so no recent work window was ever opened")
+            } else {
+                XCTAssertGreaterThanOrEqual(projection.recentWorkHours,
+                                            FleetCapacity.minimumRecentWorkHours,
+                                            "\(name): a window under the floor is refused rather "
+                                            + "than reported")
+            }
+        }
+    }
+
     /// The threshold is held where a measurement put it, by an hour that sits
     /// between the candidates.
     ///
     /// Eight hours at 4 pp/h, fifteen at 0.05 and one at 0.485 — which is 0.35 of
     /// this fixture's mean, above a quarter of it and below `workHourFraction`.
     /// So the quiet hour is a sleeping hour here and would be a working one at
-    /// the fraction the first prototype used. The live measurement behind the
-    /// choice is on the constant: 0.45 answers the same 15 work hours over the
-    /// whole history and over the 48 h the app fetches, where a quarter answers
-    /// 16 over both and sits one hundredth of the mean from flipping.
+    /// the fraction the first prototype used. What the live measurement behind
+    /// the choice actually says is on the constant, and it is not what this
+    /// comment used to claim: today's history answers **14** work hours at 0.45
+    /// and no fraction at all answers 15, the count stepping 16 → 14 because two
+    /// hours share a rate. The fraction stays because every alternative measured
+    /// moves the answer more across sub-windows, not because a plateau holds it.
     func testTheWorkHourThresholdPutsAQuietHourWithTheSleepingOnes() throws {
         var rates = Array(repeating: 0.05, count: 24)
         for hour in [0, 1, 18, 19, 20, 21, 22, 23] { rates[hour] = 4 }

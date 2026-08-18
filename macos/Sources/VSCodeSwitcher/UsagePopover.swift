@@ -1295,6 +1295,17 @@ struct UsagePopoverView: View {
         var hue: Double
         var saturation: Double
         var brightness: Double
+
+        /// The same colour at another brightness, and at another saturation.
+        /// Named because the legibility rule moves one coordinate at a time and
+        /// the hue has to survive both moves untouched.
+        func at(brightness value: Double) -> RampAnchor {
+            RampAnchor(hue: hue, saturation: saturation, brightness: value)
+        }
+
+        func at(saturation value: Double) -> RampAnchor {
+            RampAnchor(hue: hue, saturation: value, brightness: brightness)
+        }
     }
 
     /// The three anchors, and they are this project's own colours rather than a
@@ -1304,11 +1315,15 @@ struct UsagePopoverView: View {
     /// with. So the ramp *is* the family at its ends and only travels between
     /// them in the middle.
     ///
-    /// That holds of what is written here and of what is drawn on a dark plate,
-    /// where nothing adjusts it. On a light one the drawn colour is these hues and
-    /// these saturations at a lower brightness, which is the contrast floor doing
-    /// its work (`legibleBrightness`) — measured, the blue anchor is drawn at
-    /// brightness 0.7955 there and the red at 0.7451.
+    /// That holds of what is written here and of nothing that is drawn: **both**
+    /// plates move these numbers, and only the hue survives either of them
+    /// (`legible(_:on:)`). On a light plate the drawn colour is this hue and this
+    /// saturation at a lower brightness — the blue anchor is drawn at brightness
+    /// 0.7955 there and the red at 0.7451. On a dark one brightness is already at
+    /// the top of its scale for two of the three, so the lever is saturation
+    /// instead: measured 2026-08-18, blue is drawn at saturation 0.6383 and red at
+    /// 0.5228, while green — the one anchor that clears the floor as written —
+    /// comes through untouched.
     ///
     /// Written out rather than read from the system colours at drawing time, and
     /// the reason is a measurement too. Resolved in all four appearances
@@ -1364,6 +1379,24 @@ struct UsagePopoverView: View {
         var relativeLuminance: Double {
             UsagePopoverView.relativeLuminance((grey, grey, grey))
         }
+
+        /// The calm mark the warning replaces, as it lands on this plate: the
+        /// bar's frame, which is `labelColor` at `calmFrameOpacity`
+        /// (`MenuBarIcon.drawBar`) composited over `grey`.
+        ///
+        /// `labelColor` is black on a light plate and white on a dark one, and
+        /// the opacity is absolute rather than a multiple of the colour's own —
+        /// `withAlphaComponent` replaces the alpha, it does not scale it. So the
+        /// composite is arithmetic rather than a measurement, and the rendering
+        /// agrees with it: 0.397 measured against 0.397 here on the light plate,
+        /// 0.650 against 0.652 on the dark one (2026-08-18, the drawn picture over
+        /// its plate, `testTheWarningIsNeverQuieterThanTheCalmStateItReplaces`).
+        var calmInkGrey: Double {
+            switch self {
+            case .light: return grey * (1 - UsagePopoverView.calmFrameOpacity)
+            case .dark: return grey + UsagePopoverView.calmFrameOpacity * (1 - grey)
+            }
+        }
     }
 
     /// The contrast every load colour has to reach against the plate under it.
@@ -1389,10 +1422,73 @@ struct UsagePopoverView: View {
     /// of taking the stricter one.
     static let minimumContrastRatio: Double = 4.5
 
+    /// The opacity the calm bar frame is drawn at (`MenuBarIcon.drawBar`).
+    ///
+    /// It lives here rather than beside the drawing because the floor below is
+    /// derived from what this opacity produces: the rule is about a warning
+    /// against the calm mark it replaces, and the calm mark is `labelColor` at
+    /// this opacity. Two copies of the number would let the rule and the drawing
+    /// disagree about what "the calm state" is, silently.
+    ///
+    /// `nonisolated` so `LoadBackground` — a nested type, which does not inherit
+    /// this view's isolation — can read it. The note on `relativeLuminance` has
+    /// the whole of that argument.
+    nonisolated static let calmFrameOpacity: Double = 0.55
+
+    /// What every colour on the ramp has to reach against the plate it is drawn
+    /// on: the WCAG floor, or the calm state's own contrast when that is higher.
+    ///
+    /// **The floor is derived from the calm state and not fixed, because the rule
+    /// is a comparison and not a number.** "A warning may never be less legible
+    /// than the calm state it replaces" says nothing about 4.5 to 1; it says the
+    /// warning wins against whatever the calm frame measures on this plate. A
+    /// fixed 4.5 happened to satisfy it on the light plate — the calm frame is
+    /// 4.44 there, so the margin was 0.06 of arithmetic coincidence — and failed
+    /// it on the dark one, where the calm frame is 4.69 and the ramp was left at
+    /// 2.83 (cold) and 3.20 (red). Derived, the ordering holds on both by
+    /// construction.
+    ///
+    /// **By construction as `≥`, and at the hot end that is equality**, which is
+    /// worth saying plainly: on the dark plate this floor *is* the analytic calm
+    /// frame, and `legible` moves a colour until it reaches the floor and no
+    /// further, so from 124.9% up the warning frame aims at exactly the number it
+    /// has to beat. The margin that shows on screen comes from antialiasing
+    /// rather than from the rule — rendered, the warning frame measures 4.69 at
+    /// 130% and 150% against the calm frame's 4.67 (2026-08-18) — and it points
+    /// this way because the calm stroke is drawn at `calmFrameOpacity` while the
+    /// warning stroke is opaque, so partial coverage costs the calm one more.
+    ///
+    /// Measured 2026-08-18 on this machine's plates: **4.50 on the light plate**
+    /// (the calm frame is 4.44 there, so `minimumContrastRatio` is what binds) and
+    /// **4.69 on the dark one** (the calm frame binds, and WCAG's floor is what
+    /// does not).
+    ///
+    /// What it deliberately does *not* take for the calm state is the calm
+    /// **number**, which is `labelColor` at full strength — 11.61 to 1 on the
+    /// light plate and 8.57 on the dark one. No colour that keeps a hue reaches
+    /// either: on the dark plate the red would need its saturation down at 0.17 to
+    /// measure 8.57, which is a pink, and the light plate has no room at all. That
+    /// shortfall is real and named rather than hidden — the number over capacity
+    /// is a coloured number, and the price of colour is that it is quieter than
+    /// ink. The frame is what the rule is held to because the frame is what the
+    /// warning replaces mark for mark.
+    static func contrastFloor(on background: LoadBackground) -> Double {
+        max(minimumContrastRatio,
+            contrastRatio(relativeLuminance((background.calmInkGrey,
+                                             background.calmInkGrey,
+                                             background.calmInkGrey)),
+                          background.relativeLuminance))
+    }
+
+    /// WCAG contrast between two relative luminances, in either order.
+    nonisolated static func contrastRatio(_ one: Double, _ other: Double) -> Double {
+        (max(one, other) + contrastOffset) / (min(one, other) + contrastOffset)
+    }
+
     /// What WCAG adds to both luminances before dividing them. Named because the
     /// floor is solved for a luminance rather than searched for by ratio, and the
     /// constant appears on both sides of that arithmetic.
-    private static let contrastOffset: Double = 0.05
+    nonisolated private static let contrastOffset: Double = 0.05
 
     /// The colour of a load on the plate it will be drawn on: a ramp from cold
     /// blue through green to red, pinned at the three anchors above and flat
@@ -1408,15 +1504,17 @@ struct UsagePopoverView: View {
     /// way from blue to green and yellow then orange on the way from green to
     /// red.
     ///
-    /// **The plate is an argument because the answer depends on it.** Hue and
-    /// saturation do not: at every load they are the same on both plates, to the
-    /// last decimal. Only brightness moves, and only downwards, and only on a
-    /// light plate — measured, at nine loads, in `testTheRampMeetsItsContrastFloorOnALightPlate`.
+    /// **The plate is an argument because the answer depends on it.** The hue
+    /// does not: at every load it is the same on both plates, to the last
+    /// decimal, and it is the hue that carries the reading. What the plate moves
+    /// is how light the colour has to be drawn — down on a light plate, up on a
+    /// dark one — measured at nine loads in
+    /// `testTheRampMeetsItsContrastFloorOnEveryPlate`.
     static func loadColor(for load: FleetLoad, on background: LoadBackground) -> Color {
-        let anchor = rampAnchor(at: load.percent)
+        let anchor = legible(rampAnchor(at: load.percent), on: background)
         return Color(hue: anchor.hue,
                      saturation: anchor.saturation,
-                     brightness: legibleBrightness(of: anchor, on: background))
+                     brightness: anchor.brightness)
     }
 
     /// Where the ramp stands at a load, before the plate has had its say.
@@ -1433,42 +1531,99 @@ struct UsagePopoverView: View {
         return hotAnchor
     }
 
-    /// The brightest this anchor may be drawn and still clear the floor.
+    /// The anchor as it may be drawn on this plate: the same hue, moved until it
+    /// clears `contrastFloor(on:)`.
     ///
-    /// Brightness is the only coordinate free to move: the hue is the reading and
-    /// the saturation is what keeps the reading a colour rather than a grey. And
-    /// it can only move **down** — at a fixed hue and saturation the top of the
-    /// scale is the anchor's own brightness, so there is nothing above to move
-    /// into.
+    /// **The hue never moves, and the direction of everything else follows the
+    /// plate.** A colour is pulled away from a light plate by darkening and away
+    /// from a dark one by lightening, and the plate is what says which. The
+    /// previous rule had only the first half — it lowered brightness and nothing
+    /// else — so on a dark plate it could not reach the floor at all and left the
+    /// ramp raw, which is how crossing capacity came to draw a *dimmer* picture
+    /// than the calm state it replaced: red at 3.20 against the calm frame's 4.67
+    /// (2026-08-18, both rendered off the status item's bitmap). 4.69 is the
+    /// *analytic* calm frame on this plate, and it is also `contrastFloor(.dark)`
+    /// — quoting it beside a rendered 3.20 was comparing two different
+    /// measurements.
     ///
-    /// Down is also the only direction that helps on the plate where the rule
-    /// bites: every colour on this ramp is darker than the light plate, so
-    /// darkening pulls it away from the background. On the dark plate the
-    /// arithmetic answers "nothing to do" on its own rather than by a branch that
-    /// names the case — a plate at 0.0423 puts the floor at a luminance of
-    /// −0.0295, which no colour has, black included. **That is the whole of "the
-    /// ceiling exists only for light backgrounds":** on a dark plate darkening is
-    /// not a lever at all, so the popover and a dark menu bar get the ramp as the
-    /// owner's own colours, with the real yellow at 115% that the old ceiling
-    /// turned to olive.
-    private static func legibleBrightness(of anchor: RampAnchor,
-                                          on background: LoadBackground) -> Double {
-        let ceiling = (background.relativeLuminance + contrastOffset) / minimumContrastRatio
-            - contrastOffset
-        guard ceiling > 0, luminance(of: anchor, at: anchor.brightness) > ceiling else {
-            return anchor.brightness
+    /// Lightening is two levers, in this order, and both keep the hue:
+    ///
+    /// 1. **Brightness up to the top of its scale.** Free, and enough on its own
+    ///    for anything on the green half of the ramp.
+    /// 2. **Saturation down.** At brightness 1 a hue's luminance is fixed by its
+    ///    saturation alone, and lowering it is travel along the tint line towards
+    ///    white — the hue is preserved exactly, which is what "keep the hue"
+    ///    asks for. It is the only lever left once brightness is spent, and two
+    ///    of the three anchors are written at brightness 1 already.
+    ///
+    /// The cost is named rather than hidden: on the dark plate the cold blue is
+    /// drawn at saturation 0.6383 and the red at 0.5228, which is a paler blue and
+    /// a red with white in it. That is what a floor of 4.69 to 1 costs a hue whose
+    /// fully saturated luminance is 0.2126. Desaturating on a *light* plate would
+    /// be the opposite mistake — there the colour has to get further from a light
+    /// background, and washing it out moves it closer — which is why the two
+    /// directions are a `switch` on the plate rather than one rule that guesses.
+    private static func legible(_ anchor: RampAnchor,
+                                on background: LoadBackground) -> RampAnchor {
+        let floor = contrastFloor(on: background)
+        switch background {
+        case .light:
+            let ceiling = (background.relativeLuminance + contrastOffset) / floor - contrastOffset
+            guard luminance(of: anchor) > ceiling else { return anchor }
+            // A ceiling at or under zero would mean no colour can clear the
+            // floor, and the bisection answers that honestly — it converges on
+            // black, the darkest thing there is, and the assertion that every
+            // mark stays chromatic then fails loudly. There is no guard for the
+            // case because a guard here could only return the colour *unchanged*,
+            // which is the silent failure this whole rule exists to end.
+            //
+            // Luminance rises with brightness and never falls, so the largest
+            // brightness under the ceiling is a bisection rather than a search
+            // with an answer to check. Twenty-four halvings of the unit interval
+            // leave 6e-8, three orders under the byte the colour is finally drawn
+            // as.
+            var low = 0.0
+            var high = anchor.brightness
+            for _ in 0..<24 {
+                let middle = (low + high) / 2
+                if luminance(of: anchor.at(brightness: middle)) > ceiling {
+                    high = middle
+                } else {
+                    low = middle
+                }
+            }
+            return anchor.at(brightness: low)
+        case .dark:
+            let target = floor * (background.relativeLuminance + contrastOffset) - contrastOffset
+            guard luminance(of: anchor) < target else { return anchor }
+            let lit = anchor.at(brightness: 1)
+            if luminance(of: lit) >= target {
+                // The dimmest brightness that still clears the floor: the anchor
+                // keeps as much of its own darkness as the plate allows.
+                var low = anchor.brightness
+                var high = 1.0
+                for _ in 0..<24 {
+                    let middle = (low + high) / 2
+                    if luminance(of: anchor.at(brightness: middle)) < target {
+                        low = middle
+                    } else {
+                        high = middle
+                    }
+                }
+                return anchor.at(brightness: high)
+            }
+            // Brightness is spent. Luminance falls as saturation rises, so the
+            // most saturated colour that still clears the floor is the same
+            // bisection the other way round — and if even white cannot reach the
+            // target the answer is white, which is what `low` stays at.
+            var low = 0.0
+            var high = lit.saturation
+            for _ in 0..<24 {
+                let middle = (low + high) / 2
+                if luminance(of: lit.at(saturation: middle)) >= target { low = middle } else { high = middle }
+            }
+            return lit.at(saturation: low)
         }
-        // Luminance rises with brightness and never falls, so the largest
-        // brightness under the ceiling is a bisection rather than a search with
-        // an answer to check. Twenty-four halvings of the unit interval leave
-        // 6e-8, three orders under the byte the colour is finally drawn as.
-        var low = 0.0
-        var high = anchor.brightness
-        for _ in 0..<24 {
-            let middle = (low + high) / 2
-            if luminance(of: anchor, at: middle) > ceiling { high = middle } else { low = middle }
-        }
-        return low
     }
 
     private static func mix(_ from: RampAnchor, _ to: RampAnchor, _ position: Double) -> RampAnchor {
@@ -1477,8 +1632,8 @@ struct UsagePopoverView: View {
                    brightness: from.brightness + (to.brightness - from.brightness) * position)
     }
 
-    private static func luminance(of anchor: RampAnchor, at brightness: Double) -> Double {
-        relativeLuminance(components(of: anchor, at: brightness))
+    private static func luminance(of anchor: RampAnchor) -> Double {
+        relativeLuminance(components(of: anchor))
     }
 
     /// The sRGB components of an anchor at a brightness — the standard HSB
@@ -1487,8 +1642,8 @@ struct UsagePopoverView: View {
     /// Checked against it rather than assumed: at the three anchors the round
     /// trip through `NSColor` gives back the hue, saturation and brightness
     /// handed in, to the four decimals they are written with.
-    private static func components(of anchor: RampAnchor,
-                                   at brightness: Double) -> (red: Double, green: Double, blue: Double) {
+    private static func components(of anchor: RampAnchor) -> (red: Double, green: Double, blue: Double) {
+        let brightness = anchor.brightness
         let sector = (anchor.hue * 6).truncatingRemainder(dividingBy: 6)
         let falling = 1 - anchor.saturation * abs(sector.truncatingRemainder(dividingBy: 2) - 1)
         let low = 1 - anchor.saturation

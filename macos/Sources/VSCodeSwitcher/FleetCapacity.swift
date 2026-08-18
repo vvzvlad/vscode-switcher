@@ -225,8 +225,11 @@ enum FleetCapacity {
     /// 2026-08-18 and comparing raw endpoints against endpoints taken as a
     /// median of five: the largest disagreement is 0.4988, 0.2494, 0.1666,
     /// 0.1244 and 0.0830 pp/h at 2, 4, 6, 8 and 12 work hours, which is `1/N` to
-    /// three figures every time. In load points over a three-account fleet with
-    /// 15 work hours in its day that is **18.6, 9.3, 6.2, 4.7 and 3.1 points**.
+    /// three figures every time. In load points over a three-account fleet that
+    /// is `rate x work hours x 7 / 3`, and at 16 work hours in the day —
+    /// which is what these figures were computed at, the split having since
+    /// answered 14 — **18.6, 9.3, 6.2, 4.7 and 3.1 points**; at 14 the same
+    /// column is 16.3, 8.1, 5.4, 4.1 and 2.7.
     /// The median disagreement is 0.0000 at every N — the tooth is rare, not
     /// gradual, so what these numbers bound is the bad window rather than the
     /// usual one.
@@ -254,24 +257,55 @@ enum FleetCapacity {
     /// An hour of the day counts as a work hour when the fleet burns at least
     /// this share of its overall hourly rate in it.
     ///
-    /// Not a guess and not the first number tried. The count of work hours is a
-    /// step function of this fraction, and what a measurement can ask is where
-    /// the steps are. Over the live history (2026-08-18, three accounts) the
-    /// answer is 15 work hours for every fraction in [0.27, 0.63] and over the
-    /// 48 h the app actually fetches for every fraction in [0.41, 0.66]; the
-    /// intersection is [0.41, 0.63] and 0.45 sits inside both. A quarter — the
-    /// value the first prototype used — sits inside neither: it answers 16 hours
-    /// on the whole history and 16 on 48 h, one hour above the plateau, and it is
-    /// one hundredth of the mean away from flipping.
+    /// **The plateau this number was chosen for does not exist, and the figure
+    /// the file used to quote for it was wrong.** What stood here said 15 work
+    /// hours for every fraction in [0.41, 0.66]. Re-measured 2026-08-18 on the
+    /// live history (three accounts, 46 h of overlap), the steps of the count are
+    /// 0.01 → 20 hours, 0.10 → 19, 0.22 → 17, 0.37 → 16, 0.44 → 14, 0.88 → 12:
+    /// **no fraction answers 15 at all**, and 0.45 answers 14. Over the 48 h the
+    /// app actually fetches the steps are 0.01 → 20, 0.09 → 19, 0.22 → 17,
+    /// 0.36 → 16, 0.43 → 14, 0.85 → 12 — the same shape, and 0.45 is two
+    /// hundredths from the edge of its own plateau. The mechanism is worth
+    /// naming: the hourly rates are whole percentage points over two or three
+    /// observations of each hour of the day, so several hours land on exactly the
+    /// same value and cross the threshold as a block. 05:00 and 14:00 both sit at
+    /// 1.000 pp/h today, which is why the count steps 16 → 14 and never through
+    /// 15.
     ///
-    /// The second measurement is what settles it against its neighbours.
-    /// Recomputing the split over five sub-windows of the same history — whole,
-    /// newest 48 h, newest 36 h, newest 24 h and the 24 h before that — the
-    /// answer at 0.45 is 15, 15, 14, 14, 14 work hours: a spread of exactly one
-    /// hour. At 0.25 it is 16, 16, 15, 15, 14 and at 0.50 it is 15, 15, 14, 14,
-    /// 13 — a spread of two either way. So the answer moves least here, and one
-    /// hour of work moved between the classes is worth about 3 points of load on
-    /// this fleet.
+    /// **It stays anyway, because every replacement measured is worse.** The
+    /// review's own suggestion — sort the rates and cut at the largest gap
+    /// between adjacent values — answers **2 work hours in 19 of 21 sub-windows**:
+    /// the widest gap in the profile is between the evening peak (7.757 pp/h) and
+    /// the hour below it (6.000), so it cuts the peak off rather than the sleeping
+    /// block. Method for all of them (2026-08-18): recompute the split over every
+    /// sub-window the history allows — each end offset from 0 to 24 h in steps of
+    /// 3 h, each length from 24 h to the whole depth — and group the results by
+    /// the instant the window *ends*. Inside a group the fleet's recent behaviour
+    /// is the same and only the classification depth moves, so the spread inside a
+    /// group is the rule's own unsteadiness rather than the fleet's. Mean spread
+    /// within one instant, in load points and in work hours:
+    ///
+    ///     fraction 0.45      4.0 points   0.43 h
+    ///     fraction 0.35      5.6          0.57
+    ///     fraction 0.55      5.8          0.71
+    ///     hours above the median rate     5.8   0.57
+    ///     Otsu (least within-class variance)    6.2   0.57
+    ///     largest gap between adjacent rates    18.8  2.57
+    ///
+    /// The fraction is the steadiest of the six on both columns. That the line
+    /// sits a hundredth from a step in *one* window does not make it unsteady
+    /// across windows: the step moves with the data, and proximity in one cut
+    /// predicts nothing about the next.
+    ///
+    /// **One hour moved between the classes costs about 10 points of load, not
+    /// the 3 this file used to claim.** Measured end to end at the newest instant
+    /// over 48 h of history with a 6 h recent window (2026-08-18): 20 work hours
+    /// answer 36%, 19 → 45%, 17 → 89%, 16 → 93%, 14 → 112%, 12 → 119%. So 17 → 16
+    /// is 4.6 points and 16 → 14 is 18.8, and the per-hour cost runs from 3.6 to
+    /// 21.9 depending on which hour crosses. The old figure treated the split as
+    /// if it only moved the two multipliers; it moves both *rates* as well, since
+    /// an hour leaving the work class takes its burn out of the recent rate and
+    /// puts it into the sleeping one.
     ///
     /// It is a share of the mean rather than an absolute rate on purpose: a
     /// quiet fleet and a busy one have the same shape of day, and a fixed pp/h
@@ -392,7 +426,13 @@ enum FleetCapacity {
     /// deletes, and it is the only thing holding `everBelowCeiling` true for an
     /// account otherwise pinned at 100. Smooth it away and `measure` refuses the
     /// account outright, taking its 100 pp of capacity out of the denominator
-    /// along with its demand and moving the fleet figure up. The mirror shape, a
+    /// along with its demand and moving the fleet figure up. **Up because of
+    /// which account it is**, and not because dropping one always raises the
+    /// figure — dropping an account pulls the load towards the mean of the ones
+    /// that remain, either way round, and `hourBuckets` works that arithmetic
+    /// through. Here the lost account is one pinned at its ceiling, whose
+    /// measured burn is a suppressed near-zero and therefore under that mean, so
+    /// this particular loss can only push upwards. The mirror shape, a
     /// lone 100 between two 99s, is the cheap one: it costs `hitCeiling`, which
     /// is the `≥` on a figure that still gets printed.
     ///
@@ -690,9 +730,38 @@ enum FleetCapacity {
     /// So a step is the unit, not an hour: `deltaPP` is a signed change that
     /// telescopes, `resets` is a count, and `burn(over:)` puts them together the
     /// same way `measure` does over a span. Sum any contiguous stretch of these
-    /// and the answer is the endpoint burn of that stretch exactly — which is
-    /// what `testHourBucketsReconcileWithTheSpanMethod` asks, with a reset inside
-    /// a bucket and a reset on a bucket boundary.
+    /// and the answer is the endpoint burn of that stretch — **exactly when the
+    /// stretch's own edges fall on readings**, and that is the rare case rather
+    /// than the ordinary one. Measured over the 48 h the app fetches
+    /// (2026-08-18): exactly **1** hour boundary out of 48, 45 and 48 landed on a
+    /// reading over `main`, `acc2` and `acc3`. Polling every minute or so does not
+    /// make boundaries land on samples — the interval is a median of 64 s with a
+    /// p90 of 303 s and no alignment to the clock at all — so an edge inside a
+    /// step is what normally happens.
+    ///
+    /// **Inside a step the two methods part, and they part two different ways.**
+    /// A *reset* step is charged whole to the hour its fall began in, so the
+    /// stretch holding that hour carries the entire −99 and 100 while the
+    /// endpoint method, stopping at the last reading before the edge, has not
+    /// seen the fall at all: the divergence is that step's whole burn. An
+    /// *ordinary* step is spread pro rata, so the stretch carries only the share
+    /// of the change that fell inside it and the divergence is that share.
+    /// Frequencies are the other way round from what the reset case suggests: of
+    /// the boundaries above, 46 / 44 / 47 fell inside an ordinary step and 1 —
+    /// `main`'s only reset — inside a reset step. Sizes are the same order: the
+    /// reset straddle is exactly 1 pp (the stretch ending at 18:00 local, which
+    /// is `TimeZone.current` and what production splits by), and the ordinary
+    /// straddles are 0 pp at almost every boundary because the reading did not
+    /// move across the step — non-zero at 3 / 2 / 4 of them, peaking at 0.94,
+    /// 0.97 and 0.47 pp.
+    ///
+    /// `testHourBucketsReconcileWithTheSpanMethod` asks all of it, over three
+    /// fixtures: a reset inside a bucket, a reset whose fall ends exactly on a
+    /// bucket boundary, and a reset step that straddles one — the last being the
+    /// only one of the three that can tell whole attribution from spreading, and
+    /// the one that holds the qualification above. All three are sampled on the
+    /// hour, so only the reset case ever straddles there; the ordinary straddle
+    /// is a live-data statement and not a fixture.
     struct HourBucket: Sendable, Equatable {
         /// Start of the local clock hour, so buckets order and the recent window
         /// can be scanned back through them.
@@ -710,6 +779,21 @@ enum FleetCapacity {
         /// How much of the hour the readings actually covered. Under an hour at
         /// the ends of a series, and under an hour in a gap; the profile divides
         /// by it rather than by 1.
+        ///
+        /// **And over an hour when a reset step crossed the hour's end**, because
+        /// such a step is not spread: its whole span goes to the hour its fall
+        /// began in, boundary and all. On the live `main` series that bucket
+        /// carries 1.0117 h (2026-08-18; it is the only bucket over an hour on any
+        /// of the three accounts). It is the **17:00** bucket in local time, which
+        /// is what production splits by — `load` defaults `timeZone` to
+        /// `.current`; "14:00" stood here for a round because the measuring script
+        /// labelled its hours in UTC, and this machine runs at UTC+3. The figure
+        /// itself re-measures unchanged, but only over a window that covers the
+        /// whole of that hour: today's 48 h fetch begins at 17:54 on the day of
+        /// the reset, so the same bucket reads 0.10 h from it. The
+        /// profile divides by what it is given, so the hour reads a rate over
+        /// slightly more than an hour — which is the honest reading of a fall
+        /// nobody watched the middle of.
         let hours: Double
     }
 
@@ -778,6 +862,36 @@ enum FleetCapacity {
     /// on the other hand — 0 pairs out of all three series, in the 48 h window
     /// and over the full depth alike — so the gateway's order is ascending in
     /// the weak sense §2.7 assumes, and no more than that.
+    ///
+    /// **A fall past the sawtooth on such a step would refuse the account
+    /// outright**, and the two rules meet in a place worth naming. The refusal
+    /// below asks the schedule for a window that began *strictly inside* the
+    /// step — `windowStart > previous.at, windowStart < reading.at` — and a step
+    /// across no time at all has no inside for a boundary to fall in: the
+    /// condition cannot be satisfied by any schedule, so the guard returns `nil`
+    /// and the account loses its demand *and* its 100 pp of capacity.
+    ///
+    /// **Which way that moves the reading depends on who left, and "up" — what
+    /// stood here — is only half of it.** The load is `sum of demand / (N x 100)`,
+    /// so dropping an account pulls the figure towards the mean of the ones that
+    /// remain: up when the dropped account was below that mean, down when it was
+    /// above. In one line, `(S - d) / (N - 1) > S / N` is exactly `d < S / N`.
+    /// Demands of 40 / 40 / 200 pp read 93.3%, and without the 200 they read 40%
+    /// — fifty-three points *down*.
+    ///
+    /// The dangerous direction is that one, because **a refusal can hide an
+    /// overload**: what gets refused is not the quiet account but the one whose
+    /// readings fell unexplainably, and unexplained falls live where the spending
+    /// is. A fleet pushed over capacity by one account reads calm on the two that
+    /// are left, and nothing on screen says the figure is now about somebody
+    /// else. This is documentation and not a change, because the
+    /// shape does not occur: re-counted the same day over the same window there
+    /// are 26 / 13 / 13 such pairs (the count moves with the window, which is why
+    /// it differs from the figures above), their changes are only −1, 0 and +1 pp
+    /// — 10/14/2 on acc2, 1/8/4 on acc3, 6/5/2 on main — and not one of them
+    /// falls past the sawtooth at all. A reset landing exactly between two
+    /// same-second samples would be needed, and the two sources are both reading
+    /// the same window.
     ///
     /// The refusal is `measure`'s, asked of every step rather than of the span:
     /// a fall past the sawtooth with no reset to explain it is something that
@@ -958,26 +1072,34 @@ enum FleetCapacity {
     /// the local day the fleet's rate in it is measured over the whole history,
     /// and an hour counts as a work hour when it burns more than
     /// `workHourFraction` of the fleet's overall hourly rate. On the live fleet
-    /// that is 15 work hours and a sleeping block from 06:00 to 15:00
+    /// that is 14 work hours and a sleeping block from 05:00 to 15:00
     /// (2026-08-18, three accounts, `#` a work hour):
     ///
     /// ```
     /// 000000000011111111112222
     /// 012345678901234567890123
-    /// ######.........#########
+    /// #####..........#########
     /// ```
     ///
     /// The three accounts agree about the shape of that day, which is what makes
     /// one fleet-wide split the right thing rather than three per-account ones:
-    /// each of them reads 0.0 pp/h from 07:00 to 14:00 and each peaks in the
-    /// evening (2026-08-18).
+    /// the trough falls on the same hours for all of them and every one of them
+    /// peaks in the evening. Re-measured over the 48 h the app fetches
+    /// (2026-08-18) acc2 reads exactly 0.0 pp/h from 07:00 to 14:00 while main
+    /// and acc3 stay at or under 0.5 there — 0.50 at 09:00 on main, 0.21 at 08:00
+    /// and 0.50 at 10:00 on acc3 — so "each of them reads 0.0" was too strong;
+    /// the fleet itself is at zero only in 07:00, 11:00, 12:00 and 13:00. The
+    /// sleeping rate the split then answers is 0.350 pp/h over the fleet (0.200 /
+    /// 0.050 / 0.100 on main / acc2 / acc3), which is 24.5 pp of demand a week
+    /// and 8.2 load points.
     ///
     /// **The classification is thin, and it is the weakest part of the answer.**
     /// The gateway keeps two to three days, so each hour of the day is observed
-    /// two or three times per account; recomputed over sub-windows of that
-    /// history the split moves by one hour at `workHourFraction`, and by two at
-    /// the neighbouring fractions (the numbers are on the constant). One hour
-    /// moved between the classes is worth about 3 load points here. Depth is the
+    /// two or three times per account, and the rates come out quantised to whole
+    /// percentage points; recomputed over sub-windows of that history the split
+    /// moves by 0.43 of an hour on average at `workHourFraction` and by more at
+    /// every alternative measured (the numbers are on the constant). One hour
+    /// moved between the classes is worth about 10 load points here. Depth is the
     /// only cure and it is not on this side of the wire — §2.7 has it ordered as
     /// issue №6 in the gateway's forge.
     ///
@@ -1053,6 +1175,10 @@ enum FleetCapacity {
             }
             recentWorkRate += recent
             sleepRate += rate(over: account.buckets.filter { !workHours.contains($0.hourOfDay) })
+            // Both minima are taken *before* the counter, which is what makes
+            // them answerable below: a positive `contributors` is exactly the
+            // statement that this line ran at least once, so neither can still
+            // hold its sentinel when the guard lets the figure out.
             shortestRecent = min(shortestRecent, recentHours)
             shortestHours = min(shortestHours, account.hours)
             blocked = blocked || account.hitCeiling
@@ -1074,6 +1200,6 @@ enum FleetCapacity {
                             workHoursPerDay: workPerDay,
                             recentWorkRate: recentWorkRate,
                             sleepRate: sleepRate,
-                            recentWorkHours: shortestRecent == .greatestFiniteMagnitude ? 0 : shortestRecent))
+                            recentWorkHours: shortestRecent))
     }
 }

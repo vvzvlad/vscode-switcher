@@ -2343,31 +2343,61 @@ final class MenuBarIconTests: XCTestCase {
     /// picture faded exactly where it was supposed to light up, in the band this
     /// fleet lives in.
     ///
-    /// Three things are asked and each of them can fail on its own:
+    /// Three things are asked, on **both** plates, and each of them can fail on
+    /// its own:
     ///
-    /// 1. On the light plate every mark the ramp paints — fill, frame, number —
-    ///    clears `minimumContrastRatio`. That is the floor doing its work, and it
-    ///    is asked of the *rendering* because the rule is about what lands on the
-    ///    menu bar: the frame's own opacity is part of the answer and the rule
-    ///    knows nothing about it.
+    /// 1. Every mark the ramp paints — fill, frame, number — clears
+    ///    `contrastFloor(on:)` for the plate it is drawn on. That is the floor
+    ///    doing its work, and it is asked of the *rendering* because the rule is
+    ///    about what lands on the menu bar: the frame's own opacity is part of the
+    ///    answer and the rule knows nothing about it.
     /// 2. The warning **frame** is at least as legible as the calm frame it
-    ///    replaces. This is the ordering the review asked for, and it is
-    ///    attainable for the frame because the frame is now drawn opaque — and
-    ///    it holds by construction rather than by luck: the calm frame is
-    ///    `labelColor` at 0.55 over the plate, 4.41 to 1 measured, and the floor
-    ///    is 4.5. The margin is 0.08 and the assertion is worth having for
-    ///    exactly that reason.
+    ///    replaces. This is the ordering the review asked for, and it now holds by
+    ///    construction rather than by arithmetic luck: the floor *is* the calm
+    ///    frame's own contrast where that is the larger number. Measured, the calm
+    ///    frame is 4.41 on the light plate against a floor of 4.50, and 4.67 on
+    ///    the dark plate against a floor of 4.69.
+    ///
+    ///    **By construction as `≥`, and on the dark plate the hot end is the
+    ///    equality case** — `contrastFloor(.dark)` is the analytic calm frame
+    ///    exactly, 4.6924, and `legible` stops the moment it reaches the floor, so
+    ///    from 124.9% up the warning aims at the very number it must not fall
+    ///    under. What keeps this assertion off its knife edge is the rendering,
+    ///    not the rule: the warning frame comes off the bitmap at 4.69 and the
+    ///    calm one at 4.67, because the calm stroke is drawn at
+    ///    `calmFrameOpacity` and loses more to partial coverage than an opaque
+    ///    stroke does. A change that made the two strokes equally opaque would
+    ///    take that 0.02 away and leave the comparison resting on rounding.
     /// 3. The colour is carried at all: every warning mark is chromatic, so a
-    ///    floor that quietly drove the ramp to black would fail here rather than
-    ///    pass by being maximally legible.
+    ///    floor met by driving the ramp to black on a light plate — or to white on
+    ///    a dark one — would fail here rather than pass by being maximally
+    ///    legible.
+    ///
+    /// **The guard that used to run all three on the light plate only is gone**,
+    /// and it was hiding the whole defect: on the dark plate the ramp was left
+    /// raw, so crossing capacity took the frame from the calm 4.67 down to 3.20 —
+    /// the very fading this rule exists to forbid, surviving on half the surfaces
+    /// because no assertion looked there.
     ///
     /// **What is deliberately not asserted is the same ordering for the number**,
-    /// and the reason is arithmetic rather than taste: the calm number is ink, and
-    /// no colour that keeps a hue can reach ink's contrast — red at hue 3.2
-    /// degrees measures 4.45 against ink's 11.61, and driving it further means
-    /// driving it to black, which is ink again. The floor is what is achievable;
-    /// the drop from 11.61 to 4.45 is the price of a coloured number, and it is on
-    /// the record here rather than hidden.
+    /// and the reason is arithmetic rather than taste: the calm number is ink at
+    /// full strength — 11.61 to 1 on the light plate, 8.57 on the dark one — and
+    /// no colour that keeps a hue reaches either. On the light plate the red
+    /// measures 4.45 and driving it further means driving it to black, which is
+    /// ink again; on the dark plate matching 8.57 asks the red for a saturation of
+    /// 0.17, which is a pink and fails assertion 3 above. The floor is what is
+    /// achievable; the drop is the price of a coloured number, and it is on the
+    /// record here rather than hidden.
+    ///
+    /// **And legibility is not monotone across the warning band on a dark plate**,
+    /// which is the one thing the fix could not buy. Measured: 5.36 at 100%, 6.83
+    /// at 110%, 8.19 at 115%, 6.56 at 120%, 4.69 at 130% and above. The hump is
+    /// the hue itself — a fully lit yellow is simply brighter against 0.2274 than
+    /// a red can be made without ceasing to be red — so the band's worst load is
+    /// its second-least legible mark. What the floor guarantees is the comparison
+    /// that matters: no point of the band is quieter than the calm state it
+    /// replaces. On the light plate the question does not arise, the whole ramp
+    /// being pinned at the floor.
     func testTheWarningIsNeverQuieterThanTheCalmStateItReplaces() throws {
         var table = ["", "plate  load  mark    rgb as drawn            contrast"]
         for name in [NSAppearance.Name.aqua, .darkAqua] {
@@ -2409,32 +2439,32 @@ final class MenuBarIconTests: XCTestCase {
                     table.append(String(format: "%@ %5.0f  %@  %.3f %.3f %.3f        %6.2f",
                                         short, percent, label, mark.red, mark.green, mark.blue,
                                         mark.contrast))
-                    if plate == .light {
-                        // A tenth of a ratio of slack, and it is the glyph rather
-                        // than the rule: even the most fully covered pixel of a
-                        // 9 pt digit is not quite opaque, so the number measures
-                        // 4.41 to 4.45 where its colour is 4.50. The frame and the
-                        // fill land within 0.01 of the rule, which is what says the
-                        // slack belongs to the text.
-                        XCTAssertGreaterThanOrEqual(mark.contrast,
-                                                    UsagePopoverView.minimumContrastRatio - 0.1,
-                                                    "at \(percent)% the \(label.trimmingCharacters(in: .whitespaces)) "
-                                                    + "is \(mark.contrast) to 1 on the light menu "
-                                                    + "bar, under the floor")
-                    }
+                    // A tenth of a ratio of slack, and it is the glyph rather
+                    // than the rule: even the most fully covered pixel of a
+                    // 9 pt digit is not quite opaque, so the number measures
+                    // 4.41 to 4.45 where its colour is 4.50. The frame and the
+                    // fill land within 0.01 of the rule, which is what says the
+                    // slack belongs to the text.
+                    XCTAssertGreaterThanOrEqual(mark.contrast,
+                                                UsagePopoverView.contrastFloor(on: plate) - 0.1,
+                                                "at \(percent)% the \(label.trimmingCharacters(in: .whitespaces)) "
+                                                + "is \(mark.contrast) to 1 on the \(short) menu "
+                                                + "bar, under the floor "
+                                                + "\(UsagePopoverView.contrastFloor(on: plate))")
                     // Colour, not merely contrast: a floor met by driving the ramp
-                    // to black would be ink with extra steps.
+                    // to black — or, on a dark plate, to white — would be ink with
+                    // extra steps.
                     let high = max(mark.red, mark.green, mark.blue)
                     let low = min(mark.red, mark.green, mark.blue)
                     XCTAssertGreaterThan((high - low) / high, 0.3,
                                          "at \(percent)% on \(short) the \(label) came out grey: "
                                          + "\(mark.red) \(mark.green) \(mark.blue)")
                 }
-                if plate == .light, percent >= FleetLoad.capacityPercent {
+                if percent >= FleetLoad.capacityPercent {
                     XCTAssertGreaterThanOrEqual(marks[1].1.contrast, calmFrame.contrast,
-                                                "at \(percent)% the warning frame (\(marks[1].1.contrast)) "
-                                                + "is quieter than the calm frame it replaces "
-                                                + "(\(calmFrame.contrast))")
+                                                "at \(percent)% on \(short) the warning frame "
+                                                + "(\(marks[1].1.contrast)) is quieter than the calm "
+                                                + "frame it replaces (\(calmFrame.contrast))")
                 }
             }
         }
@@ -4269,10 +4299,17 @@ final class UsagePopoverLabelTests: XCTestCase {
     /// and it is the claim that goes stale on its own if a system colour ever
     /// moves.
     ///
-    /// **The anchors are asked on the dark plate**, which is where the claim is
-    /// about the whole colour. On a light one the contrast floor lowers the
-    /// brightness (`legibleBrightness`), so what survives there is the hue and
-    /// the saturation — asked separately below, at every load, on both plates.
+    /// **What survives a plate is the hue, and that is what is asked of all
+    /// three.** Both plates move the rest — the light one lowers brightness, the
+    /// dark one raises it and then lowers saturation (`legible(_:on:)`) — so a
+    /// test that asked for the whole colour would be asking the floor not to
+    /// work. One anchor does come through untouched and it is asked for
+    /// everything: the green at capacity, on the dark plate, where the ramp's own
+    /// colour already measures 5.36 to 1 against a floor of 4.69. The two ends are
+    /// asked for the hue and then for the values the floor leaves them at,
+    /// measured 2026-08-18: on the light plate full saturation at brightness
+    /// 0.7955 (blue) and 0.7451 (red), on the dark plate full brightness at
+    /// saturation 0.6383 and 0.5228.
     ///
     /// The shape is held here as well as in the three renderings, and the
     /// division is the usual one: a rule a view has stopped calling would answer
@@ -4285,25 +4322,47 @@ final class UsagePopoverLabelTests: XCTestCase {
         // read the family against whatever appearance the machine was in would
         // pass or fail by the system theme.
         let appearance = try XCTUnwrap(NSAppearance(named: .aqua))
-        var anchors: [(name: String, ramp: (hue: Double, saturation: Double, brightness: Double),
+        var anchors: [(name: String, plate: UsagePopoverView.LoadBackground,
+                       ramp: (hue: Double, saturation: Double, brightness: Double),
                        family: (hue: Double, saturation: Double, brightness: Double))] = []
         appearance.performAsCurrentDrawingAppearance {
-            for (name, percent, family) in [("cold", UsagePopoverView.coldLoadPercent, Color.blue),
-                                            ("green", UsagePopoverView.greenLoadPercent, Color.green),
-                                            ("hot", UsagePopoverView.hotLoadPercent, Color.red)] {
-                anchors.append((name,
-                                components(of: UsagePopoverView.loadColor(for: load(percent),
-                                                                          on: .dark)),
-                                components(of: family)))
+            for plate in [UsagePopoverView.LoadBackground.light, .dark] {
+                for (name, percent, family) in [("cold", UsagePopoverView.coldLoadPercent, Color.blue),
+                                                ("green", UsagePopoverView.greenLoadPercent, Color.green),
+                                                ("hot", UsagePopoverView.hotLoadPercent, Color.red)] {
+                    anchors.append((name, plate,
+                                    components(of: UsagePopoverView.loadColor(for: load(percent),
+                                                                              on: plate)),
+                                    components(of: family)))
+                }
             }
         }
         for anchor in anchors {
             XCTAssertEqual(anchor.ramp.hue, anchor.family.hue, accuracy: 0.001,
-                           "the \(anchor.name) anchor is not this project's own colour")
-            XCTAssertEqual(anchor.ramp.saturation, anchor.family.saturation, accuracy: 0.002,
-                           "the \(anchor.name) anchor is a saturation of its own")
-            XCTAssertEqual(anchor.ramp.brightness, anchor.family.brightness, accuracy: 0.002,
-                           "the \(anchor.name) anchor is a brightness of its own")
+                           "on \(anchor.plate) the \(anchor.name) anchor is not this project's "
+                           + "own colour")
+        }
+        // The one anchor no plate has anything to do to: the ramp's green already
+        // clears the dark plate's floor, so there the colour is the family's whole
+        // colour and not only its hue.
+        let green = try XCTUnwrap(anchors.first { $0.name == "green" && $0.plate == .dark })
+        XCTAssertEqual(green.ramp.saturation, green.family.saturation, accuracy: 0.002,
+                       "the green anchor is a saturation of its own")
+        XCTAssertEqual(green.ramp.brightness, green.family.brightness, accuracy: 0.002,
+                       "the green anchor is a brightness of its own")
+        // And what the floor leaves the two ends at, which is the price of the
+        // rule written out. Each is the family's own saturation or brightness with
+        // one coordinate spent.
+        for (name, plate, saturation, brightness) in [("cold", UsagePopoverView.LoadBackground.light,
+                                                       1.0000, 0.7955),
+                                                      ("hot", .light, 0.8120, 0.7451),
+                                                      ("cold", .dark, 0.6383, 1.0000),
+                                                      ("hot", .dark, 0.5228, 1.0000)] {
+            let anchor = try XCTUnwrap(anchors.first { $0.name == name && $0.plate == plate })
+            XCTAssertEqual(anchor.ramp.saturation, saturation, accuracy: 0.002,
+                           "on \(plate) the \(name) anchor moved off its measured saturation")
+            XCTAssertEqual(anchor.ramp.brightness, brightness, accuracy: 0.002,
+                           "on \(plate) the \(name) anchor moved off its measured brightness")
         }
 
         // The green anchor is capacity itself and not a second copy of it: moved
@@ -4347,62 +4406,94 @@ final class UsagePopoverLabelTests: XCTestCase {
             }
         }
 
-        // The plate moves the brightness and nothing else: hue and saturation are
-        // the reading, and a floor that quietly desaturated the yellow band into
-        // khaki would be the very cure this replaced.
+        // **The plate never moves the hue**, which is the whole of what one
+        // reading drawn on two surfaces means. It does move the other two, and in
+        // opposite directions, so the pair is asked for the invariant rather than
+        // for equality of the colour.
+        //
+        // The light plate is asked for more than that: there the floor is met by
+        // darkening alone, and a floor that quietly desaturated the yellow band
+        // into khaki would be the very cure this replaced. On the dark plate
+        // desaturation is the only lever left once brightness is spent, and where
+        // it bites is measured rather than assumed — at or below 74.4% and at or
+        // above 124.9% on today's anchors, which is the cold end and the hot end
+        // and nothing in between.
         for percent in stride(from: 0.0, through: 200.0, by: 2.5) {
             let light = components(of: UsagePopoverView.loadColor(for: load(percent), on: .light))
             let dark = components(of: UsagePopoverView.loadColor(for: load(percent), on: .dark))
             XCTAssertEqual(light.hue, dark.hue, accuracy: 0.001,
                            "at \(percent)% the two plates are two hues")
-            XCTAssertEqual(light.saturation, dark.saturation, accuracy: 0.002,
-                           "at \(percent)% the light plate desaturated the colour instead of "
-                           + "darkening it")
+            XCTAssertGreaterThanOrEqual(light.saturation, 0.8,
+                                        "at \(percent)% the light plate desaturated the colour "
+                                        + "instead of darkening it: the ramp as written never goes "
+                                        + "below 0.805 (measured over the three anchors)")
+            XCTAssertLessThanOrEqual(dark.saturation, light.saturation + 0.002,
+                                     "at \(percent)% the dark plate saturated the colour further "
+                                     + "than the ramp asks for")
+            if percent > 74.4, percent < 124.9 {
+                XCTAssertEqual(dark.saturation, light.saturation, accuracy: 0.002,
+                               "at \(percent)% the dark plate desaturated a colour that already "
+                               + "clears its floor")
+            }
         }
     }
 
-    /// The floor itself, as a rule: on the light plate every colour on the ramp
-    /// reaches `minimumContrastRatio`, and on the dark plate none of them is
-    /// touched.
+    /// The floor itself, as a rule: **on every plate** every colour on the ramp
+    /// reaches that plate's floor, and no colour is moved further than it has to
+    /// be.
     ///
     /// **This is the rule the review asked for and the reason the ceiling went.**
     /// The ceiling clamped the ramp to the green anchor's own luminance from
     /// 76.91% to 123.55% — three quarters of the moving part — and bought contrasts of
     /// 1.55 to 1.62 to 1 doing it (2026-08-18, against white; the light plate this
     /// machine actually has is 0.883, which is lower still). What replaces it
-    /// leaves the colour alone until it is *illegible* and then darkens it exactly
-    /// as far as the floor, which is why the yellow at 115% survives on a dark
-    /// plate and comes out a darker yellow rather than an olive on a light one.
+    /// leaves the colour alone until it is *illegible* and then moves it exactly
+    /// as far as the floor, which is why the yellow at 115% survives untouched on
+    /// a dark plate and comes out a darker yellow rather than an olive on a light
+    /// one.
+    ///
+    /// **The dark plate used to be exempt and that was the defect.** "Darkening
+    /// cannot raise contrast on a dark plate" is true, and the conclusion drawn
+    /// from it — leave the ramp raw there — left the cold end at 2.83 to 1 and the
+    /// hot end at 3.20 against a calm frame of 4.69. The direction of the
+    /// adjustment follows the plate now, so both ends are lifted instead: the
+    /// second half of this test is what says they were lifted *as far as needed
+    /// and no further*, which is the property that keeps the ramp a colour rather
+    /// than a wash.
     ///
     /// The contrast is worked out here rather than asked of the source: the
     /// linearisation is the thing that was wrong, and a test that borrowed the
     /// arithmetic under test would have agreed with it in gamma space just as
     /// happily.
-    func testTheRampMeetsItsContrastFloorOnALightPlate() {
-        for percent in stride(from: 0.0, through: 200.0, by: 0.5) {
-            let light = UsagePopoverView.loadColor(for: load(percent), on: .light)
-            XCTAssertGreaterThanOrEqual(contrast(of: light, on: .light),
-                                        UsagePopoverView.minimumContrastRatio - 0.001,
-                                        "at \(percent)% the ramp is under its floor on the light "
-                                        + "plate: \(contrast(of: light, on: .light))")
+    func testTheRampMeetsItsContrastFloorOnEveryPlate() {
+        for plate in [UsagePopoverView.LoadBackground.light, .dark] {
+            for percent in stride(from: 0.0, through: 200.0, by: 0.5) {
+                let colour = UsagePopoverView.loadColor(for: load(percent), on: plate)
+                XCTAssertGreaterThanOrEqual(contrast(of: colour, on: plate),
+                                            UsagePopoverView.contrastFloor(on: plate) - 0.001,
+                                            "at \(percent)% the ramp is under its floor on the "
+                                            + "\(plate) plate: \(contrast(of: colour, on: plate))")
+            }
         }
 
-        // And on the dark plate the ramp is the anchors' own brightness, which is
-        // the other half: a floor that darkened there too would take the yellow
-        // back to the olive the ceiling made of it. Held against the *raw* ramp,
-        // which is what a colour picked at a load looks like before any plate has
-        // spoken — read off the anchors themselves, where the ramp is flat.
-        for percent in [0.0, UsagePopoverView.coldLoadPercent,
-                        UsagePopoverView.greenLoadPercent, UsagePopoverView.hotLoadPercent, 300.0] {
+        // Nothing is moved that did not have to move, which is the other half of
+        // the rule: the middle of the ramp is legible as written, and there the
+        // drawn colour is the anchors' own brightness and saturation on the dark
+        // plate. Measured at the anchors themselves, where the ramp is flat, and
+        // at the green in the middle, where the two plates part company.
+        for percent in [UsagePopoverView.greenLoadPercent, 110.0, 115.0, 120.0] {
             let dark = components(of: UsagePopoverView.loadColor(for: load(percent), on: .dark))
-            let expected: Double
-            switch percent {
-            case ...UsagePopoverView.coldLoadPercent: expected = 1.000
-            case UsagePopoverView.greenLoadPercent: expected = 0.804
-            default: expected = 1.000
-            }
-            XCTAssertEqual(dark.brightness, expected, accuracy: 0.002,
-                           "at \(percent)% the dark plate lowered the brightness anyway")
+            let light = components(of: UsagePopoverView.loadColor(for: load(percent), on: .light))
+            XCTAssertGreaterThan(contrast(of: UsagePopoverView.loadColor(for: load(percent), on: .dark),
+                                          on: .dark),
+                                 UsagePopoverView.contrastFloor(on: .dark) + 0.1,
+                                 "at \(percent)% the dark plate had to move the colour after all, "
+                                 + "so this sample proves nothing about leaving it alone")
+            XCTAssertEqual(dark.saturation, light.saturation, accuracy: 0.002,
+                           "at \(percent)% the dark plate desaturated a legible colour")
+            XCTAssertGreaterThan(dark.brightness, light.brightness,
+                                 "at \(percent)% the dark plate did not leave the colour brighter "
+                                 + "than the light plate's darkened one")
         }
     }
 
@@ -5507,11 +5598,14 @@ final class UsagePopoverPaintTests: XCTestCase {
     /// pass every hue assertion in this class while doing it. So the whole colour
     /// is compared, not the hue.
     ///
-    /// On the dark plate the ramp is not adjusted at all, and that is asserted
-    /// here as a rendering rather than only as a rule: the yellow at 115% comes
-    /// back `rgb(0.827, 0.902, 0.173)`, which is the ramp's own — the colour the
-    /// old ceiling turned into `rgb(0.622, 0.678, 0.130)` on every plate,
-    /// including the dark ones where nothing needed it.
+    /// The floor is asked on **both** plates, and the guard that used to ask it
+    /// on the light one alone went with the menu bar's — the same hole, on the
+    /// same rule, on the other surface. The middle of the ramp is still untouched
+    /// on the dark plate and that is asserted here as a rendering rather than
+    /// only as a rule: the yellow at 115% comes back `rgb(0.827, 0.902, 0.173)`,
+    /// which is the ramp's own — the colour the old ceiling turned into
+    /// `rgb(0.622, 0.678, 0.130)` on every plate, including the dark ones where
+    /// nothing needed it.
     func testTheHeadlineIsLegibleOnWhicheverPlateItIsDrawnOn() async throws {
         var table = ["", "plate  load  mark    rgb as drawn            contrast"]
         for scheme in [ColorScheme.light, .dark] {
@@ -5530,12 +5624,11 @@ final class UsagePopoverPaintTests: XCTestCase {
                                    + "colour this plate's rule answers")
                     XCTAssertEqual(mark.green, expected.green, accuracy: 0.02)
                     XCTAssertEqual(mark.blue, expected.blue, accuracy: 0.02)
-                    if scheme == .light {
-                        XCTAssertGreaterThanOrEqual(mark.contrast,
-                                                    UsagePopoverView.minimumContrastRatio - 0.1,
-                                                    "at \(percent)% the \(label) is \(mark.contrast) "
-                                                    + "to 1 on a light popover, under the floor")
-                    }
+                    XCTAssertGreaterThanOrEqual(mark.contrast,
+                                                UsagePopoverView.contrastFloor(on: plate) - 0.1,
+                                                "at \(percent)% the \(label) is \(mark.contrast) "
+                                                + "to 1 on a \(short) popover, under the floor "
+                                                + "\(UsagePopoverView.contrastFloor(on: plate))")
                 }
             }
         }

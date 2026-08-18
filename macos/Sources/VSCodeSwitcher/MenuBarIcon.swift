@@ -66,11 +66,10 @@ import SwiftUI
 /// colours are fixed rather than dynamic, and that is not the same hazard: they
 /// are a reading and not ink, and they are the figures this project's system
 /// greens and reds already resolve to on both menu bar appearances. What the
-/// appearance does decide about them is how dark they have to be drawn: each is
-/// held to a contrast floor against the plate it will sit on
-/// (`UsagePopoverView.minimumContrastRatio`, and the plate is
-/// `background(for:)`), which is a second reason the picture is redrawn when the
-/// appearance moves.
+/// appearance does decide about them is how light or dark they have to be
+/// drawn: each is held to a contrast floor against the plate it will sit on
+/// (`UsagePopoverView.contrastFloor(on:)`, and the plate is `background(for:)`),
+/// which is a second reason the picture is redrawn when the appearance moves.
 ///
 /// One bar, not two: the user asked for the fleet's seven-day mean and nothing
 /// else in the menu bar. The five-hour windows and the per-account figures are
@@ -329,8 +328,12 @@ enum MenuBarIcon {
     /// `rgb(0.381, 0.416, 0.079)` at hue 66.2 degrees — "yellow" was the word here
     /// and nobody had rendered it; a darkened amber at 120%,
     /// `rgb(0.479, 0.384, 0.091)` at 45.2 degrees; red at 130%,
-    /// `rgb(0.745, 0.173, 0.142)`. On a **dark** menu bar nothing is darkened and
-    /// 115% is the ramp's own yellow, `rgb(0.827, 0.902, 0.173)`.
+    /// `rgb(0.745, 0.173, 0.142)`. On a **dark** menu bar the middle of the band
+    /// is the ramp as written — 115% is its own yellow, `rgb(0.827, 0.902, 0.173)`
+    /// — and only the hot end is moved, the floor lifting the red at 130% to
+    /// `rgb(1.000, 0.506, 0.478)`, which is red with white in it rather than a
+    /// darker red. Which way a plate moves a colour is the plate's own answer
+    /// (`UsagePopoverView.legible(_:on:)`).
     ///
     /// Orange itself — hue 30 degrees — arrives at 123.61% on both plates, because
     /// that is where the line interpolated between green and red crosses it. No
@@ -513,12 +516,18 @@ enum MenuBarIcon {
         // the light plate, the same colours at 0.55 come out at 2.11 to 2.34 to 1
         // against 4.49 opaque — under the 3 to 1 that graphics need at every load
         // on the ramp — and darkening cannot rescue them: composited at 0.55 over
-        // a plate of 0.883, even black reaches only 4.41, which is under the floor
+        // a plate of 0.883, even black reaches only 4.44, which is under the floor
         // the number holds this colour to. Softened, the frame would have to be a
         // second, darker colour, and one reading may not be two colours in a
         // picture 27 points wide.
+        //
+        // The opacity is read from the ramp's own file rather than written here,
+        // because what this line draws *is* the calm state the floor is derived
+        // from (`UsagePopoverView.contrastFloor`). Two copies of it would let the
+        // rule and the drawing disagree about what the warning is being compared
+        // against.
         (warningColor(for: reading.load, on: background)
-            ?? NSColor.labelColor.withAlphaComponent(0.55)).setStroke()
+            ?? NSColor.labelColor.withAlphaComponent(UsagePopoverView.calmFrameOpacity)).setStroke()
         outline.stroke()
 
         let inner = barFillBounds

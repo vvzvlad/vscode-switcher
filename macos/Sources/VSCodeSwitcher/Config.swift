@@ -68,7 +68,11 @@ struct Config: Sendable, Equatable {
     /// Values under `FleetCapacity.minimumRecentWorkHours` are refused rather
     /// than honoured: the rate's error is one point of sawtooth spread over the
     /// window, which at two hours is 18.6 points of load on a three-account
-    /// fleet — most of the width of the whole warning band.
+    /// fleet — most of the width of the whole warning band. That figure carries
+    /// the day's split with it, because the conversion from pp/h to load points
+    /// is `rate x work hours x 7 / 3`: 18.6 is at the 16 work hours it was
+    /// computed at, and today's split answering 14 reads the same error as 16.3
+    /// (2026-08-18, and the whole column is on `minimumRecentWorkHours`).
     var usageLoadWindowHours: Double
 
     static let `default` = Config(

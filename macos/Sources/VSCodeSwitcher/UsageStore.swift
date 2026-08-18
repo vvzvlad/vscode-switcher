@@ -113,10 +113,20 @@ final class UsageStore: ObservableObject {
     ///
     /// On the average path they are the same and always were: the estimator
     /// averages over everything that came back, so asking for the window *is*
-    /// setting the window. On the projection path they part company — the recent
-    /// rate wants a few hours, but classifying the hours of the day wants a whole
-    /// day of them, so the request stays at the fixed span above and the setting
-    /// only picks how far back the recent rate reaches inside it.
+    /// setting the window — which is why the upper side of the boundary follows
+    /// the setting rather than staying at the fixed span. On the projection path
+    /// they part company — the recent rate wants a few hours, but classifying the
+    /// hours of the day wants a whole day of them, so the request stays at the
+    /// fixed span above and the setting only picks how far back the recent rate
+    /// reaches inside it.
+    ///
+    /// **So the boundary moves two things at once, and it is worth knowing how
+    /// much.** Measured end to end on the live series 2026-08-18: a window of
+    /// 23.9 h asks for 48 h and reads **132%**, a window of 24.0 h asks for 24 h
+    /// and reads **147%** — 15 points of load from a tenth of an hour of setting,
+    /// and the depth behind the answer falls with it (`measuredHours` 46.1 h to
+    /// 22.3 h). Nothing else along the range steps like that: 4 h reads 108%, 6 h
+    /// 112%, 8 h 115%, 12 h 136%, 18 h 140%, 23 h 133%. §2.7 has the same figures.
     nonisolated static func historySeconds(loadWindowHours: Double) -> TimeInterval {
         loadWindowHours < FleetCapacity.projectionWindowHours
             ? fleetLoadWindowSeconds
