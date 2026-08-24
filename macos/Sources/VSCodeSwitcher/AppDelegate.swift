@@ -256,11 +256,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Draws the status item's picture for what it is showing right now.
     ///
-    /// `MenuBarIcon.reading` rather than a remembered value: the picture is a
+    /// `MenuBarIcon.rates` rather than a remembered value: the picture is a
     /// pure function of the snapshot and the clock, so asking again cannot
     /// disagree with what `observeUsage` last drew.
     private func redrawStatusItemImage() {
-        statusItem?.button?.image = MenuBarIcon.image(for: MenuBarIcon.reading(for: usage.snapshot),
+        statusItem?.button?.image = MenuBarIcon.image(for: MenuBarIcon.rates(for: usage.snapshot),
                                                       appearance: iconAppearance)
     }
 
@@ -272,7 +272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Status item
 
-    /// The status item: a picture that carries the fleet's weekly quota, a left
+    /// The status item: a picture that carries the fleet's spend ratio, a left
     /// click that opens the popover and a right click that opens the menu.
     ///
     /// The menu is deliberately *not* left sitting on `item.menu`. A status item
@@ -290,7 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // is assigned further down, and a first picture drawn against the app's
         // appearance would be the wrong ink until something happened to redraw it.
         item.button?.image = MenuBarIcon.image(
-            for: MenuBarIcon.Reading(),
+            for: nil,
             appearance: MenuBarIcon.appearance(ofButton: item.button,
                                                system: NSApp.effectiveAppearance))
         // No `toolTip` on purpose: the tag popped up on every pass of the
@@ -332,24 +332,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// `removeDuplicates` over the whole reason for the drawing, not over the
     /// snapshot: a poll lands once a minute and mostly says the same thing, and
-    /// the picture is a pure function of one `MenuBarIcon.Reading`, so two equal
-    /// values cannot produce two different pictures. No timer of its own — the
-    /// store's poll is the whole schedule.
+    /// the picture is a pure function of one pair of rates, so two equal values
+    /// cannot produce two different pictures. No timer of its own — the store's
+    /// poll is the whole schedule.
     ///
-    /// The reading is a pair now, and the second half moves on a schedule of its
-    /// own: the allowance is refetched every ten minutes, so most passes leave
-    /// it exactly where it was and change nothing here. It also has an age
-    /// ceiling, which is why the reading is worked out here rather than carried
+    /// The reading is a pair of rates, and its second half moves on a schedule
+    /// of its own: the allowance is refetched every ten minutes, so most passes
+    /// leave it exactly where it was and only the numerator moves. It also has an
+    /// age ceiling, which is why the pair is worked out here rather than carried
     /// in the snapshot — an allowance nobody has confirmed for twenty minutes
     /// drops out of the picture on the next pass that publishes anything, and the
     /// poll publishes every minute whatever the gateway says.
     private func observeUsage() {
         usage.$snapshot
-            .map { MenuBarIcon.reading(for: $0) }
+            .map { MenuBarIcon.rates(for: $0) }
             .removeDuplicates()
-            .sink { [weak self] reading in
+            .sink { [weak self] rates in
                 guard let self else { return }
-                self.statusItem?.button?.image = MenuBarIcon.image(for: reading,
+                self.statusItem?.button?.image = MenuBarIcon.image(for: rates,
                                                                    appearance: self.iconAppearance)
             }
             .store(in: &cancellables)
