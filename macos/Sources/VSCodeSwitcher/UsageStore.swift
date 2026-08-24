@@ -39,7 +39,7 @@ final class UsageStore: ObservableObject {
     /// How often the gateway is asked. The figures it reports move over minutes,
     /// and every pass costs two HTTP round trips plus a walk over the transcript
     /// directories. The third endpoint, the accounts' histories, is on the far
-    /// slower schedule of `fleetLoadIntervalSeconds` and is not part of this
+    /// slower schedule of `allowanceIntervalSeconds` and is not part of this
     /// cost.
     static let intervalSeconds: TimeInterval = 60
 
@@ -48,9 +48,9 @@ final class UsageStore: ObservableObject {
     /// applied.
     ///
     /// `nonisolated` is load-bearing, and there are **two** lines in the file
-    /// that must not lose it: this one and `fleetLoadWindowSeconds` below, whose
+    /// that must not lose it: this one and `historyWindowSeconds` below, whose
     /// own doc block spells the same failure out with its own timed test. (The
-    /// third, `fleetLoadIntervalSeconds`, also carries the keyword but for a
+    /// third, `allowanceIntervalSeconds`, also carries the keyword but for a
     /// different reason — it has no `async` reader, so nothing hangs and a
     /// warning is what guards it. Its doc says so, and the difference is the
     /// point.) A `static let` on a `@MainActor` type is isolated to that actor;
@@ -58,7 +58,7 @@ final class UsageStore: ObservableObject {
     /// compiler insert a hop to the main actor, silently and with no diagnostic
     /// under `-strict-concurrency=complete`. Everything after that read then
     /// runs *on the main thread*: from here, `/gw/sessions` and the walk over
-    /// the transcript directories; from the hop on `fleetLoadWindowSeconds`,
+    /// the transcript directories; from the hop on `historyWindowSeconds`,
     /// which `poll` reads earlier, the whole pass — no longer two HTTP calls but
     /// 2 + N, `/gw/usage` and `/gw/sessions` plus one history per account on the
     /// passes that fetch them. Which is exactly what §6 forbids. It showed up as
@@ -70,7 +70,7 @@ final class UsageStore: ObservableObject {
     /// How often the accounts' histories are fetched, which is not how often the
     /// gateway is polled.
     ///
-    /// The load figure is an average over two days: it cannot move fast, and
+    /// The allowance is an average over two days: it cannot move fast, and
     /// nothing is gained by asking ten times an hour. What is spent is real —
     /// one request per account of roughly 150 KB, which at the once-a-minute
     /// cadence of the rest of the pass is tens of megabytes an hour on a laptop
@@ -79,8 +79,8 @@ final class UsageStore: ObservableObject {
     /// `nonisolated` for the reason spelled out over `windowSeconds` — but what
     /// guards it is not the same thing, and the difference was found by taking
     /// the keyword off (2026-08-17). Neither of its two readers is `async`:
-    /// `shouldFetchFleetLoad` below is *synchronous*, and
-    /// `UsagePopoverView.loadStaleSeconds` — which is two of these intervals, the
+    /// `shouldFetchAllowance` below is *synchronous*, and
+    /// `UsagePopoverView.allowanceStaleSeconds` — which is two of these intervals, the
     /// age past which neither surface will show the figure — is a constant read
     /// on the main actor anyway. There is nowhere for the compiler to put a hop,
     /// so it emits none and nothing hangs; the timed test below stays green. What
@@ -88,56 +88,42 @@ final class UsageStore: ObservableObject {
     /// build that has to be clean under that flag is this line's guard. Give the
     /// constant an `async` reader and it inherits `windowSeconds`' failure mode
     /// along with its test.
-    nonisolated static let fleetLoadIntervalSeconds: TimeInterval = 600
+    nonisolated static let allowanceIntervalSeconds: TimeInterval = 600
 
-    /// The window the histories are asked for.
+    /// The window the histories and the spend beside them are asked for. A
+    /// constant, and it is the only window there is.
     ///
-    /// Two days rather than the seven the session figures use, because seven is
-    /// not on offer: the gateway's deepest answer is 2.2 to 2.7 days and asking
-    /// for a week returns exactly the same points (`FleetCapacity.measure`).
-    /// Asking for what can be served keeps the request honest about its own
-    /// depth, and `FleetLoad.measuredHours` reports what actually came back.
+    /// **Two days rather than the seven the session figures use**, because seven
+    /// is not on offer: the gateway's deepest answer is 2.2 to 2.7 days and
+    /// asking for a week returns exactly the same points. Asking for what can be
+    /// served keeps the request honest about its own depth, and
+    /// `SustainableRate.measuredHours` reports what actually came back.
+    ///
+    /// **And a constant rather than a setting, which it was until the demand
+    /// estimators went.** `usageLoadWindowHours` chose between two ways of
+    /// estimating a week's demand and, by the same number, how deep to ask; both
+    /// estimators are gone, and what is left has no use for a shorter window and
+    /// two reasons to want this one. The floor: the allowance needs each
+    /// account's day split into working and sleeping hours, and a series shorter
+    /// than a day has not seen every hour of the day even once
+    /// (`FleetCapacity.measureHourly` refuses it), so anything under 24 h answers
+    /// nothing at all. The ceiling: what a longer window buys is a steadier
+    /// exchange rate over more whole percentage points, and it is already
+    /// steady — 6.934, 7.047 and 7.044 M tokens per point at 12, 24 and 48 h
+    /// (2026-08-24, three accounts, a spread of 1.6%) — while past 48 h the
+    /// gateway simply has nothing more to give.
     ///
     /// `nonisolated`, and here it is load-bearing in the original way: `poll` is
     /// `async` and reads this one directly, so without the keyword the compiler
     /// inserts a hop and the histories, the sessions call and the transcript
     /// walk all run on the main thread. Taken off, the pass deadlocks against
     /// the very thread `pollOnce` blocks on and
-    /// `UsageTests.testTheFleetLoadPassDoesNotNeedTheMainThread` times out at
+    /// `UsageTests.testTheAllowancePassDoesNotNeedTheMainThread` times out at
     /// 5.1 s (measured 2026-08-17). The timeout is what makes that a failure
     /// instead of a run that never comes back.
-    nonisolated static let fleetLoadWindowSeconds: TimeInterval = 48 * 3600
-
-    /// The span the histories are asked for, which is not the same thing as the
-    /// window the figure is calculated over (`Config.usageLoadWindowHours`).
-    ///
-    /// On the average path they are the same and always were: the estimator
-    /// averages over everything that came back, so asking for the window *is*
-    /// setting the window — which is why the upper side of the boundary follows
-    /// the setting rather than staying at the fixed span. On the projection path
-    /// they part company — the recent rate wants a few hours, but classifying the
-    /// hours of the day wants a whole day of them, so the request stays at the
-    /// fixed span above and the setting only picks how far back the recent rate
-    /// reaches inside it.
-    ///
-    /// **So the boundary moves two things at once, and it is worth knowing how
-    /// much.** Measured end to end on the live series 2026-08-18: a window of
-    /// 23.9 h asks for 48 h and reads **132%**, a window of 24.0 h asks for 24 h
-    /// and reads **147%** — 15 points of load from a tenth of an hour of setting,
-    /// and the depth behind the answer falls with it (`measuredHours` 46.1 h to
-    /// 22.3 h). Nothing else along the range steps like that: 4 h reads 108%, 6 h
-    /// 112%, 8 h 115%, 12 h 136%, 18 h 140%, 23 h 133%. §2.7 has the same figures.
-    nonisolated static func historySeconds(loadWindowHours: Double) -> TimeInterval {
-        loadWindowHours < FleetCapacity.projectionWindowHours
-            ? fleetLoadWindowSeconds
-            : loadWindowHours * 3600
-    }
+    nonisolated static let historyWindowSeconds: TimeInterval = 48 * 3600
 
     private let client: UsageClient
-    /// The calculation window this store's config asked for, carried as a value
-    /// rather than read from a constant so `poll` stays a pure function of its
-    /// arguments — and so nothing has to reach for `Config` off the main actor.
-    private let loadWindowHours: Double
     private let cache: UsageCache
     private var timer: Timer?
     /// A pass is running; a tick that lands meanwhile is dropped rather than
@@ -156,7 +142,6 @@ final class UsageStore: ObservableObject {
     /// is why `apply` did not have to stop being private.
     init(config: Config, cache: UsageCache) {
         client = UsageClient(baseURL: config.resolvedUsageBaseURL)
-        loadWindowHours = config.usageLoadWindowHours
         self.cache = cache
         snapshot = cache.snapshot
     }
@@ -181,14 +166,11 @@ final class UsageStore: ObservableObject {
         pollInFlight = true
         let client = client
         let previous = snapshot
-        let loadWindowHours = loadWindowHours
         Task { [weak self] in
             // `poll` is `nonisolated async`, so it does not inherit the main
             // actor: the HTTP calls and the transcript walk both happen off the
             // main thread and only the finished value comes back.
-            let value = await UsageStore.poll(client: client,
-                                              previous: previous,
-                                              loadWindowHours: loadWindowHours)
+            let value = await UsageStore.poll(client: client, previous: previous)
             guard let self else { return }
             self.apply(value)
         }
@@ -204,18 +186,22 @@ final class UsageStore: ObservableObject {
     /// attempt is what made the footer call hour-old figures fresh.
     ///
     /// Three halves now, and the third does not run every pass: the histories
-    /// behind the load figure are asked for once every
-    /// `fleetLoadIntervalSeconds`, and every other pass steps over them with the
+    /// behind the allowance are asked for once every
+    /// `allowanceIntervalSeconds`, and every other pass steps over them with the
     /// previous figure untouched.
     nonisolated static func poll(client: UsageClient,
                                  previous: UsageSnapshot,
-                                 loadWindowHours: Double = Config.default.usageLoadWindowHours,
                                  now: Date = Date()) async -> UsageSnapshot {
         var result = previous
 
         do {
             let report = try await client.usage()
             result.fleetSevenDayMean = report.fleet?.sevenDay?.mean
+            // Nothing estimates this one — the gateway measured it and this line
+            // only weights the four counters and multiplies out to an hour
+            // (`TokenRate.perHour`). It rides on the quota half's stamp because
+            // it arrives with it, once a minute.
+            result.fleetTokenRate = report.fleet?.tokens?.perHour()
             result.accounts = report.accounts
             result.quotaFetchedAt = now
             result.quotaFailure = nil
@@ -223,10 +209,10 @@ final class UsageStore: ObservableObject {
             result.quotaFailure = "/gw/usage: \(error)"
         }
 
-        // The load figure's own half. It goes after the quota half and only if
+        // The allowance's own half. It goes after the quota half and only if
         // that one answered, because it needs both things the answer carries:
         // the fleet's membership, and each account's window boundary.
-        if result.quotaFailure == nil, shouldFetchFleetLoad(previous: previous, now: now) {
+        if result.quotaFailure == nil, shouldFetchAllowance(previous: previous, now: now) {
             // The attempt is stamped whatever comes of it, and that is what puts
             // a failing half back on its own cadence instead of on the
             // once-a-minute one. It used to be stamped on success alone, so a
@@ -234,35 +220,57 @@ final class UsageStore: ObservableObject {
             // the live fleet is 481 KB (measured 2026-08-18, three accounts over
             // a 48 h window), which at ten minutes is 2.9 MB/h and at one minute
             // — carrying every account but the one that failed — is some
-            // 19 MB/h, the very cost `fleetLoadIntervalSeconds` exists to avoid.
+            // 19 MB/h, the very cost `allowanceIntervalSeconds` exists to avoid.
             // What the ten minutes cost is not a stale figure on screen: on a
             // failure both surfaces *remove* the figure (the popover falls back
             // to the mean, the menu bar to a colourless bar) and the footer's
             // reason line names the endpoint. The cost is the absence — one
-            // transient error now buys 600 s with no load figure anywhere,
+            // transient error now buys 600 s with no allowance anywhere,
             // against the 60 s a per-pass retry would have cost. That is the
             // trade taken deliberately: the bodies are 130–187 KB against 3 KB
             // for `/gw/usage`, so this half failing alone on a slow link is the
             // ordinary case rather than the rare one, and retrying it every
             // minute is what the arithmetic above says of the tether.
-            result.fleetLoadCheckedAt = now
-            do {
-                result.fleetLoad = FleetCapacity.load(
-                    histories: try await histories(
-                        client: client,
-                        labels: result.accounts.map(\.label),
-                        since: now.addingTimeInterval(-historySeconds(loadWindowHours: loadWindowHours))),
+            result.allowanceCheckedAt = now
+            // Two requests, one window and one half. The histories say how many
+            // percentage points the fleet burned; `/gw/sessions` over the *same*
+            // `since` says how many tokens that cost, and their ratio is what
+            // prices the allowance (`FleetCapacity.sustainable`). Asked together
+            // rather than one after the other, so the half still costs one round
+            // of `UsageClient.timeoutSeconds` rather than two, and awaited
+            // separately so the blame can name the endpoint that failed — a half
+            // that fails without saying which request is a half nobody can debug
+            // (§4). The second body is cheap next to the first: 43 KB against
+            // 481 KB for one round of histories (measured 2026-08-24, three
+            // accounts over 48 h), so the ten-minute cadence goes from 2.9 to
+            // 3.2 MB/h.
+            let since = now.addingTimeInterval(-historyWindowSeconds)
+            let labels = result.accounts.map(\.label)
+            async let seriesAttempt = attempt { try await histories(client: client, labels: labels, since: since) }
+            async let spendAttempt = attempt { try await client.sessions(since: since) }
+            switch (await seriesAttempt, await spendAttempt) {
+            case (.failed(let reason), _):
+                result.allowanceFailure = "/gw/usage/<label>/history: \(reason)"
+            case (_, .failed(let reason)):
+                result.allowanceFailure = "/gw/sessions: \(reason)"
+            case (.answered(let series), .answered(let spend)):
+                // The window's spend, folded the one way four differently priced
+                // counters may be folded (§2.7). Every session the gateway kept,
+                // including the ones with no transcript on this machine: what is
+                // being priced is what the fleet's points bought, and an agent
+                // node's tokens cost points exactly like anyone else's.
+                result.sustainable = FleetCapacity.sustainable(
+                    histories: series,
                     accounts: result.accounts,
-                    windowHours: loadWindowHours)
+                    spentTokens: spend.sessions.reduce(0.0) { $0 + $1.tokens.weighted() })
                 // The other stamp goes on the arrival, like `quotaFetchedAt` —
-                // and a `nil` from `FleetCapacity.load` is an arrival too. It is
-                // the answer "there is no figure", which is a thing the fleet
-                // can be, and holding the previous number over it would draw a
-                // load for a fleet that has stopped supporting one.
-                result.fleetLoadFetchedAt = now
-                result.fleetLoadFailure = nil
-            } catch {
-                result.fleetLoadFailure = "/gw/usage/<label>/history: \(error)"
+                // and a `nil` from `FleetCapacity.sustainable` is an arrival too.
+                // It is the answer "there is no figure", which is a thing the
+                // fleet can be, and holding the previous number over it would
+                // state an allowance for a fleet that has stopped supporting
+                // one.
+                result.allowanceFetchedAt = now
+                result.allowanceFailure = nil
             }
         }
 
@@ -298,15 +306,35 @@ final class UsageStore: ObservableObject {
     /// schedule and an age: a failed round has to count against the next round,
     /// or a gateway answering `/gw/usage` while `/history` returns 500 is asked
     /// for 481 KB of histories every minute.
-    nonisolated static func shouldFetchFleetLoad(previous: UsageSnapshot, now: Date) -> Bool {
-        guard let last = previous.fleetLoadCheckedAt else { return true }
-        return now.timeIntervalSince(last) >= fleetLoadIntervalSeconds
+    nonisolated static func shouldFetchAllowance(previous: UsageSnapshot, now: Date) -> Bool {
+        guard let last = previous.allowanceCheckedAt else { return true }
+        return now.timeIntervalSince(last) >= allowanceIntervalSeconds
+    }
+
+    /// One request's answer, or why there is none — as text, because that is all
+    /// anything downstream does with a failure here.
+    ///
+    /// It exists so the allowance half's two requests can be *started* together
+    /// and *blamed* apart. `async let` hands back one value, and a thrown error
+    /// arrives at a `catch` that can no longer say which of the two threw; a
+    /// value that carries its own reason can. Text rather than the error itself
+    /// because `any Error` is not `Sendable` and nothing needs more of it: the
+    /// blame is a line in the popover's footer.
+    enum Attempt<Answer: Sendable>: Sendable {
+        case answered(Answer)
+        case failed(String)
+    }
+
+    /// Runs one request and keeps whichever of the two it produced.
+    private nonisolated static func attempt<Answer: Sendable>(
+        _ work: @Sendable () async throws -> Answer) async -> Attempt<Answer> {
+        do { return .answered(try await work()) } catch { return .failed("\(error)") }
     }
 
     /// One history per account, in parallel, keyed by the label that was
     /// *asked for* rather than the one the body echoes back — the same rule
-    /// `UsageHistoryModel.load` follows, and `FleetCapacity.load` looks the
-    /// series up under the account's label.
+    /// `UsageHistoryModel.load` follows, and `FleetCapacity.sustainable` looks
+    /// the series up under the account's label.
     ///
     /// Raw points, deliberately: `UsageHistoryModel.load` is the other loader
     /// and it hands out `withoutSourceLag(answer.points)` because the chart wants
@@ -314,8 +342,8 @@ final class UsageStore: ObservableObject {
     /// ceiling among ceiling readings is exactly the shape that filter deletes,
     /// and it is the only thing keeping an otherwise pinned account inside the
     /// measurement. Smooth it away and the account is refused, taking its 100 pp
-    /// of capacity out of the denominator along with its demand
-    /// (`FleetCapacity.load` spells the whole exposure out).
+    /// of capacity out of the denominator along with its spending
+    /// (`FleetCapacity.measure` spells the whole exposure out).
     ///
     /// In parallel, and that is what keeps `pollOnce`'s watchdog arithmetic
     /// true: sequentially the half would cost five seconds per account in the
@@ -368,14 +396,13 @@ final class UsageStore: ObservableObject {
         let box = PollResult()
         let semaphore = DispatchSemaphore(value: 0)
         Task.detached {
-            box.value = await UsageStore.poll(client: client,
-                                              previous: .empty,
-                                              loadWindowHours: config.usageLoadWindowHours,
-                                              now: now)
+            box.value = await UsageStore.poll(client: client, previous: .empty, now: now)
             semaphore.signal()
         }
-        // Three rounds of five seconds — `/gw/usage`, the histories and
-        // `/gw/sessions` — plus the directory walk, with room to spare. The
+        // Three rounds of five seconds — `/gw/usage`, then the allowance half,
+        // then `/gw/sessions` over the week — plus the directory walk, with room
+        // to spare. The allowance half is two requests and still one round: its
+        // histories and its own `/gw/sessions` are started together. The
         // histories cost five seconds however many accounts there are, which is
         // why they are fetched in parallel: sequentially this number would have
         // to grow with the fleet, and a watchdog whose bound depends on what the
@@ -388,7 +415,7 @@ final class UsageStore: ObservableObject {
             // No half answered, so all three are blamed: nothing about a pass
             // that never came back is specific to one endpoint.
             stalled.quotaFailure = "the pass did not finish in 30 s"
-            stalled.fleetLoadFailure = "the pass did not finish in 30 s"
+            stalled.allowanceFailure = "the pass did not finish in 30 s"
             stalled.sessionsFailure = "the pass did not finish in 30 s"
             return stalled
         }

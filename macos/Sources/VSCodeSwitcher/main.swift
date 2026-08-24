@@ -168,7 +168,7 @@ enum ConsoleDump {
                 + (usage.truncated ? ", truncated by the gateway's cap" : ""))
         }
         print("  fleet 7d:         \(percent(usage.fleetSevenDayMean))")
-        print("  weekly load:      \(loadLine(usage.fleetLoad))")
+        print("  spend rate:       \(rateLine(now: usage.fleetTokenRate, allowance: usage.sustainable))")
         let accounts = usage.accounts.map {
             "\($0.label) 5h \(percent($0.fiveHour?.utilization)) 7d \(percent($0.sevenDay?.utilization))"
         }
@@ -200,33 +200,44 @@ enum ConsoleDump {
         value.map { String(format: "%.0f%%", $0) } ?? "-"
     }
 
-    /// The week's demand against the week's supply, with everything the figure
-    /// is qualified by written out beside it.
+    /// The pair of rates the popover leads with, and everything the second of
+    /// them was built from.
     ///
-    /// `>=` rather than the panel's `≥`, the way the token columns are already
-    /// spelled here: this line goes to a terminal. The two numbers after it are
-    /// not decoration — a load is only as good as how many accounts stood behind
-    /// it and how deep the shallowest of their histories went, and a dump that
-    /// printed the percentage alone would hide an answer measured over one
-    /// account out of three.
+    /// The two halves are printed apart because they can be missing apart: the
+    /// current rate arrives with the quota once a minute and needs no estimating
+    /// at all, the allowance arrives with the histories once every ten minutes
+    /// and is a chain of four measurements. `-` on either side is the state the
+    /// popover falls back to the weekly quota in, and the tail says which link
+    /// of the chain is the one that moved.
     ///
-    /// **It names the estimator, and then everything that estimator was built
-    /// from.** Two of them can produce this figure and the setting that picks
-    /// them is a line in a file (§2.7); without the name, a number that moved
-    /// because the window moved is indistinguishable from one that moved because
-    /// the fleet did. The projection's tail is what it takes to rebuild the
-    /// estimate by hand — both rates, the split of the day, and how many work
-    /// hours the recent rate actually reached back over.
-    private static func loadLine(_ load: FleetLoad?) -> String {
-        guard let load else { return "-" }
-        let head = (load.isLowerBound ? ">=" : "")
-            + String(format: "%.0f%% of capacity", load.percent)
-            + String(format: ", %d accounts over %.1f h", load.accounts, load.measuredHours)
-        guard let projection = load.projection else { return head + ", window average" }
-        return head + String(format: ", projected from %.1f work h at %.3f pp/h",
-                             projection.recentWorkHours, projection.recentWorkRate)
-            + String(format: " + %d sleeping h at %.3f pp/h (work %d h/day)",
-                     projection.sleepHoursPerDay, projection.sleepRate, projection.workHoursPerDay)
+    /// Raw digits rather than the `23.8M/h` the surface writes: this line exists
+    /// to be checked against the gateway by hand, and a rounded million cannot
+    /// be. The exchange rate is the one figure here that no other line carries,
+    /// and it is the whole conversion — points into tokens.
+    ///
+    /// **The tail is the whole of what used to be a second line.** A `weekly
+    /// load:` line stood above this one and printed a week's *estimated* demand
+    /// against a supply, naming which of two estimators had produced it; both
+    /// estimators are gone, because the gateway measures the demand and the first
+    /// figure on this line is that measurement. What the old line carried that
+    /// this one has to keep is the qualification: a ratio is only as good as how
+    /// many accounts stood behind it and how deep the shallowest of their
+    /// histories went, so both are printed, and `>=` marks a figure that is only
+    /// a floor — the panel's `≥` spelled for a terminal, as the token columns
+    /// already are.
+    private static func rateLine(now: Double?, allowance: FleetCapacity.SustainableRate?) -> String {
+        let current = now.map { String(format: "%.0f tokens/h ie", $0) } ?? "-"
+        guard let allowance else { return current + " of - sustainable" }
+        let ratio = now.map {
+            String(format: " (%@%.0f%%)", allowance.isLowerBound ? ">=" : "",
+                   $0 / allowance.tokensPerHour * 100)
+        } ?? ""
+        return current
+            + String(format: " of %.0f tokens/h ie sustainable", allowance.tokensPerHour) + ratio
+            + String(format: ", %.3fM tokens/pp", allowance.tokensPerPoint / 1e6)
+            + String(format: ", %.3f pp/h over %d work h/day", allowance.allowedWorkRate, allowance.workHoursPerDay)
+            + String(format: " + %d sleeping h at %.3f pp/h", allowance.sleepHoursPerDay, allowance.sleepRate)
+            + String(format: ", %d accounts over %.1f h", allowance.accounts, allowance.measuredHours)
     }
 
     /// One set of counters: the input-equivalent total, then the four raw

@@ -616,8 +616,8 @@ struct UsagePopoverView: View {
     @ObservedObject var usage: UsageStore
     @ObservedObject var history: UsageHistoryModel
 
-    /// Which plate this popover is drawn on, which is what the load's colour has
-    /// to be legible against (`loadColor(for:on:)`).
+    /// Which plate this popover is drawn on, which is what the ramp's colour has
+    /// to be legible against (`ratioColor(atPercent:on:)`).
     ///
     /// From the environment rather than from `NSApp`, because the popover follows
     /// whatever appearance it is presented in and SwiftUI is the only thing that
@@ -627,7 +627,7 @@ struct UsagePopoverView: View {
     /// the rule that reads it.
     @Environment(\.colorScheme) private var colorScheme
 
-    private var background: LoadBackground { colorScheme == .dark ? .dark : .light }
+    private var background: RampBackground { colorScheme == .dark ? .dark : .light }
 
     /// The width of the popover. Wide enough for the chart's axis labels and a
     /// reset time on the same line as its bar.
@@ -653,14 +653,32 @@ struct UsagePopoverView: View {
     static let headlineCaption = "weekly quota, average across accounts"
     static let headlineCaptionSize: CGFloat = 11
 
-    /// What the headline says when there is a load figure to say it about, and
-    /// it names a different quantity from the caption above: not how much of the
-    /// week is spent, but how much of the week is being asked for. `126%` reads
-    /// "a quarter more than the week holds".
+    /// What the spend ratio is called where it is still written out as a
+    /// percentage, which since the lead became a pair of rates is the menu bar's
+    /// accessibility description and nothing else (`MenuBarIcon.describe`).
     ///
-    /// No jargon and no internal vocabulary — the word this metric is called by
-    /// inside the app appears in no string on this surface (§4).
-    static let loadCaption = "of weekly capacity across accounts"
+    /// It stays in this file because it belongs with `ratioLabel`, the string it
+    /// qualifies, and the two are read together in one place. No jargon and no
+    /// internal vocabulary — the word this metric is called by inside the app
+    /// appears in no string on any surface (§4). "Sustainable" is the one word
+    /// borrowed from the code, and it is borrowed the other way round: the lead's
+    /// own caption has said `of 19.5M/h sustainable` since the rates arrived, so
+    /// a reader who hears this one has already read that one.
+    static let ratioCaption = "of the sustainable spend rate"
+
+    /// The words under the lead figure, which now name the allowance rather than
+    /// the quantity the figure is a percentage of — because the figure is no
+    /// longer a percentage of anything. `23.8M/h` over `of 19.5M/h sustainable`
+    /// states the spending and the budget in one unit, and their ratio is the
+    /// bar underneath.
+    ///
+    /// Built rather than constant, and that is the whole change to this caption:
+    /// the second half of the sentence is a measurement. The pieces are named so
+    /// the layout test can draw the same string free-standing without copying
+    /// the wording (`testTheHeadlineCaptionIsDrawnOnOneLine`).
+    static func sustainableCaption(_ tokensPerHour: Double) -> String {
+        "of " + rateLabel(tokensPerHour) + " sustainable"
+    }
 
     /// The headline's bar, taller than the ones on the account rows because it
     /// belongs to the figure this popover is opened for.
@@ -678,22 +696,47 @@ struct UsagePopoverView: View {
     /// rather than as twins, and they are named because the tests draw the two
     /// figures free-standing to measure what the popover drew (a copy of a size
     /// there would be comparing a rendering with a rendering of something else).
-    /// Measured 2026-08-18 at `scale = 2`: `≥300%` is 104.00 pt of layout at
-    /// 30 pt and 59.50 at 17, and the quota's own `100%` is 84.50 and 49.00 —
-    /// against a content line of 292 pt, so neither figure can crowd its caption
-    /// off its own row, which is the thing this layout was rebuilt for.
     ///
-    /// `≥300%` is a typical upper end and **not** a ceiling: `FleetCapacity.load`
-    /// clamps nothing and `loadLabel` prints whatever it is handed. What the slot
-    /// can hold is a separate measurement and it is far past that — at 30 pt the
-    /// line takes twelve digits (`≥999999999999%`, 277.59 pt), and the first
-    /// string too wide for it is a thirteenth at 296.92 pt (2026-08-18, layout
-    /// widths). So the figure crowding its caption is not a state this metric can
-    /// reach, and the sizes are chosen against the caption rather than against a
-    /// worst case that does not exist. That each caption does come out on one
-    /// line under its own figure is a rendering and not an inference:
-    /// `testTheHeadlineCaptionIsDrawnOnOneLine` for the lead's and
-    /// `testTheHeadlineDrawsTheLoadAndTheWeeklyQuotaAtOnce` for the pair.
+    /// **The lead slot no longer prints a percentage**, so the measurement that
+    /// used to stand here is history: it sized the slot from `≥300%` and
+    /// `≥999999999999%`, which is `ratioLabel`, and `ratioLabel` reaches this
+    /// surface nowhere any more — the lead prints `rateLabel`, and the quota's
+    /// percentage prints under it at `supportingFigureSize`. The old numbers are
+    /// left named rather than deleted only so nobody re-derives them: `≥300%` was
+    /// 104.00 pt of *layout* at 30 pt, twelve digits fitted and thirteen did not
+    /// (2026-08-18). They are not comparable with what follows — layout width
+    /// counts the side bearings that ink does not.
+    ///
+    /// **Re-measured against what the slot draws now** (2026-08-24, ink from a
+    /// rendering at `scale = 2`, by the same `figureWidth` the layout tests
+    /// measure with, against a content line of 292 pt):
+    ///
+    ///     lead, 30 pt     23.8M/h       115.00 pt      999.9M/h    134.50
+    ///                     999.9B/h      128.00         999/h        82.00
+    ///                     100% (no rates)  79.50       —            24.50
+    ///     second, 17 pt   52%            36.00         100%         46.00
+    ///     captions, 11 pt  of 19.9M/h sustainable  117.00
+    ///                      weekly quota, average across accounts  205.50
+    ///
+    /// So a rate this fleet can produce leaves well over half the line free, and
+    /// no figure can crowd its caption off its own row — the thing this layout
+    /// was rebuilt for.
+    ///
+    /// **And unlike the percentage it replaced, this string has no argument that
+    /// it cannot overflow.** Nothing clamps the rate; `perHour` refuses only an
+    /// infinity, so any finite body is printed. The slot holds eleven digits
+    /// before the decimal point (`99999999999.9B/h`, 282.50 pt) and the twelfth
+    /// is the first over the line (302.00 pt) — which is 1e20 tokens an hour,
+    /// thirteen orders of magnitude above the live fleet's 2.13e7 ie/h
+    /// (2026-08-24).
+    /// The sizes are still chosen against the captions rather than against that,
+    /// because a gateway reporting 1e20 tokens an hour has a worse problem than
+    /// its layout.
+    ///
+    /// That each caption does come out on one line under its own figure is a
+    /// rendering and not an inference: `testTheHeadlineCaptionIsDrawnOnOneLine`
+    /// for the lead's and `testTheHeadlineDrawsTheSpendAndTheWeeklyQuotaAtOnce`
+    /// for the pair.
     ///
     /// The gap is wider than the 6 pt inside a reading and narrower than the
     /// 12 pt between the popover's sections: the two belong together, and they
@@ -739,11 +782,11 @@ struct UsagePopoverView: View {
                                       seriesPeriod: history.seriesPeriod,
                                       period: history.period,
                                       chartFailed: history.failure != nil,
-                                      loadFailed: usage.snapshot.fleetLoadFailure != nil,
+                                      allowanceFailed: usage.snapshot.allowanceFailure != nil,
                                       now: history.now)
         let failure = Self.failureText(quota: usage.snapshot.quotaFailure,
                                        history: history.failure,
-                                       load: usage.snapshot.fleetLoadFailure)
+                                       allowance: usage.snapshot.allowanceFailure)
         return VStack(alignment: .leading, spacing: 12) {
             headline
             Divider()
@@ -787,17 +830,34 @@ struct UsagePopoverView: View {
     /// caption is the complaint this headline was rebuilt for. On its own row it
     /// has the whole width and one line is one line whatever the figure says.
     ///
-    /// What stands in the lead three is the load when there is one, and the mean
-    /// utilisation when there is not — and all three rows switch together. The
-    /// caption names the figure and the bar is that figure drawn, so a bar left
-    /// showing the mean under a caption that says "capacity" would be the two
-    /// contradicting statements on one screen that this very headline already
-    /// refused once (see `headlinePercent`).
+    /// **What stands in the lead three is a pair of rates in one unit**: how fast
+    /// tokens are going now, and how fast they may go and still last the week.
+    /// `23.8M/h` over `of 19.5M/h sustainable`, and the bar is their ratio. No
+    /// per cent anywhere in the block, because a per cent of a seven-day window
+    /// is not a thing the five minutes it is measured over can be held against
+    /// without arithmetic nobody does in their head.
+    ///
+    /// The numerator needs no estimating at all — the gateway measures it and
+    /// publishes it (`TokenRate`) — and the denominator is the week's capacity
+    /// priced in tokens (`FleetCapacity.sustainable`). The mean utilisation
+    /// stands there instead when either is missing, and all three rows switch
+    /// together. The caption names the figure and the bar is that figure drawn
+    /// against its allowance, so a bar left showing one quantity under a caption
+    /// naming another would be the two contradicting statements on one screen
+    /// that this very headline already refused once (see `headlinePercent`).
+    ///
+    /// **And the colour of the block is that same ratio**, which it was not
+    /// until this round: the ramp used to read a separately *estimated* week's
+    /// load, so the shade and the numbers under it were two answers to two
+    /// different questions. On the live fleet 2026-08-24 the estimate answered
+    /// 92.3% while these figures answered 174.9% — a green over a red reading.
+    /// The estimate is gone with the estimators.
     ///
     /// **Two readings, one under the other, and the quota is not the lead any
-    /// more.** The load answers "will the week last", which is why the popover
-    /// gets opened, so it takes the big figure; the weekly quota answers "how
-    /// much is gone", which is a different question and still worth an answer, so
+    /// more.** The spend against its allowance answers "will the week last",
+    /// which is why the popover gets opened, so it takes the big figure; the
+    /// weekly quota answers "how much is gone", which is a different question
+    /// and still worth an answer, so
     /// it keeps a figure, a caption and a bar of its own underneath at
     /// `supportingFigureSize` against the lead's `headlineFigureSize`. What the
     /// branch above refused was a *bar* showing one quantity under a caption
@@ -805,45 +865,48 @@ struct UsagePopoverView: View {
     /// that, and putting the quota back is the owner's call — the branch that
     /// replaced it took a reading off the screen rather than adding one.
     ///
-    /// **A `nil` load falls back to exactly the old drawing, and nothing is
-    /// invented in its place.** `FleetCapacity.load` answers `nil` when the
-    /// gateway said nothing, when no account has six hours of history to
-    /// extrapolate from, and when every account spent the whole window pinned at
-    /// its ceiling — and from here those three are one state, because the metric
-    /// hands back no way to tell them apart. Two of them are cases where the
-    /// truthful answer is "unknown" and the third is a fleet in the worst
-    /// trouble it can be in; a number that split the difference would be wrong
-    /// for all three (§2.7). Then the quota is the lead and the supporting block
-    /// is not drawn at all: the fallback already states it, and drawn anyway it
-    /// would be the same percentage twice on one surface.
+    /// **A missing rate falls back to exactly the old drawing, and nothing is
+    /// invented in its place.** `headlineRates` answers `nil` for everything
+    /// `FleetCapacity.sustainable` refuses on — no account with a whole day of
+    /// history, every account pinned at its ceiling, nothing burned or nothing
+    /// spent to price a point by, a week already eaten by its nights — for
+    /// histories nobody has confirmed recently enough, and for a gateway that
+    /// named no live rate at all. From here they are one state, because none of
+    /// them hands back a way to tell it from the others.
+    /// Some are an honest "unknown" and one is a fleet in the worst trouble it
+    /// can be in; a number that split the difference would be wrong for all of
+    /// them (§2.7). Then the quota is the lead and the supporting block is not
+    /// drawn at all: the fallback already states it, and drawn anyway it would be
+    /// the same percentage twice on one surface.
     private var headline: some View {
         // The clock the whole popover reads, which ticks while it is open: one
-        // of the load's two rules is an age, so a figure that goes stale under an
+        // of the lead's two rules is an age, so a figure that goes stale under an
         // open popover has to leave the headline without waiting for a click.
-        let load = Self.headlineLoad(for: usage.snapshot, now: history.now)
+        let rates = Self.headlineRates(for: usage.snapshot, now: history.now)
         let percent = Self.headlinePercent(for: usage.snapshot)
         return VStack(alignment: .leading, spacing: Self.headlineReadingSpacing) {
-            // Past 100 the bar is full and the figure carries the rest: a scale
-            // that stretched to fit 300% would make capacity — the point the
-            // whole reading turns on — a mark a third of the way along.
+            // Past the allowance the bar is full and the two figures carry the
+            // rest: a scale that stretched to fit three times the allowance
+            // would make the allowance itself — the point the whole reading
+            // turns on — a mark a third of the way along.
             //
             // The clamp is the only thing this bar shares with the menu bar's,
             // and calling them one rule was wrong: what fills this one is the
-            // *load*, what fills that one is the mean, and the mean cannot reach
-            // the clamp at all — it tops out at exactly 100. Both are right for
-            // their own surface, because each bar sits under its own number: up
-            // there the number is the mean, here it is whatever this headline is
-            // stating.
+            // ratio of two rates, what fills that one is the mean, and the mean
+            // cannot reach the clamp at all — it tops out at exactly 100. Both
+            // are right for their own surface, because each bar sits under its
+            // own number: up there the number is the mean, here it is whatever
+            // this headline is stating.
             reading(figure: Self.headlineFigureLabel(for: usage.snapshot, now: history.now),
                     color: Self.headlineFigureColor(for: usage.snapshot, now: history.now,
                                                     on: background),
                     size: Self.headlineFigureSize,
-                    caption: load == nil ? Self.headlineCaption : Self.loadCaption,
-                    fraction: load.map { $0.percent / 100 } ?? percent.map { Double($0) / 100 },
+                    caption: rates.map { Self.sustainableCaption($0.allowance) } ?? Self.headlineCaption,
+                    fraction: rates.map(\.ratio) ?? percent.map { Double($0) / 100 },
                     barHeight: Self.headlineBarHeight,
-                    tint: load.map { Self.loadColor(for: $0, on: background) })
-            if load != nil {
-                // The quota exactly as it was drawn before the load arrived,
+                    tint: rates.map { Self.ratioColor(atPercent: $0.percent, on: background) })
+            if rates != nil {
+                // The quota exactly as it was drawn before the rates arrived,
                 // only smaller: ink for the figure, and the bar left to
                 // `QuotaBar.color(for:)` — that scale's 60 and 85 per cent are
                 // thresholds on *this* quantity, how much of a window is gone,
@@ -1152,20 +1215,29 @@ struct UsagePopoverView: View {
         snapshot.fleetSevenDayPercent
     }
 
-    /// Past this age the load figure is not shown at all — on this surface or on
-    /// the menu bar.
+    /// Past this age the allowance is not drawn at all — on this surface or on
+    /// the menu bar — and the lead goes back to the weekly quota.
     ///
-    /// Two of its own polling intervals (`UsageStore.fleetLoadIntervalSeconds`),
+    /// Two of its own polling intervals (`UsageStore.allowanceIntervalSeconds`),
     /// built the same way `footerStaleSeconds` is built out of the fast halves':
     /// a figure that is *meant* to be up to ten minutes old is not stale at ten
     /// minutes, and past two intervals nothing is refreshing it at all.
     ///
-    /// One constant because one rule: `headlineLoad` below is the whole of it and
-    /// `MenuBarIcon.load(for:now:)` is that function under another name.
-    static let loadStaleSeconds: TimeInterval = 2 * UsageStore.fleetLoadIntervalSeconds
+    /// One constant because one rule: `historiesAreFresh` below is the whole of
+    /// it, and it is read by this surface and by `MenuBarIcon.rates(for:now:)`.
+    static let allowanceStaleSeconds: TimeInterval = 2 * UsageStore.allowanceIntervalSeconds
 
-    /// The load this headline speaks for, or `nil` when it has to fall back to
-    /// the mean. The one rule both surfaces read.
+    /// Whether the half of the pass that brings the histories has said anything
+    /// recently enough to draw. The one rule both surfaces read.
+    ///
+    /// **It asks the stamps and the blame and nothing else, which is one guard
+    /// fewer than it used to ask.** The old form handed back the load figure and
+    /// so required one to exist; that half of the condition could not decide
+    /// anything, because the allowance it now gates is the stricter of the two —
+    /// `sustainable` needs an account with a whole day of splittable history and
+    /// a burn and a spend to price it by, and any account that clears that clears
+    /// the six hours the load figure asked for. There was no snapshot in which a
+    /// fresh allowance stood beside a missing load.
     ///
     /// **A failure of its own half.** The figure is frozen then, and the error is
     /// not one-directional, which is the whole of it. Measured with `/gw/usage`
@@ -1180,31 +1252,120 @@ struct UsagePopoverView: View {
     /// delivers the quota and loses the histories.
     ///
     /// **And an age, because the failure is missing exactly where it is needed.**
-    /// A `/gw/usage` outage skips the load block whole (`UsageStore.poll` needs a
-    /// freshly confirmed account list), so `fleetLoadFailure` stays `nil`, neither
-    /// stamp moves, and a guard on the blame alone presents a two-hour-old figure
-    /// as current under a caption that says "capacity" — with a red frame in the
-    /// menu bar that nothing can clear, since up there the whole load half is
-    /// this one answer. The quiet direction is the same failure mirrored: a
-    /// frozen green figure over a fleet that has since gone over capacity.
+    /// A `/gw/usage` outage skips the histories block whole (`UsageStore.poll`
+    /// needs a freshly confirmed account list), so `allowanceFailure` stays
+    /// `nil`, neither stamp moves, and a guard on the blame alone presents a
+    /// two-hour-old allowance as current — with a red frame in the menu bar that
+    /// nothing can clear, since up there the whole reading is this one answer.
+    /// The quiet direction is the same failure mirrored: a frozen green figure
+    /// over a fleet that has since gone past what it may spend.
     ///
     /// Dating it in the footer instead was the other answer and it is not enough
     /// on its own — it leaves the number itself stating the present, and it
     /// cannot reach the menu bar, which has no room for a caveat. The stamp is
     /// the arrival and never the attempt: the attempt moves on a failure and
-    /// would call a frozen figure fresh (`UsageSnapshot.fleetLoadCheckedAt`).
+    /// would call a frozen figure fresh (`UsageSnapshot.allowanceCheckedAt`).
     /// A figure with no arrival stamp at all is not shown either — every pass
-    /// that produces one stamps it in the same breath, so a load without a stamp
-    /// is a fixture, not a reading.
-    static func headlineLoad(for snapshot: UsageSnapshot, now: Date = Date()) -> FleetLoad? {
-        guard snapshot.fleetLoadFailure == nil,
-              let fetchedAt = snapshot.fleetLoadFetchedAt,
-              now.timeIntervalSince(fetchedAt) < loadStaleSeconds else { return nil }
-        return snapshot.fleetLoad
+    /// that produces one stamps it in the same breath, so an allowance without a
+    /// stamp is a fixture, not a reading.
+    static func historiesAreFresh(for snapshot: UsageSnapshot, now: Date = Date()) -> Bool {
+        guard snapshot.allowanceFailure == nil,
+              let fetchedAt = snapshot.allowanceFetchedAt else { return false }
+        return now.timeIntervalSince(fetchedAt) < allowanceStaleSeconds
     }
 
-    /// The string in the headline's top row: the load when there is one, the
-    /// mean when there is not, and a dash when there is neither.
+    /// The two rates the lead states — or `nil` when the quota has to lead
+    /// instead. The one rule the whole lead block reads: its figure, its caption,
+    /// its bar, its colour and whether the supporting reading is drawn at all.
+    struct HeadlineRates: Equatable {
+        /// Input-equivalent tokens an hour, as the gateway measured them.
+        let current: Double
+        /// What may be spent an hour and still last the week. Always above zero
+        /// — `FleetCapacity.sustainable` refuses rather than answering nothing
+        /// an hour — which is what makes `fraction` a plain division.
+        let allowance: Double
+        /// The allowance was measured over a fleet that was partly blocked, so it
+        /// reads high and everything drawn against it is a floor
+        /// (`FleetCapacity.SustainableRate.isLowerBound`). Carried because the one
+        /// surface that writes this ratio out as a number has to qualify it, and
+        /// because a colour cannot carry a `≥`.
+        let isLowerBound: Bool
+
+        /// What the bar draws: the spend over its allowance, 1.0 being a fleet
+        /// asking for exactly what it may have.
+        ///
+        /// Left unclamped on purpose, because clamping it here would be a second
+        /// clamp: `QuotaBar` already refuses to draw past its own width, and a
+        /// value this type had rounded down to 1 could no longer say by how much
+        /// the allowance was passed. The clamp is a fact about the drawing, and
+        /// it is measured where the drawing is
+        /// (`testTheLeadBarFillsWithTheRatioAndStopsAtTheAllowance`).
+        var ratio: Double { current / allowance }
+
+        /// The same ratio in per cent, which is the unit the ramp's anchors are
+        /// written in — and the unit this quantity has always been read in aloud:
+        /// "155% of what we may spend".
+        ///
+        /// **This is what colours both surfaces**, and it is the figure the lead
+        /// states rather than a second estimate of the same thing. The colour and
+        /// the two numbers under it now come from one division, so the shade can
+        /// no longer disagree with the reading it sits on.
+        var percent: Double { ratio * 100 }
+
+        /// The fleet is spending faster than it may. The ramp's green anchor and
+        /// nothing else, because "spending at the allowance" is the state that
+        /// anchor was put at (`greenRatioPercent`) — a boundary written twice is a
+        /// boundary that can be moved once.
+        var isOverAllowance: Bool { percent >= UsagePopoverView.greenRatioPercent }
+    }
+
+    /// The lead's two figures, or `nil` when either is missing.
+    ///
+    /// **Two sources, one gate.** The current rate comes with the quota half
+    /// once a minute; the allowance comes with the histories once every ten
+    /// minutes. The age ceiling and the blame that guard the second half are
+    /// `historiesAreFresh`'s, and it is the one rule both surfaces share.
+    ///
+    /// The current rate is deliberately *not* given an age rule of its own. It is
+    /// on the same one-minute stamp as the account rows below it, which this
+    /// surface has always gone on drawing when a pass fails — stale beats blank
+    /// here, and the footer says how stale (see `headlinePercent`).
+    ///
+    /// The menu bar draws the mean as its bar's *length* and takes its colour
+    /// from `MenuBarIcon.rates`, which is this function under another name. So a
+    /// gateway that reports quota but no token rate moves this headline back to
+    /// the quota and leaves the menu bar's picture in plain ink — one answer, two
+    /// surfaces, and neither states a number nobody measured. That agreement is
+    /// new: while the ramp read the week's estimated load, the menu bar went on
+    /// warning in that state about a reading the popover had already stopped
+    /// showing.
+    static func headlineRates(for snapshot: UsageSnapshot, now: Date = Date()) -> HeadlineRates? {
+        guard historiesAreFresh(for: snapshot, now: now),
+              let allowance = snapshot.sustainable,
+              let current = snapshot.fleetTokenRate else { return nil }
+        return HeadlineRates(current: current,
+                             allowance: allowance.tokensPerHour,
+                             isLowerBound: allowance.isLowerBound)
+    }
+
+    /// A token rate as this surface writes it: `23.8M/h`.
+    ///
+    /// One decimal and a magnitude letter, because the lead is read at a glance
+    /// and nine digits of tokens an hour are not. The letter steps at each
+    /// thousand rather than being fixed at millions, so an idle fleet reads
+    /// `0/h` — zero is a real reading here, and dressing it up as `0.0M/h` would
+    /// make a fleet that genuinely spends nothing look like one whose figure was
+    /// rounded away.
+    static func rateLabel(_ tokensPerHour: Double) -> String {
+        for (scale, suffix) in [(1e9, "B"), (1e6, "M"), (1e3, "k")] where tokensPerHour >= scale {
+            return String(format: "%.1f%@/h", tokensPerHour / scale, suffix)
+        }
+        return String(format: "%.0f/h", tokensPerHour)
+    }
+
+    /// The string in the headline's top row: the current spend when there are
+    /// rates to state it against, the mean when there are not, and a dash when
+    /// there is neither.
     ///
     /// A named function for the same reason `headlinePercent` is one — the
     /// fallback is a rule and a rule should be something a test can ask about.
@@ -1212,13 +1373,13 @@ struct UsagePopoverView: View {
     /// `—` drawn where `100%` belongs is the same three lines of the same widths
     /// (checked by mutation, 2026-08-17 — the paint test stayed green).
     static func headlineFigureLabel(for snapshot: UsageSnapshot, now: Date = Date()) -> String {
-        if let load = headlineLoad(for: snapshot, now: now) { return loadLabel(for: load) }
+        if let rates = headlineRates(for: snapshot, now: now) { return rateLabel(rates.current) }
         return quotaLabel(for: snapshot)
     }
 
     /// The weekly quota as the headline writes it — the string of the supporting
-    /// reading under the load, and the string the lead falls back to when there
-    /// is no load.
+    /// reading under the lead, and the string the lead falls back to when there
+    /// are no rates.
     ///
     /// One function for the two of them on purpose. They are the same reading,
     /// and written twice they could come to disagree — which on a surface that
@@ -1227,7 +1388,7 @@ struct UsagePopoverView: View {
         headlinePercent(for: snapshot).map { "\($0)%" } ?? "—"
     }
 
-    /// The colour of that string: the load's own, or ink when the headline is
+    /// The colour of that string: the ratio's own, or ink when the headline is
     /// back to being the mean.
     ///
     /// Named rather than written into the view, and the reason is that it was
@@ -1238,53 +1399,88 @@ struct UsagePopoverView: View {
     /// nobody calls would answer correctly for ever.
     ///
     /// The quota is deliberately not coloured, wherever it stands. Ink here when
-    /// it is the lead, ink in the supporting reading below the load, and in both
+    /// it is the lead, ink in the supporting reading below the lead, and in both
     /// places for the same reason: `QuotaBar.color(for:)` would give the figure a
     /// scale of its own — green, orange, red at 60% and 85% of a window — and a
-    /// red `92%` over the load's own colour would be two scales for one number.
+    /// red `92%` over the ramp's own colour would be two scales for one number.
     /// The bar under it does take that scale, which is not the same claim: it is
     /// the shape of the reading rather than the reading written out, and it is
     /// drawn exactly as an account's window row is drawn.
     ///
     /// The plate travels with the question for the reason it travels with
-    /// `loadColor`: this figure is a colour drawn on the popover, and how dark it
-    /// has to be to be read is a fact about the popover's own background.
+    /// `ratioColor`: this figure is a colour drawn on the popover, and how dark
+    /// it has to be to be read is a fact about the popover's own background.
+    ///
+    /// **The ramp is asked about the ratio this block states**, which is the
+    /// figure over the caption's allowance and nothing else. It used to be asked
+    /// about the week's estimated load instead — five minutes of measurement here
+    /// against two days of estimate there — and on the live fleet 2026-08-24 the
+    /// two answered 92.3% and 174.9%, which is a green figure over a red reading.
+    /// A reader takes the shade for a reading of the number it is painted on, so
+    /// the number and its colour now come from one division. The menu bar reads
+    /// the same one (`MenuBarIcon`), so there is still one rule and not two.
     static func headlineFigureColor(for snapshot: UsageSnapshot,
                                     now: Date = Date(),
-                                    on background: LoadBackground) -> Color {
-        headlineLoad(for: snapshot, now: now).map { loadColor(for: $0, on: background) } ?? .primary
+                                    on background: RampBackground) -> Color {
+        headlineRates(for: snapshot, now: now)
+            .map { ratioColor(atPercent: $0.percent, on: background) } ?? .primary
     }
 
-    /// The load as the headline writes it.
+    /// The spend ratio written out as a percentage, which since the lead became a
+    /// pair of rates happens in exactly one place: the menu bar's accessibility
+    /// description (`MenuBarIcon.describe`), where it reaches a reader who cannot
+    /// see the colour it is otherwise carried by.
     ///
-    /// `≥` when the figure is only a floor: an account sat at its ceiling while
-    /// it was measured, and the demand it turned away never entered its series
-    /// at all, so the truth is at least this (`FleetLoad.isLowerBound`). The
-    /// same symbol, for the same reason, that the panel's row and `--dump` put
-    /// in front of a token sum they know only a lower bound of (§2.7). What it
-    /// does *not* say is by how much — the requests an exhausted account refused
-    /// leave nothing behind to count.
-    static func loadLabel(for load: FleetLoad) -> String {
-        (load.isLowerBound ? "≥" : "") + "\(Int(load.percent.rounded()))%"
+    /// `≥` when the figure is only a floor, and the flag now belongs to the
+    /// *allowance*: an account sat at its ceiling while it was measured, so the
+    /// points it was blocked from burning never entered the measurement, the
+    /// price of a point came out high, and the allowance with it. A high
+    /// allowance makes a fleet look calmer than it is, so the ratio drawn against
+    /// it is at least this one (`FleetCapacity.SustainableRate.isLowerBound`).
+    /// The same symbol, for the same reason, that the panel's row and `--dump`
+    /// put in front of a token sum they know only a lower bound of (§2.7). What
+    /// it does *not* say is by how much — the requests an exhausted account
+    /// refused leave nothing behind to count.
+    static func ratioLabel(for rates: HeadlineRates) -> String {
+        (rates.isLowerBound ? "≥" : "") + "\(Int(rates.percent.rounded()))%"
     }
 
-    /// The load the ramp is coldest at, and below which it stops moving.
+    /// The ratio the ramp is coldest at, and below which it stops moving.
     ///
     /// The three anchors are the owner's, in their words: "≤ 70 cold blue,
     /// 70 → 100 blue through cyan into green, 100 green, 100 → 130 green through
-    /// yellow and orange, ≥ 130 red". They are loads, not colours — what happens
-    /// between them is `loadColor(for:on:)` interpolating hue, which is what puts
-    /// the cyan in the first stretch and the yellow and the orange in the second
-    /// (§4).
-    static let coldLoadPercent: Double = 70
-    /// Where the ramp is green, and it is capacity itself rather than a second
-    /// copy of that number: a week asked for exactly what it holds is the middle
-    /// of the scale, not a step in it.
-    static let greenLoadPercent: Double = FleetLoad.capacityPercent
+    /// yellow and orange, ≥ 130 red". They are readings, not colours — what
+    /// happens between them is `ratioColor(atPercent:on:)` interpolating hue,
+    /// which is what puts the cyan in the first stretch and the yellow and the
+    /// orange in the second (§4).
+    ///
+    /// **What they are anchors on moved, and the numbers did not have to.** They
+    /// used to be read against the week's estimated load, demand over supply; they
+    /// are now read against the ratio the lead actually states, the current spend
+    /// rate over its allowance. The two cross their middle anchor at the same
+    /// instant — "demand has reached capacity" and "the rate has reached what it
+    /// may be" are one statement rearranged — so 100 keeps its meaning exactly,
+    /// and 70 and 130 keep the distance from it the owner chose them at.
+    static let coldRatioPercent: Double = 70
+    /// Where the ramp is green: a fleet spending exactly what it may. Named once
+    /// because two rules have to agree about it — this ramp, and the step that
+    /// decides whether the status item paints a warning at all
+    /// (`HeadlineRates.isOverAllowance`, read by `MenuBarIcon.warningColor`).
+    ///
+    /// `nonisolated` because that second reader is: `HeadlineRates` is a plain
+    /// value type and its members are not on the main actor, so a `static let` on
+    /// this `@MainActor` view would be isolated away from it. Here the compiler
+    /// says so — a warning under `-strict-concurrency=complete`, which the build
+    /// has to be clean under — and that is the cheap end of this hazard; the
+    /// expensive end is an `async` reader, where the same isolation drags the
+    /// rest of the pass onto the main thread with no diagnostic at all
+    /// (`UsageStore.windowSeconds` carries that story).
+    nonisolated static let greenRatioPercent: Double = 100
     /// Where the ramp reaches red and stops moving. Not a ceiling on the figure —
-    /// the headline goes on printing 300% — a ceiling on the colour, because past
-    /// half again over capacity there is nothing louder left to say.
-    static let hotLoadPercent: Double = 130
+    /// the headline goes on printing whatever it is handed — a ceiling on the
+    /// colour, because past half again over the allowance there is nothing louder
+    /// left to say.
+    static let hotRatioPercent: Double = 130
 
     /// One end of the ramp, as a colour is written in this file.
     ///
@@ -1341,7 +1537,7 @@ struct UsagePopoverView: View {
     private static let greenAnchor = RampAnchor(hue: 0.3586, saturation: 0.805, brightness: 0.804)
     private static let hotAnchor = RampAnchor(hue: 0.0089, saturation: 0.812, brightness: 1.000)
 
-    /// The plate a load colour is drawn on, and everything the legibility rule
+    /// The plate a ramp colour is drawn on, and everything the legibility rule
     /// below needs to know about it.
     ///
     /// Two cases because the app paints on two kinds of plate, and all four were
@@ -1362,7 +1558,7 @@ struct UsagePopoverView: View {
     /// darkest light plate and the lightest dark one. A colour that clears the
     /// floor against these clears it against the other surface of the same kind
     /// by more, which is what lets one rule serve both.
-    enum LoadBackground {
+    enum RampBackground {
         case light
         case dark
 
@@ -1399,7 +1595,7 @@ struct UsagePopoverView: View {
         }
     }
 
-    /// The contrast every load colour has to reach against the plate under it.
+    /// The contrast every ramp colour has to reach against the plate under it.
     ///
     /// **A warning may never be less legible than the calm state it replaces**,
     /// and this is the operational half of that rule. What it replaced was a
@@ -1430,7 +1626,7 @@ struct UsagePopoverView: View {
     /// this opacity. Two copies of the number would let the rule and the drawing
     /// disagree about what "the calm state" is, silently.
     ///
-    /// `nonisolated` so `LoadBackground` — a nested type, which does not inherit
+    /// `nonisolated` so `RampBackground` — a nested type, which does not inherit
     /// this view's isolation — can read it. The note on `relativeLuminance` has
     /// the whole of that argument.
     nonisolated static let calmFrameOpacity: Double = 0.55
@@ -1472,7 +1668,7 @@ struct UsagePopoverView: View {
     /// is a coloured number, and the price of colour is that it is quieter than
     /// ink. The frame is what the rule is held to because the frame is what the
     /// warning replaces mark for mark.
-    static func contrastFloor(on background: LoadBackground) -> Double {
+    static func contrastFloor(on background: RampBackground) -> Double {
         max(minimumContrastRatio,
             contrastRatio(relativeLuminance((background.calmInkGrey,
                                              background.calmInkGrey,
@@ -1490,8 +1686,8 @@ struct UsagePopoverView: View {
     /// constant appears on both sides of that arithmetic.
     nonisolated private static let contrastOffset: Double = 0.05
 
-    /// The colour of a load on the plate it will be drawn on: a ramp from cold
-    /// blue through green to red, pinned at the three anchors above and flat
+    /// The colour of a spend ratio on the plate it will be drawn on: a ramp from
+    /// cold blue through green to red, pinned at the three anchors above and flat
     /// outside them, darkened where the plate underneath would otherwise swallow
     /// it.
     ///
@@ -1504,29 +1700,50 @@ struct UsagePopoverView: View {
     /// way from blue to green and yellow then orange on the way from green to
     /// red.
     ///
+    /// **A per cent rather than a figure to look inside, and that is the point.**
+    /// What is handed in is the ratio the lead states — `HeadlineRates.percent`,
+    /// the measured spend rate over the allowance — and both surfaces hand in the
+    /// same one. It used to be the week's estimated *load*, a second estimate of
+    /// the same quantity over a different timescale, and the shade is what a
+    /// person reads.
+    ///
+    /// **The two did not merely disagree about the shade — in the shipped
+    /// configuration they could disagree about the verdict, and the agreement
+    /// argument does not cover it.** That argument is real but narrow: demand
+    /// reaching capacity and the rate reaching its allowance are one statement
+    /// rearranged *when the load's numerator is the recent work rate*, which is
+    /// the projection's numerator and not the window average's. The default
+    /// window was two days, so the default path was the window average — a flat
+    /// mean over sleep and work alike, which is a different quantity and crosses
+    /// nothing in step. Measured on the live fleet 2026-08-24: the retired
+    /// estimator answered **92.3%** where the lead's own figures answered
+    /// **174.9%** — hue 150.2 degrees against 3.2, a green against a red, on
+    /// opposite sides of the anchor. Both numbers are true and they answer
+    /// different questions; only one of them is the question the block asks.
+    ///
     /// **The plate is an argument because the answer depends on it.** The hue
-    /// does not: at every load it is the same on both plates, to the last
-    /// decimal, and it is the hue that carries the reading. What the plate moves
+    /// does not: at every reading it is the same on both plates, to the last
+    /// decimal, and it is the hue that carries the meaning. What the plate moves
     /// is how light the colour has to be drawn — down on a light plate, up on a
-    /// dark one — measured at nine loads in
+    /// dark one — measured at nine readings in
     /// `testTheRampMeetsItsContrastFloorOnEveryPlate`.
-    static func loadColor(for load: FleetLoad, on background: LoadBackground) -> Color {
-        let anchor = legible(rampAnchor(at: load.percent), on: background)
+    static func ratioColor(atPercent percent: Double, on background: RampBackground) -> Color {
+        let anchor = legible(rampAnchor(at: percent), on: background)
         return Color(hue: anchor.hue,
                      saturation: anchor.saturation,
                      brightness: anchor.brightness)
     }
 
-    /// Where the ramp stands at a load, before the plate has had its say.
+    /// Where the ramp stands at a reading, before the plate has had its say.
     private static func rampAnchor(at percent: Double) -> RampAnchor {
-        if percent <= coldLoadPercent { return coldAnchor }
-        if percent < greenLoadPercent {
+        if percent <= coldRatioPercent { return coldAnchor }
+        if percent < greenRatioPercent {
             return mix(coldAnchor, greenAnchor,
-                       (percent - coldLoadPercent) / (greenLoadPercent - coldLoadPercent))
+                       (percent - coldRatioPercent) / (greenRatioPercent - coldRatioPercent))
         }
-        if percent < hotLoadPercent {
+        if percent < hotRatioPercent {
             return mix(greenAnchor, hotAnchor,
-                       (percent - greenLoadPercent) / (hotLoadPercent - greenLoadPercent))
+                       (percent - greenRatioPercent) / (hotRatioPercent - greenRatioPercent))
         }
         return hotAnchor
     }
@@ -1564,7 +1781,7 @@ struct UsagePopoverView: View {
     /// background, and washing it out moves it closer — which is why the two
     /// directions are a `switch` on the plate rather than one rule that guesses.
     private static func legible(_ anchor: RampAnchor,
-                                on background: LoadBackground) -> RampAnchor {
+                                on background: RampBackground) -> RampAnchor {
         let floor = contrastFloor(on: background)
         switch background {
         case .light:
@@ -1674,7 +1891,7 @@ struct UsagePopoverView: View {
     /// graphics need, let alone the 4.5 of text (all measured 2026-08-18 against
     /// white, which is the background those figures were quoted against).
     ///
-    /// `nonisolated` because `LoadBackground` is a nested type and nested types
+    /// `nonisolated` because `RampBackground` is a nested type and nested types
     /// do not inherit the enclosing view's main-actor isolation: without it the
     /// plate's own luminance is a main-actor call from a place that is not on the
     /// main actor, which under `-strict-concurrency=complete` is a warning and in
@@ -1803,24 +2020,25 @@ struct UsagePopoverView: View {
     /// The reasons behind what this view draws, all of them at once.
     ///
     /// The three halves are the three this popover shows: the quota poll, the
-    /// chart's own requests, and the histories behind the load figure.
+    /// chart's own requests, and the histories behind the allowance.
     /// `UsageSnapshot.failureText` is still the wrong source — it also carries
     /// `/gw/sessions`, whose figures live in the panel's rows and not one of
     /// which is on this surface. Shown instead of the chart's own reason (and it
     /// was, being first), it left an empty chart with its cause named nowhere
     /// while explaining a number the user cannot see.
     ///
-    /// Which is the argument for the load half rather than against it: the test
-    /// is whether the reader can see the figure the reason is about, and this
-    /// one's figure is the largest thing on the screen. Without it the headline
-    /// stated a load nobody had confirmed since the outage began, with the whole
-    /// footer silent about why.
+    /// Which is the argument for the allowance half rather than against it: the
+    /// test is whether the reader can see the figure the reason is about, and
+    /// this one's figure is the largest thing on the screen. Without it the
+    /// headline stated a reading nobody had confirmed since the outage began,
+    /// with the whole footer silent about why.
     ///
     /// All of them when all of them failed, for the same reason: they are
     /// separate questions, and the first non-empty of them is not an answer to
     /// the others.
-    static func failureText(quota: String?, history: String?, load: String?) -> String? {
-        let all = [quota, history, load].compactMap { $0 }
+    static func failureText(quota: String?, history: String?,
+                            allowance: String?) -> String? {
+        let all = [quota, history, allowance].compactMap { $0 }
         return all.isEmpty ? nil : all.joined(separator: "; ")
     }
 
@@ -1847,27 +2065,27 @@ struct UsagePopoverView: View {
     /// after a tap on `30d` the stamp in hand belongs to the previous window's
     /// lines, which the plot is no longer drawing, and it says "Loading…" itself.
     ///
-    /// **The load figure is not dated here at all, and that is an exclusion made
+    /// **The allowance is not dated here at all, and that is an exclusion made
     /// deliberately rather than a consequence of the rule above.**
     /// `footerStaleSeconds` is 120 s because the two halves it was built for are
-    /// refetched every minute; the load half is refetched every ten. Fold its
-    /// stamp into the maximum and any age from 120 s to `loadStaleSeconds` puts
+    /// refetched every minute; the allowance half is refetched every ten. Fold its
+    /// stamp into the maximum and any age from 120 s to `allowanceStaleSeconds` puts
     /// an age line under a perfectly healthy popover — a permanent `as of 7m ago`
     /// that reports nothing except that two schedules exist, and dates the whole
     /// surface by the one half designed to be minutes old.
     ///
     /// The price is real and worth naming rather than arguing away: this line can
-    /// understate the oldest thing on screen by up to `loadStaleSeconds`
-    /// (1200 s), and up to 600 s of that can be the load's schedule **standing
-    /// still** rather than running slowly. `UsageStore.poll` skips the entire
-    /// load block when the quota half fails (`result.quotaFailure == nil` guards
-    /// it), so no attempt is made, neither stamp moves and `fleetLoadFailure`
-    /// stays `nil`. A pass at t=0 stamps everything; the quota lands again at
-    /// t=590; `/gw/usage` starts failing at t=600. At t=1000 the headline still
-    /// draws the figure (1000 < 1200) while this line, broken out of silence by
-    /// the quota failure, reports the quota's age: `as of 6m ago` over a headline
-    /// figure older than sixteen minutes. What closes that gap is
-    /// `loadStaleSeconds` removing the figure, not the footer ageing it — the
+    /// understate the oldest thing on screen by up to `allowanceStaleSeconds`
+    /// (1200 s), and up to 600 s of that can be the allowance's schedule
+    /// **standing still** rather than running slowly. `UsageStore.poll` skips the
+    /// entire allowance block when the quota half fails (`result.quotaFailure ==
+    /// nil` guards it), so no attempt is made, neither stamp moves and
+    /// `allowanceFailure` stays `nil`. A pass at t=0 stamps everything; the quota
+    /// lands again at t=590; `/gw/usage` starts failing at t=600. At t=1000 the
+    /// headline still draws the figure (1000 < 1200) while this line, broken out
+    /// of silence by the quota failure, reports the quota's age: `as of 6m ago`
+    /// over a headline figure older than sixteen minutes. What closes that gap is
+    /// `allowanceStaleSeconds` removing the figure, not the footer ageing it — the
     /// alternative costs a standing age line on every healthy popover, which is
     /// the trade refused above.
     ///
@@ -1884,21 +2102,21 @@ struct UsagePopoverView: View {
     /// second one at any age: with the numbers standing still and the checks
     /// failing, how old they are is the only thing telling live figures from
     /// frozen ones, and `footerStaleSeconds` would hide it for the first two
-    /// minutes of every outage. `loadFailed` is in that list although the load
-    /// carries no stamp here — what it dates is then the halves that *are* on
-    /// screen, and one of the three having gone quiet is the moment to say how
-    /// old the rest is.
+    /// minutes of every outage. `allowanceFailed` is in that list although the
+    /// allowance carries no stamp here — what it dates is then the halves that
+    /// *are* on screen, and one of the three having gone quiet is the moment to
+    /// say how old the rest is.
     static func footerAgeLabel(quotaFetchedAt: Date?,
                                quotaFailed: Bool,
                                chartFetchedAt: Date?,
                                seriesPeriod: HistoryPeriod?,
                                period: HistoryPeriod,
                                chartFailed: Bool,
-                               loadFailed: Bool,
+                               allowanceFailed: Bool,
                                now: Date) -> String? {
         let chart = seriesPeriod == period ? chartFetchedAt : nil
         guard let oldest = [quotaFetchedAt, chart].compactMap({ $0 }).min() else { return nil }
-        guard quotaFailed || chartFailed || loadFailed
+        guard quotaFailed || chartFailed || allowanceFailed
                 || now.timeIntervalSince(oldest) >= footerStaleSeconds else { return nil }
         return "as of \(ago(oldest, now: now))"
     }
@@ -1934,8 +2152,8 @@ struct UsagePopoverView: View {
 /// Nor is the amount of colour each can carry. That stood here — this bar being
 /// a full-width capsule on a surface the user has deliberately opened while the
 /// menu bar's is a few points wide beside the clock, so one could hold a scale
-/// and the other one bit — and the owner overruled it: the load is drawn with a
-/// continuous ramp on both surfaces (`UsagePopoverView.loadColor`), because a
+/// and the other one bit — and the owner overruled it: the ratio is drawn with a
+/// continuous ramp on both surfaces (`UsagePopoverView.ratioColor`), because a
 /// glance that can tell green from red can tell blue from green just as well,
 /// and a step made a fleet at 40% look like a fleet at 95%.
 ///
@@ -1950,7 +2168,7 @@ struct QuotaBar: View {
     /// The fill colour when the caller has a rule of its own. `nil` leaves it to
     /// `color(for:)`, which answers "how full is this account's window" — the
     /// headline's lead bar is filled by a different quantity and coloured by the
-    /// load's ramp (`UsagePopoverView.loadColor`).
+    /// ratio's ramp (`UsagePopoverView.ratioColor`).
     var tint: Color?
 
     var body: some View {

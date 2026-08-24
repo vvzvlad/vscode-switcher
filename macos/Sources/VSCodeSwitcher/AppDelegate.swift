@@ -99,7 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Utilisation over time for the popover's chart. **This object** fetches
     /// only while the popover is open — the endpoint behind it is not that
     /// exclusive, `usage` above reads the same histories every ten minutes for
-    /// the load figure (`UsageClient.history`).
+    /// the allowance (`UsageClient.history`).
     private let history: UsageHistoryModel
     private let trigger: EdgeTrigger
     private let panel: PanelController
@@ -337,12 +337,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// store's poll is the whole schedule.
     ///
     /// The reading is a pair now, and the second half moves on a schedule of its
-    /// own: the load figure is refetched every ten minutes, so most passes leave
+    /// own: the allowance is refetched every ten minutes, so most passes leave
     /// it exactly where it was and change nothing here. It also has an age
     /// ceiling, which is why the reading is worked out here rather than carried
-    /// in the snapshot — a load nobody has confirmed for twenty minutes drops out
-    /// of the picture on the next pass that publishes anything, and the poll
-    /// publishes every minute whatever the gateway says.
+    /// in the snapshot — an allowance nobody has confirmed for twenty minutes
+    /// drops out of the picture on the next pass that publishes anything, and the
+    /// poll publishes every minute whatever the gateway says.
     private func observeUsage() {
         usage.$snapshot
             .map { MenuBarIcon.reading(for: $0) }

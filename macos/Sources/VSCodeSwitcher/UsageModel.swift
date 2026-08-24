@@ -230,12 +230,100 @@ struct FleetWindow: Sendable, Decodable, Equatable {
     }
 }
 
-/// The `fleet` block of `GET /gw/usage`. Only the seven-day window has a reader.
+/// How fast tokens are being spent right now, as `GET /gw/usage` reports it.
+///
+/// The gateway publishes this block per account and once for the whole set, and
+/// the two agree: measured 2026-08-24 on one body, the fleet's four rates are
+/// the sum of the accounts' to the last digit the body prints (input
+/// 120.483 + 0 + 98.047 = 218.530 against a fleet 218.53, and the same for the
+/// other three). Only the fleet's is decoded, because only the fleet's has a
+/// reader — a field nobody reads is a field that can only rot (§2.7).
+///
+/// The four counters are already divided by the window, so nothing here
+/// multiplies by it. `windowSeconds` is decoded all the same and it is the one
+/// field that can refuse the reading: a rate averaged over no time at all is not
+/// a rate. It is never assumed either — the body says 300 today (2026-08-24) and
+/// this file holds no constant to disagree with it.
+struct TokenRate: Sendable, Decodable, Equatable {
+    /// The window the gateway averaged over, in seconds.
+    let windowSeconds: Double?
+    let input: Double?
+    let output: Double?
+    let cacheCreation: Double?
+    let cacheRead: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case windowSeconds = "window_seconds"
+        case perSecond = "per_second"
+    }
+
+    enum RateKeys: String, CodingKey {
+        case input = "input_tokens"
+        case output = "output_tokens"
+        case cacheCreation = "cache_creation_input_tokens"
+        case cacheRead = "cache_read_input_tokens"
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        windowSeconds = try container.decodeIfPresent(Double.self, forKey: .windowSeconds)
+        // A `per_second` that is absent or null leaves all four unnamed, which
+        // `perHour` then refuses. Decoding it as a nested container that may not
+        // be there keeps an older gateway's body — one with no `tokens` at all,
+        // or one with `tokens: null` when statistics are off — from failing the
+        // whole of `/gw/usage` and taking the quota figures down with it.
+        let rates = try? container.nestedContainer(keyedBy: RateKeys.self, forKey: .perSecond)
+        input = try rates?.decodeIfPresent(Double.self, forKey: .input)
+        output = try rates?.decodeIfPresent(Double.self, forKey: .output)
+        cacheCreation = try rates?.decodeIfPresent(Double.self, forKey: .cacheCreation)
+        cacheRead = try rates?.decodeIfPresent(Double.self, forKey: .cacheRead)
+    }
+
+    /// Input-equivalent tokens an hour, or `nil` when the body did not carry a
+    /// rate this app may state.
+    ///
+    /// **All four counters or none**, which is a stricter rule than the one
+    /// `TokenCounts` follows over the same four numbers — and deliberately. There
+    /// an unnamed counter is worth zero and the surfaces print `≥` in front of
+    /// the total; here the figure is the largest thing on the popover and has no
+    /// such marker, so a rate missing `output_tokens` would understate by five
+    /// times its share and say nothing about it. Unknown is not zero (§2.7), and
+    /// with nowhere to write the caveat the answer is no figure.
+    ///
+    /// A window of zero or less is the same refusal for the same reason: the
+    /// gateway divided by it, so whatever came back is not a rate.
+    func perHour(_ weights: TokenWeights = .inputEquivalent) -> Double? {
+        guard let windowSeconds, windowSeconds > 0,
+              let input, let output, let cacheCreation, let cacheRead else { return nil }
+        let perHour = (input * weights.input
+            + output * weights.output
+            + cacheCreation * weights.cacheCreation
+            + cacheRead * weights.cacheRead) * 3600
+        // A negative rate is not a slower one, and an infinity is not a faster
+        // one: both are a body this app cannot state.
+        //
+        // **Asked of the figure that leaves, not of the sum behind it.** The
+        // check stood on the per-second sum while the value returned was that
+        // sum times 3600, and the multiplication carries a body over the edge
+        // the check had just cleared: `"input_tokens": 1e306` is valid JSON and
+        // a finite rate, and 3600 times it is `+inf` — which the lead figure
+        // prints as `infB/h` and the ramp pins red. One statement over the
+        // product refuses everything the two statements over the sum refused,
+        // because 3600 moves neither the sign nor the finiteness the other way.
+        guard perHour.isFinite, perHour >= 0 else { return nil }
+        return perHour
+    }
+}
+
+/// The `fleet` block of `GET /gw/usage`. The seven-day window and the live token
+/// rate have readers; nothing else does.
 struct FleetUsage: Sendable, Decodable, Equatable {
     let sevenDay: FleetWindow?
+    let tokens: TokenRate?
 
     enum CodingKeys: String, CodingKey {
         case sevenDay = "seven_day"
+        case tokens
     }
 }
 
@@ -364,10 +452,10 @@ struct HistorySeries: Sendable, Decodable {
 /// line §4 removed: with both halves polled once a minute the two sentences moved
 /// together and said the same thing twice.
 ///
-/// There is one attempt stamp left, `fleetLoadCheckedAt`, and it is the exception
+/// There is one attempt stamp left, `allowanceCheckedAt`, and it is the exception
 /// that proves the rule: nothing draws it, its single reader is the schedule that
 /// decides whether this pass fetches the histories, and it exists precisely so
-/// that `fleetLoadFetchedAt` may go on meaning "when the figure arrived" while
+/// that `allowanceFetchedAt` may go on meaning "when the figure arrived" while
 /// the retry moves without it. That is the same shape as the popover's own
 /// `UsageHistoryModel.checkedAt` — a live reader, no line on screen — and the
 /// same distinction: a stamp that moves on a failed attempt must never be the one
@@ -384,6 +472,18 @@ struct UsageSnapshot: Sendable {
     /// `fleet.seven_day.mean`, as computed by the gateway. `nil` when no account
     /// contributed to it.
     var fleetSevenDayMean: Double?
+    /// Input-equivalent tokens an hour, right now, as the gateway measured them
+    /// over its own short window (`TokenRate`). The headline's lead figure.
+    ///
+    /// It arrives with the quota half and is as of `quotaFetchedAt`, which is why
+    /// it lives beside the mean rather than beside `sustainable`: nothing here
+    /// estimates it, and the ten-minute cadence of the histories has no hold on
+    /// it. `nil` when the gateway named no rate — an older gateway with no
+    /// `tokens` block, statistics turned off, or a window of zero.
+    ///
+    /// Zero is a reading and not an absence: a fleet with nothing running spends
+    /// nothing, and that is a true thing to draw.
+    var fleetTokenRate: Double?
     var accounts: [AccountUsage]
     /// Spend per slug directory of `~/.claude/projects`, already joined from
     /// session ids.
@@ -403,23 +503,33 @@ struct UsageSnapshot: Sendable {
     /// nodes, mostly. Not an error: it is real spend with no local owner.
     var unmatched: TokenCounts
     var unmatchedSessions: Int
-    /// Supply against demand over the week, worked out from the accounts'
-    /// histories (`FleetCapacity`). `nil` while nothing has been worked out yet,
-    /// and `nil` again when a pass asked and found no figure — the metric
-    /// answers `nil` for three different reasons and none of them is a number
-    /// (see the popover's headline, which has to draw all three the same).
-    var fleetLoad: FleetLoad?
-    /// When `fleetLoad` last *arrived*, which is not when it was last asked for.
-    /// Its own stamp because it is on its own schedule: the histories are fetched
-    /// once every `UsageStore.fleetLoadIntervalSeconds`, not once a minute with
-    /// the rest, so this figure is ordinarily the oldest thing the popover holds.
+    /// What the fleet may spend an hour and still last the week
+    /// (`FleetCapacity.sustainable`) — the allowance the lead figure is stated
+    /// against, and the denominator of the ratio both surfaces are coloured by.
+    ///
+    /// `nil` while nothing has been worked out yet, and `nil` again when a pass
+    /// asked and found no figure: the allowance refuses for several different
+    /// reasons and none of them is a number (see the popover's headline, which
+    /// has to draw all of them the same).
+    ///
+    /// It used to sit beside a second figure, the week's estimated *load*, on the
+    /// same two stamps and the same blame. That figure is gone — the gateway
+    /// measures the demand directly (`fleetTokenRate`), so estimating it was
+    /// estimating something already known — and this one kept the stamps, being
+    /// the same half of the pass and the same two requests.
+    var sustainable: FleetCapacity.SustainableRate?
+    /// When `sustainable` last *arrived*, which is not when it was last asked
+    /// for. Its own stamp because it is on its own schedule: the histories are
+    /// fetched once every `UsageStore.allowanceIntervalSeconds`, not once a
+    /// minute with the rest, so this figure is ordinarily the oldest thing the
+    /// popover holds.
     ///
     /// What reads it is the age ceiling both surfaces apply
-    /// (`UsagePopoverView.headlineLoad`): past two of those intervals the figure
+    /// (`UsagePopoverView.historiesAreFresh`): past two of those intervals the figure
     /// is not drawn at all. It is deliberately not what the footer dates the
     /// screen by — a stamp may only date something on screen, and by the time
     /// this one would be worth a line the figure it belongs to is gone.
-    var fleetLoadFetchedAt: Date?
+    var allowanceFetchedAt: Date?
     /// When the histories were last *asked for*, answered or not. The schedule
     /// is decided on this one and nothing else reads it.
     ///
@@ -432,11 +542,12 @@ struct UsageSnapshot: Sendable {
     /// not move, or a frozen number passes for a fresh one — which is the defect
     /// that took the app's last attempt stamp away, and here it would keep a
     /// figure past the ceiling that is supposed to drop it.
-    var fleetLoadCheckedAt: Date?
-    /// Why `/gw/usage/<label>/history` did not answer on the last pass that
-    /// tried. Same rule as the other two halves: the previous `fleetLoad` stays
-    /// where it is and only the blame changes.
-    var fleetLoadFailure: String?
+    var allowanceCheckedAt: Date?
+    /// Why `/gw/usage/<label>/history` — or the `/gw/sessions` call beside it —
+    /// did not answer on the last pass that tried. Same rule as the other two
+    /// halves: the previous `sustainable` stays where it is and only the blame
+    /// changes.
+    var allowanceFailure: String?
     /// Why `/gw/usage` did not answer on the last pass. The account figures next
     /// to it are the previous ones, kept on purpose: slightly stale beats blank.
     var quotaFailure: String?
@@ -448,15 +559,16 @@ struct UsageSnapshot: Sendable {
                                      since: .distantPast,
                                      truncated: false,
                                      fleetSevenDayMean: nil,
+                                     fleetTokenRate: nil,
                                      accounts: [],
                                      tokensBySlug: [:],
                                      contested: [],
                                      unmatched: .zero,
                                      unmatchedSessions: 0,
-                                     fleetLoad: nil,
-                                     fleetLoadFetchedAt: nil,
-                                     fleetLoadCheckedAt: nil,
-                                     fleetLoadFailure: nil,
+                                     sustainable: nil,
+                                     allowanceFetchedAt: nil,
+                                     allowanceCheckedAt: nil,
+                                     allowanceFailure: nil,
                                      quotaFailure: nil,
                                      sessionsFailure: nil)
 
@@ -482,11 +594,11 @@ struct UsageSnapshot: Sendable {
     /// perfectly fresh quota figure.
     ///
     /// All three halves, because its one reader is `--dump`, and a half that
-    /// fails without saying so there is a half nobody can debug: the load
-    /// figure's own requests are the only ones the app makes that no surface
-    /// blames out loud.
+    /// fails without saying so there is a half nobody can debug: the allowance
+    /// half's own requests are the only ones the app makes that no surface blames
+    /// out loud.
     var failureText: String? {
-        let all = [quotaFailure, sessionsFailure, fleetLoadFailure].compactMap { $0 }
+        let all = [quotaFailure, sessionsFailure, allowanceFailure].compactMap { $0 }
         return all.isEmpty ? nil : all.joined(separator: "; ")
     }
 
