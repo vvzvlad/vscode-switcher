@@ -1,168 +1,37 @@
 import Foundation
 
-/// Supply against demand over a week: whether the quota lasts until the windows
-/// reset.
+/// What a week of quota may be spent at, and everything the figure is built
+/// from.
 ///
-/// Utilisation per account cannot answer that question. The gateway routes
-/// across several accounts, and each account's seven-day window resets on its
-/// own schedule, handing back a whole 100 percentage points when it turns over.
-/// So "89% spent" says only where one account stands inside a window that may
-/// end in an hour or in six days; it says nothing about whether the week runs
-/// out. What answers it is a rate against a supply:
+/// Utilisation per account does not answer "will the quota last". The gateway
+/// routes across several accounts, and each account's seven-day window resets on
+/// its own schedule, handing back a whole 100 percentage points when it turns
+/// over. So "89% spent" says only where one account stands inside a window that
+/// may end in an hour or in six days.
 ///
-///     capacity = 100 pp x accounts                     per 7 days
-///     demand   = sum over accounts of (pp/h) x 168     per 7 days
-///     load     = demand / capacity x 100
+/// **Demand is no longer estimated here, and that is the whole shape of this
+/// file.** It used to be, two ways at once — an average burn over the window
+/// stretched to a week, and a projection off the recent work hours — and the
+/// answer was compared against a supply of `100 pp x accounts`. Both are gone,
+/// because the gateway now *measures* the demand: `GET /gw/usage` publishes a
+/// live token rate over its own five-minute window (`TokenRate`), which is the
+/// same quantity without an estimator in front of it. What is left here is the
+/// other side of the comparison — what that rate may be, in the same unit:
 ///
-/// Measured live 2026-08-17 over three accounts: capacity 300 pp/week, demand
-/// 378 pp/week, load 126% — the week was being asked for a quarter more than it
-/// holds.
+///     price of a point  = tokens spent over the window / points burned over it
+///     allowed work rate = (capacity - a week of sleeping) / a week of work hours
+///     allowance         = allowed work rate x price of a point   [tokens/hour]
 ///
-/// **Demand is estimated two ways, and the calculation window picks which.**
-/// A window of a day or more contains a whole sleep cycle, so the plain average
-/// over it is honest on its own and is extrapolated to a week exactly as it
-/// always was. A window shorter than a day cannot contain one, and a plain
-/// average over it is biased by whichever part of the day it happened to land
-/// on: six hours of an evening read as a catastrophe, the same six hours over a
-/// morning read as an idle fleet — measured 2026-08-18 on the live series, the
-/// fleet's hourly rate runs 8.49 pp/h at 18:00 against 0.00 pp/h from 07:00 to
-/// 14:00. The projection is the correction for exactly that. It takes the rate
-/// from the recent *work* hours and pays the sleeping hours their own small
-/// rate, so a short window buys responsiveness without buying the bias
-/// (`projected`, and the boundary is `projectionWindowHours`).
-///
-/// Both paths answer with the same `FleetLoad`, and nothing downstream learns
-/// which one ran: the surfaces, the guards, the colour ramp and the two stamps
-/// read `percent`, `isLowerBound` and `accounts` and no more.
+/// The machinery the two estimators were built on is still here, because the
+/// allowance is built on the same machinery: the burn rule and its guards, the
+/// hour-by-hour decomposition, and the split of the day into working and
+/// sleeping hours. What went with the estimators is the arithmetic that turned
+/// them into a week's demand, and the setting that chose between the two.
 ///
 /// Nothing here fetches anything: it reads the series `UsageClient` already
 /// brought back.
 
-/// What one pass over the fleet found.
-struct FleetLoad: Sendable, Equatable {
-    /// Demand over capacity, in per cent. 100 is a fleet asked for exactly what
-    /// it has; above that the quota runs out before the windows come back.
-    let percent: Double
-    /// An account sat at its ceiling while it was measured, so the demand it
-    /// could not serve never entered its series at all: the real figure is at
-    /// least this one, and the surface that prints it owes the reader a `≥`.
-    /// Live example: acc2 spent 34 samples at 100 during the last 48 h.
-    ///
-    /// What it carries is that demand was suppressed, and nothing about how
-    /// much: the requests an exhausted account turned away leave no trace to
-    /// count, so the gap between this figure and the truth is unbounded — an
-    /// account blocked for an hour and one blocked for two days raise the same
-    /// flag. It is a warning that the number is a floor, not a margin on it.
-    ///
-    /// An account that spent the *whole* interval at the ceiling does not raise
-    /// it, because it is not counted at all (`measure` refuses it, for the
-    /// reason given there); that fleet is smaller by one in `accounts` instead.
-    let isLowerBound: Bool
-    /// How many accounts actually contributed a rate — which is exactly how
-    /// many were counted into capacity. Not how many the gateway knows about.
-    let accounts: Int
-    /// The shortest per-account interval that went in. The answer is only as
-    /// well measured as its worst-measured contributor, and the depths differ:
-    /// 2.16 / 2.18 / 2.74 days over acc2 / acc3 / main, measured 2026-08-17
-    /// (51.75 / 52.43 / 65.85 h).
-    ///
-    /// The gateway's `max_points` cap is not what makes the shallowest shallow,
-    /// and the obvious reading of these three numbers is the wrong one: *two* of
-    /// the accounts come back `truncated` at 2000 points, and the one that does
-    /// not — main, at 1581 — is the deepest of the three. What separates them is
-    /// how hard the gateway watches each account: 38.6 and 38.1 readings an hour
-    /// on acc2 and acc3 against main's 24.0. The cap counts points, not hours,
-    /// so the same 2000 points cover fewer hours the faster the samples are
-    /// taken, and these spans belong to the day they were measured rather than
-    /// to the source.
-    ///
-    /// It means the same thing on both paths and it is not what either figure is
-    /// *built* from: the window average is built from the endpoints of that span,
-    /// and the projection from the last few work hours inside it
-    /// (`projection.recentWorkHours`) plus the hour-of-day split taken over the
-    /// whole of it. What it says on both is how much watching stands behind the
-    /// answer, which is why it survived the projection: a day-and-a-half of
-    /// history classifies the hours of the day about as well as it measures a
-    /// rate, which is to say only just.
-    let measuredHours: Double
-    /// What the projection was built from, or `nil` when the window average
-    /// produced this figure. The presence of the value *is* which estimator ran
-    /// — there is no separate flag to disagree with it.
-    ///
-    /// Nothing on any surface reads this. It exists for `--dump`, which owes the
-    /// reader enough to rebuild the estimate by hand: a figure that moved because
-    /// a setting moved must not look like a figure that moved because the fleet
-    /// did.
-    let projection: Projection?
-
-    /// The parts of a projected demand, in the units the projection works in.
-    ///
-    /// `demand = recentWorkRate x workHoursPerDay x 7 + sleepRate x sleepHoursPerDay x 7`,
-    /// both rates being fleet-wide sums of per-account rates, in percentage
-    /// points per hour.
-    struct Projection: Sendable, Equatable {
-        /// How many hours of the day the fleet was found to be working in.
-        /// Between 0 and 24: 24 is a fleet that burns around the clock, and then
-        /// the projection is arithmetically the window average with a fresher
-        /// rate; 0 is a fleet that burned nothing at all, and then demand is 0.
-        let workHoursPerDay: Int
-        /// Fleet pp/h over the most recent `recentWorkHours` of work hours.
-        let recentWorkRate: Double
-        /// Fleet pp/h over the sleeping hours of the whole measured history.
-        /// Small but not zero — background agents do spend at night: 0.129 pp/h
-        /// over three accounts, measured 2026-08-18.
-        let sleepRate: Double
-        /// How many work hours the recent rate actually came from, taken from
-        /// the account that could offer the fewest. It is at least
-        /// `FleetCapacity.minimumRecentWorkHours` and usually a little more than
-        /// asked for, because the scan stops on the bucket that crosses the
-        /// asked-for total rather than inside it.
-        let recentWorkHours: Double
-
-        /// The rest of the day. Named rather than derived at each use, because
-        /// the two halves have to add up to 24 in every reader.
-        var sleepHoursPerDay: Int { 24 - workHoursPerDay }
-    }
-
-    /// Spelled out rather than left to the memberwise initialiser so the
-    /// projection can default to absent. Everything that builds one of these by
-    /// hand — the surface tests, all twelve of them — is describing a figure to
-    /// draw, and how it was estimated is not something a surface knows or draws.
-    init(percent: Double,
-         isLowerBound: Bool,
-         accounts: Int,
-         measuredHours: Double,
-         projection: Projection? = nil) {
-        self.percent = percent
-        self.isLowerBound = isLowerBound
-        self.accounts = accounts
-        self.measuredHours = measuredHours
-        self.projection = projection
-    }
-
-    /// At or above this the fleet is being asked for more than the week holds.
-    ///
-    /// Named once because several rules have to agree about it, and a boundary
-    /// written twice is a boundary that can be moved once. Two of them read it
-    /// now: it is the middle anchor of the colour ramp both surfaces are painted
-    /// with (`UsagePopoverView.greenLoadPercent`, where the ramp is green), and
-    /// it is the one place a colour rule is still a step rather than a ramp
-    /// (`MenuBarIcon.warningColor`, below).
-    static let capacityPercent: Double = 100
-
-    /// Demand has caught up with supply. `>=`, not `>`: exactly 100 is a week
-    /// with nothing left over, which is the state the warning is about.
-    ///
-    /// **Nothing chooses a colour with this.** The colour of both surfaces is a
-    /// continuous ramp over the load (§4), and a figure either side of 100 is a
-    /// hair either side of the same green. What this still decides is whether the
-    /// status item's frame and number are painted at all — a fleet at 300% just
-    /// after its windows turned over has no fill to colour, so the warning has to
-    /// go on the ink, and below capacity the picture stays calm.
-    var isOverCapacity: Bool { percent >= Self.capacityPercent }
-}
-
-/// The arithmetic of `FleetLoad`. Stateless, and deliberately not isolated to
+/// The arithmetic of the allowance. Stateless, and deliberately not isolated to
 /// any actor: it is pure arithmetic over values already in hand, and a
 /// `@MainActor` annotation here would drag every `nonisolated async` caller onto
 /// the main thread the moment it read one of the constants below (see the note
@@ -189,69 +58,30 @@ enum FleetCapacity {
     /// its quota, and its burn comes out negative.
     static let resetDropThreshold: Double = 5
 
-    /// The shortest interval an account may be extrapolated from.
+    /// The shortest interval `measure` will answer over.
     ///
-    /// The measured rate is multiplied by `168 / span` to reach a week, so a
-    /// short span is a large multiplier over a small measurement: at two hours
-    /// of history a single percentage point — the exact size of the sawtooth —
-    /// becomes 84 pp/week, more than four fifths of an account's whole quota.
-    /// Six hours holds the multiplier at 28 and the sawtooth's worth at 28
-    /// pp/week, which is noise the answer can carry.
+    /// It was chosen for an estimator that no longer exists: the measured rate
+    /// was multiplied by `168 / span` to reach a week, so a short span was a
+    /// large multiplier over a small measurement — at two hours of history a
+    /// single percentage point, the exact size of the sawtooth, became 84 pp/week
+    /// and four fifths of an account's whole quota. Six hours held the multiplier
+    /// at 28.
     ///
-    /// An account below this contributes neither a rate nor its 100 pp of
-    /// capacity: an account we could not measure is not an account that spent
-    /// nothing (§2.7, "unknown is not zero").
+    /// **Nothing on the app's path reaches it now.** The allowance goes through
+    /// `measureHourly`, whose own floor is a whole day (`minimumProjectionHours`),
+    /// and a day is four times this. It stays because `measure` stays, and
+    /// `measure` stays because the hour-by-hour decomposition is checked against
+    /// it — see the note there.
     static let minimumMeasuredHours: Double = 6
 
-    /// The calculation window at which the estimator changes: below it the
-    /// projection, at it and above it the window average.
+    /// The shortest history an account's day may be split from, which is the
+    /// floor everything the app computes actually stands on.
     ///
-    /// It is a day because a day is what holds a whole sleep cycle. Anything
-    /// shorter averages over a slice of the day and inherits whichever slice it
-    /// got — on the live fleet the extremes of the hour-of-day profile are
-    /// 8.49 pp/h at 18:00 and 0.00 pp/h across 07:00–14:00 (2026-08-18, three
-    /// accounts over 46.7 / 55.7 / 70.2 h), so a six-hour average is anywhere
-    /// between nothing and three and a half times the day's mean of 2.47 pp/h
-    /// depending only on when it was taken. At a day and over there is nothing
-    /// for the projection to correct and it would be machinery for nothing.
-    static let projectionWindowHours: Double = 24
-
-    /// The fewest work hours the recent rate may be taken from.
-    ///
-    /// The rate is a burn over a span, and the span's endpoints each carry the
-    /// one-sided ±1 pp sawtooth (§4), so the error in the rate is at most one
-    /// point spread over the window — exactly `1 / hours` pp/h, confirmed rather
-    /// than assumed by sliding every window position across the live history on
-    /// 2026-08-18 and comparing raw endpoints against endpoints taken as a
-    /// median of five: the largest disagreement is 0.4988, 0.2494, 0.1666,
-    /// 0.1244 and 0.0830 pp/h at 2, 4, 6, 8 and 12 work hours, which is `1/N` to
-    /// three figures every time. In load points over a three-account fleet that
-    /// is `rate x work hours x 7 / 3`, and at 16 work hours in the day —
-    /// which is what these figures were computed at, the split having since
-    /// answered 14 — **18.6, 9.3, 6.2, 4.7 and 3.1 points**; at 14 the same
-    /// column is 16.3, 8.1, 5.4, 4.1 and 2.7.
-    /// The median disagreement is 0.0000 at every N — the tooth is rare, not
-    /// gradual, so what these numbers bound is the bad window rather than the
-    /// usual one.
-    ///
-    /// Four is where that stops dominating. At 2 the worst case is 18.6 points
-    /// on a figure whose whole warning band is 30 points wide (100 to 130, §4),
-    /// which is to say the noise can carry the reading from calm to red on its
-    /// own; at 4 it is 9.3, at the default 6 it is 6.2. Below four there is no
-    /// figure rather than a noisy one — the same trade `minimumMeasuredHours`
-    /// makes for the window average.
-    static let minimumRecentWorkHours: Double = 4
-
-    /// The shortest history an account may be *projected* from, as against
-    /// averaged over.
-    ///
-    /// A day, and for a different reason than `minimumMeasuredHours`: the
-    /// projection splits the day into work hours and sleeping ones, and a series
-    /// shorter than a day has not seen every hour of the day even once. An hour
-    /// nobody watched is not a sleeping hour, it is an unknown one, and unknown
-    /// is not zero (§2.7). An account below this contributes neither demand nor
-    /// its 100 pp of capacity, exactly as one with too little history does on the
-    /// other path.
+    /// A day, because the split sorts the hours of the day into working and
+    /// sleeping ones and a series shorter than a day has not seen every hour of
+    /// the day even once. An hour nobody watched is not a sleeping hour, it is an
+    /// unknown one, and unknown is not zero (§2.7). An account below this
+    /// contributes neither its spending nor its 100 pp of capacity.
     private static let minimumProjectionHours: Double = 24
 
     /// An hour of the day counts as a work hour when the fleet burns at least
@@ -326,9 +156,9 @@ enum FleetCapacity {
     /// re-measured 2026-08-18 over 5844 steps on three accounts: the deepest
     /// fall that is not a reset is exactly −1.0 pp on all three), and the truth
     /// inside a window cannot fall. So a fall past this with no reset to explain
-    /// it is something restoring the window, and that is the refusal both
-    /// estimators make — `windowAverage` over the whole span, `projected` over
-    /// each step.
+    /// it is something restoring the window, and that is the refusal both ways
+    /// of reading a series make — `measure` over the whole span, `hourBuckets`
+    /// over each step.
     private static let sawtoothPP: Double = 1
 
     /// The reading at which an account is out of quota and its demand stops
@@ -359,137 +189,28 @@ enum FleetCapacity {
     /// They do not match the shortfalls above and never did.
     private static let hoursPerWeek: Double = 168
 
-    /// Load over the whole fleet, or `nil` when it cannot be measured.
+    /// What one account's series says about it: the burn over a span, taken
+    /// from the two ends.
     ///
-    /// The window picks the estimator, and the boundary is
-    /// `projectionWindowHours` — strictly under a day is the projection, a day
-    /// and over is the average this function has always taken. The reason is in
-    /// the file header: a window shorter than a day cannot hold a whole sleep
-    /// cycle, so its average is a statement about the part of the day it landed
-    /// on rather than about the week.
+    /// **Nothing the app draws goes through this any more, and it is not dead
+    /// code.** It is the coarse method the fine one is held to. `hourBuckets`
+    /// cuts the same series into clock hours and `burn(over:)` adds them back up,
+    /// and the rule this project pays for in scars is that the two must agree —
+    /// the first prototype of the decomposition was wrong by a whole restored
+    /// window on the one account whose history crossed a reset, and nothing but
+    /// this comparison could have said so (§2.7). Its reader is
+    /// `testHourBucketsReconcileWithTheSpanMethod`, which asks this function for
+    /// a stretch and the buckets for the same one. Delete it and the invariant
+    /// has nothing to reconcile against.
     ///
-    /// The window is the *calculation* window and not the request: on the
-    /// projection path the histories still come back over the fixed span
-    /// `UsageStore.fleetLoadWindowSeconds`, because classifying the hours of the
-    /// day needs a whole day of them however few of those hours the recent rate
-    /// is taken from.
-    static func load(histories: [String: HistorySeries],
-                     accounts: [AccountUsage],
-                     windowHours: Double = Config.default.usageLoadWindowHours,
-                     timeZone: TimeZone = .current) -> FleetLoad? {
-        guard windowHours < projectionWindowHours else {
-            return windowAverage(histories: histories, accounts: accounts)
-        }
-        return projected(histories: histories,
-                         accounts: accounts,
-                         recentWorkHours: windowHours,
-                         timeZone: timeZone)
-    }
-
-    /// Demand as the average burn over the whole measured window, extrapolated
-    /// to a week. The estimator four reviews approved, unchanged.
-    ///
-    /// `accounts` says which accounts the fleet has — a history under a label
-    /// the fleet does not have is not demand anybody can serve — and it hands
-    /// `measure` each account's seven-day `resetsAt`. What it is deliberately
-    /// *not* read for is `utilization` as the right-hand endpoint. That figure
-    /// and the histories come from two different requests polled at two
-    /// different moments, and neither body says which of the two is the later
-    /// one — splicing it onto the end of a series moves that endpoint by a point
-    /// in an unknown direction, and one point is the entire size of the effect
-    /// the endpoint rule below exists to survive. The series' own last sample is
-    /// the endpoint, always.
-    ///
-    /// `resetsAt` crosses that same gap between two requests safely, and the
-    /// difference is what the two figures do with time: `utilization` moves
-    /// every few minutes, so a skew of one poll is a real change of value, while
-    /// a window boundary moves once a week — a minute of skew cannot move it at
-    /// all. For the same reason this function takes no clock: there is nothing
-    /// for it to decide.
-    ///
-    /// Returns `nil` rather than a confident wrong number when no account
-    /// contributed — including the case where every account's history is too
-    /// shallow to extrapolate from. A missing figure beats a wrong one (§2.7).
-    ///
-    /// **The points must be the gateway's own, not smoothed ones**, and whoever
-    /// wires this up has to check: the other loader hands out smoothed points,
-    /// `UsageHistoryModel.load` returning `withoutSourceLag(answer.points)`
-    /// because the chart wants the sawtooth gone. Passing that here is not a
-    /// visible mistake — the filter never touches the ends the burn is taken
-    /// from, and over the live history it changes nothing this reads: 145 / 154 /
-    /// 77 teeth over acc2 / acc3 / main and not one of them at the ceiling,
-    /// because all 120 ceiling readings on acc2 sit in runs (measured
-    /// 2026-08-17, median of three over the non-null `util_7d` readings). The
-    /// exposure is the whole account, and it grew that far when the ceiling
-    /// refusal was added: a lone reading *below* the ceiling among ceiling
-    /// readings — a 99 between two 100s — is exactly the shape a median of three
-    /// deletes, and it is the only thing holding `everBelowCeiling` true for an
-    /// account otherwise pinned at 100. Smooth it away and `measure` refuses the
-    /// account outright, taking its 100 pp of capacity out of the denominator
-    /// along with its demand and moving the fleet figure up. **Up because of
-    /// which account it is**, and not because dropping one always raises the
-    /// figure — dropping an account pulls the load towards the mean of the ones
-    /// that remain, either way round, and `hourBuckets` works that arithmetic
-    /// through. Here the lost account is one pinned at its ceiling, whose
-    /// measured burn is a suppressed near-zero and therefore under that mean, so
-    /// this particular loss can only push upwards. The mirror shape, a
-    /// lone 100 between two 99s, is the cheap one: it costs `hitCeiling`, which
-    /// is the `≥` on a figure that still gets printed.
-    ///
-    /// Both are the ordinary one-sample tooth, common enough to plan for: of the
-    /// downward excursions in the live history 18 / 130, 19 / 136 and 6 / 83 are
-    /// one sample wide over acc2 / acc3 / main (2026-08-17, an excursion being a
-    /// fall too small for a reset that later returns to the level it fell from).
-    /// It has not been caught at the ceiling itself — acc2's ceiling readings
-    /// that day are one unbroken run — but nothing about the ceiling makes the
-    /// two measuring sources agree any better there.
-    private static func windowAverage(histories: [String: HistorySeries],
-                                      accounts: [AccountUsage]) -> FleetLoad? {
-        var demandPerHour = 0.0
-        var contributors = 0
-        var shortestHours = Double.greatestFiniteMagnitude
-        var blocked = false
-
-        for account in accounts {
-            guard let series = histories[account.label],
-                  let measured = measure(series.points,
-                                         resetsAt: account.sevenDay?.resetsAt) else { continue }
-            // Per account, then summed: the accounts have different history
-            // depths, and dividing one total by the longest span would credit
-            // the shallow account with the hours nobody measured it over.
-            demandPerHour += measured.burnPP / measured.hours
-            contributors += 1
-            shortestHours = min(shortestHours, measured.hours)
-            blocked = blocked || measured.hitCeiling
-        }
-
-        guard contributors > 0 else { return nil }
-        // Capacity counts the contributors and nobody else: an account that
-        // could not be measured must never widen the denominator its own demand
-        // is missing from.
-        let capacity = Double(contributors) * quotaPerAccount
-        let demand = demandPerHour * hoursPerWeek
-        return FleetLoad(percent: demand / capacity * 100,
-                         isLowerBound: blocked,
-                         accounts: contributors,
-                         measuredHours: shortestHours,
-                         projection: nil)
-    }
-
-    /// What one account's series says about it.
-    ///
-    /// Internal rather than private because the projection's decomposition has
-    /// to be checked against it: `testHourBucketsReconcileWithTheSpanMethod`
-    /// sums the buckets and asks this function for the same stretch, which is
-    /// the one thing that keeps the two estimators talking about the same burn.
+    /// It carried a third field, `hitCeiling`, and that one *was* dead the moment
+    /// the demand estimators went: the flag reached a surface through the
+    /// window-average estimator alone, and the allowance raises its own from
+    /// `HourlyMeasurement` (`SustainableRate.isLowerBound`).
     struct Measurement {
         /// Percentage points burned over `hours`, never negative.
         var burnPP: Double
         var hours: Double
-        /// The account was at its ceiling at least once while it was measured,
-        /// and below it at least once too — a series that never left the ceiling
-        /// has no `Measurement` at all.
-        var hitCeiling: Bool
     }
 
     /// One account's burn and the span it was burned over, or `nil` when the
@@ -596,7 +317,6 @@ enum FleetCapacity {
         guard hours >= minimumMeasuredHours else { return nil }
 
         var resets = 0
-        var hitCeiling = first.value >= ceilingPercent
         var everBelowCeiling = first.value < ceilingPercent
         var previous = first.value
         for reading in readings.dropFirst() {
@@ -604,7 +324,7 @@ enum FleetCapacity {
             // as a boundary, because a window that turned over while the gateway
             // was not looking turned over all the same.
             if previous - reading.value > resetDropThreshold { resets += 1 }
-            if reading.value >= ceilingPercent { hitCeiling = true } else { everBelowCeiling = true }
+            if reading.value < ceilingPercent { everBelowCeiling = true }
             previous = reading.value
         }
 
@@ -704,7 +424,7 @@ enum FleetCapacity {
         // the reading the new window stopped on, and this side is the one the
         // clamp makes silent.
         let burn = rawChange + quotaPerAccount * Double(resets)
-        return Measurement(burnPP: max(0, burn), hours: hours, hitCeiling: hitCeiling)
+        return Measurement(burnPP: max(0, burn), hours: hours)
     }
 
     // MARK: - The projection
@@ -785,7 +505,7 @@ enum FleetCapacity {
         /// began in, boundary and all. On the live `main` series that bucket
         /// carries 1.0117 h (2026-08-18; it is the only bucket over an hour on any
         /// of the three accounts). It is the **17:00** bucket in local time, which
-        /// is what production splits by — `load` defaults `timeZone` to
+        /// is what production splits by — `sustainable` defaults `timeZone` to
         /// `.current`; "14:00" stood here for a round because the measuring script
         /// labelled its hours in UTC, and this machine runs at UTC+3. The figure
         /// itself re-measures unchanged, but only over a window that covers the
@@ -1032,115 +752,20 @@ enum FleetCapacity {
         return HourlyMeasurement(buckets: buckets, hours: hours, hitCeiling: hitCeiling)
     }
 
-    /// The most recent `wanted` work hours of one account's series, scanning
-    /// back through work hours only and stepping over the sleeping ones.
+    /// Which hours of the local day the fleet works in, 0…23.
     ///
-    /// **Work hours, not clock hours, and that is the point of the scan.** Ask
-    /// for the last six clock hours at ten in the morning and there are no work
-    /// hours in them at all, so the figure would be undefined every morning and
-    /// zero every morning it was not. Scanning back for six *work* hours reaches
-    /// however far it has to — on this fleet's day that is between six and
-    /// twenty clock hours.
+    /// The fleet's rate is the sum of the accounts' own rates, here and in every
+    /// hour of the day — the same "per account, then summed" the window average
+    /// makes, and for the same reason: the accounts are watched over different
+    /// depths, so one total over one span would credit the shallow account with
+    /// hours nobody measured it over.
     ///
-    /// `nil` when what came back is under `minimumRecentWorkHours`: fewer usable
-    /// work hours than asked for is answerable as long as there are enough to
-    /// extrapolate from, and under the floor there is no figure rather than a
-    /// noisy one.
-    private static func recentWorkWindow(_ buckets: [HourBucket],
-                                         workHours: Set<Int>,
-                                         wanted: Double) -> (buckets: [HourBucket], hours: Double)? {
-        var taken: [HourBucket] = []
-        var hours = 0.0
-        for bucket in buckets.reversed() where workHours.contains(bucket.hourOfDay) {
-            taken.append(bucket)
-            hours += bucket.hours
-            if hours >= wanted { break }
-        }
-        guard hours >= minimumRecentWorkHours else { return nil }
-        return (taken, hours)
-    }
-
-    /// Demand as the recent work rate over a week's work hours plus the sleeping
-    /// rate over its sleeping hours.
-    ///
-    /// ```
-    /// demand = recentWorkRate x workHoursPerDay x 7
-    ///        + sleepRate      x sleepHoursPerDay x 7
-    /// ```
-    ///
-    /// **The day is split from the data, not from a schedule.** For each hour of
-    /// the local day the fleet's rate in it is measured over the whole history,
-    /// and an hour counts as a work hour when it burns more than
-    /// `workHourFraction` of the fleet's overall hourly rate. On the live fleet
-    /// that is 14 work hours and a sleeping block from 05:00 to 15:00
-    /// (2026-08-18, three accounts, `#` a work hour):
-    ///
-    /// ```
-    /// 000000000011111111112222
-    /// 012345678901234567890123
-    /// #####..........#########
-    /// ```
-    ///
-    /// The three accounts agree about the shape of that day, which is what makes
-    /// one fleet-wide split the right thing rather than three per-account ones:
-    /// the trough falls on the same hours for all of them and every one of them
-    /// peaks in the evening. Re-measured over the 48 h the app fetches
-    /// (2026-08-18) acc2 reads exactly 0.0 pp/h from 07:00 to 14:00 while main
-    /// and acc3 stay at or under 0.5 there — 0.50 at 09:00 on main, 0.21 at 08:00
-    /// and 0.50 at 10:00 on acc3 — so "each of them reads 0.0" was too strong;
-    /// the fleet itself is at zero only in 07:00, 11:00, 12:00 and 13:00. The
-    /// sleeping rate the split then answers is 0.350 pp/h over the fleet (0.200 /
-    /// 0.050 / 0.100 on main / acc2 / acc3), which is 24.5 pp of demand a week
-    /// and 8.2 load points.
-    ///
-    /// **The classification is thin, and it is the weakest part of the answer.**
-    /// The gateway keeps two to three days, so each hour of the day is observed
-    /// two or three times per account, and the rates come out quantised to whole
-    /// percentage points; recomputed over sub-windows of that history the split
-    /// moves by 0.43 of an hour on average at `workHourFraction` and by more at
-    /// every alternative measured (the numbers are on the constant). One hour
-    /// moved between the classes is worth about 10 load points here. Depth is the
-    /// only cure and it is not on this side of the wire — §2.7 has it ordered as
-    /// issue №6 in the gateway's forge.
-    ///
-    /// **A flat fleet is not a refusal.** If every hour clears the threshold the
-    /// split is 24 work hours and no sleeping ones, and the arithmetic collapses
-    /// to `rate x 168` — the window average with a fresher rate, which is the
-    /// right answer for a fleet that genuinely burns around the clock. The
-    /// instability that worries a reader here is self-cancelling: the split can
-    /// only be unstable when the hourly rates cluster around the mean, and when
-    /// they do, moving an hour from one class to the other moves demand by the
-    /// difference between two rates that are nearly equal. What a flat profile
-    /// cannot do is make the answer wrong, only make the *split* arbitrary. A
-    /// fleet that burned nothing at all lands on the other end — no hour clears a
-    /// threshold of zero, so there are no work hours, all 24 hours are sleeping
-    /// hours at a rate of zero, and demand is zero. That is a fleet at rest
-    /// reading 0%, which is what it is.
-    ///
-    /// It costs 0.706 ms against the window average's 0.126 ms over the live
-    /// fleet — 5105 points, release build, best of twenty, measured 2026-08-18.
-    /// Both are once every ten minutes and off the main thread, so the cost is
-    /// named here to save the next reader the measurement rather than because
-    /// anything has to be done about it.
-    private static func projected(histories: [String: HistorySeries],
-                                  accounts: [AccountUsage],
-                                  recentWorkHours: Double,
-                                  timeZone: TimeZone) -> FleetLoad? {
-        var measured: [HourlyMeasurement] = []
-        for account in accounts {
-            guard let series = histories[account.label],
-                  let hourly = measureHourly(series.points,
-                                             resetsAt: account.sevenDay?.resetsAt,
-                                             timeZone: timeZone) else { continue }
-            measured.append(hourly)
-        }
-        guard !measured.isEmpty else { return nil }
-
-        // The fleet's rate is the sum of the accounts' own rates, here and in
-        // every hour of the day — the same "per account, then summed" the window
-        // average makes, and for the same reason: the accounts are watched over
-        // different depths, so one total over one span would credit the shallow
-        // account with hours nobody measured it over.
+    /// **One reader, and there used to be two.** The demand estimator spread a
+    /// week's spending over it; that estimator is gone, and `sustainable` — which
+    /// uses it to work out what a working hour may cost — is all that is left. So
+    /// the split is computed exactly once per pass now, where before it was
+    /// computed twice over the same series in the same pass.
+    private static func workHoursOfDay(_ measured: [HourlyMeasurement]) -> Set<Int> {
         let overall = measured.reduce(0.0) { $0 + rate(over: $1.buckets) }
         let threshold = overall * workHourFraction
         var workHours: Set<Int> = []
@@ -1150,56 +775,260 @@ enum FleetCapacity {
             }
             if fleetRate > threshold { workHours.insert(hour) }
         }
+        return workHours
+    }
 
-        var recentWorkRate = 0.0
-        var sleepRate = 0.0
-        var shortestRecent = Double.greatestFiniteMagnitude
+    // MARK: - The allowance
+
+    /// What the fleet may spend an hour of work and still have the week last,
+    /// in tokens an hour — and everything the figure was built from.
+    ///
+    /// The unit is the point: the gateway now says how fast tokens are going
+    /// (`TokenRate`), and a rate is only a warning against another rate. A per
+    /// cent of a seven-day window cannot be compared with five minutes of
+    /// spending without an arithmetic nobody can do in their head.
+    struct SustainableRate: Sendable, Equatable {
+        /// The allowance itself: input-equivalent tokens an hour.
+        let tokensPerHour: Double
+        /// What one percentage point of a window costs in input-equivalent
+        /// tokens — the conversion the whole figure turns on. Live on this fleet
+        /// it is 7.04 M (2026-08-24, 48 h window).
+        let tokensPerPoint: Double
+        /// Percentage points an hour a working hour may burn, which is the
+        /// allowance before it is priced in tokens.
+        let allowedWorkRate: Double
+        /// How many hours of the day the fleet was found to be working in, and
+        /// the rate the rest of them were measured at (`workHoursOfDay`).
+        let workHoursPerDay: Int
+        let sleepRate: Double
+        /// How many accounts stood behind it — which is exactly how many were
+        /// counted into capacity.
+        let accounts: Int
+        /// The shortest per-account history that went in: how much watching
+        /// stands behind the answer. The answer is only as well measured as its
+        /// worst-measured contributor, and the depths differ — 2.16 / 2.18 / 2.74
+        /// days over acc2 / acc3 / main, measured 2026-08-17.
+        ///
+        /// The gateway's `max_points` cap is not what makes the shallowest
+        /// shallow, and the obvious reading of those three numbers is the wrong
+        /// one: *two* of the accounts come back `truncated` at 2000 points, and
+        /// the one that does not — main, at 1581 — is the deepest of the three.
+        /// What separates them is how hard the gateway watches each account: 38.6
+        /// and 38.1 readings an hour on acc2 and acc3 against main's 24.0. The cap
+        /// counts points, not hours.
+        let measuredHours: Double
+        /// An account sat at its ceiling while it was measured, so the points it
+        /// was blocked from burning never entered its series at all.
+        ///
+        /// **It makes the allowance too generous, which is the direction that
+        /// matters**, and it does so three ways at once — all three pushing the
+        /// allowance up and the ratio drawn against it down.
+        ///
+        /// Suppressed points are missing from the denominator of
+        /// `tokensPerPoint`, so a point reads dearer than it is, and the
+        /// allowance is that price times a rate. They are missing from
+        /// `sleepRate` too, so the week of nights costs less than it did and
+        /// leaves more behind. **And the third is the largest: a blocked account
+        /// brings its whole 100 pp into `capacity` whatever it managed to spend**
+        /// — capacity counts contributors, not what they were allowed to burn —
+        /// so an account blocked for most of the window adds a full week's quota
+        /// to the supply while adding almost nothing to the demand it is netted
+        /// against. Whatever is drawn against the allowance is therefore a floor.
+        /// Live example: acc2 spent 34 samples at 100 during a 48 h window,
+        /// 2026-08-17.
+        ///
+        /// **Where the `≥` actually reaches, and where it does not.** The mark
+        /// belongs to `UsagePopoverView.ratioLabel`, which since the lead became
+        /// a pair of rates has exactly one caller: the menu bar's accessibility
+        /// description (`MenuBarIcon.describe`). `--dump` carries the same flag
+        /// but writes its own ASCII `>=` inline, so it is a second reader of the
+        /// flag and not of this string. A sighted reader of the popover gets
+        /// neither — the
+        /// quantity the popover prints is `of 19.9M/h sustainable`, which is the
+        /// inflated one and carries no mark at all. That is deliberate and it is
+        /// the trade §4 records: the caption is a measurement in tokens, and a
+        /// `≥` in front of a budget reads as "at least this much is allowed",
+        /// which is the opposite of what the flag means.
+        ///
+        /// What it carries is that measurement was suppressed, and nothing about
+        /// how much: the requests an exhausted account turned away leave no trace
+        /// to count, so the gap between this figure and the truth is unbounded —
+        /// an account blocked for an hour and one blocked for two days raise the
+        /// same flag. It is a warning that the number is a floor, not a margin on
+        /// it. The sleeping rate moves the same way for the same reason, and the
+        /// exchange rate is the larger of the two terms.
+        ///
+        /// An account that spent the *whole* window at the ceiling does not raise
+        /// it, because it is not counted at all (`measureHourly` refuses it, for
+        /// the reason given there); that fleet is smaller by one in `accounts`
+        /// instead.
+        let isLowerBound: Bool
+
+        /// The rest of the day. Named rather than derived at each use, because
+        /// the two halves have to add up to 24 in every reader.
+        var sleepHoursPerDay: Int { 24 - workHoursPerDay }
+    }
+
+    /// The allowance, or `nil` when the fleet cannot say what it may spend.
+    ///
+    /// ```
+    /// tokens per point = tokens spent over the window / points burned over it
+    /// allowed work rate = (capacity - a week of sleeping) / a week of work hours
+    /// allowance         = allowed work rate x tokens per point
+    /// ```
+    ///
+    /// **It has to be the working rate and not the flat weekly average**, and
+    /// that is the whole reason this function is not one division. What it is
+    /// compared against is measured over five minutes — that is to say, while
+    /// somebody is working. Spread the same capacity over all 168 hours of the
+    /// week instead and every working hour of every healthy week reads as an
+    /// overrun; this project already threw the gateway's own `pace` away for
+    /// exactly that (§2.7). So the sleeping hours are paid at the rate they were
+    /// measured at, and what is left of the week is spread over the hours
+    /// somebody is actually at the keyboard.
+    ///
+    /// **The two measurements must span the same window.** The points come from
+    /// the histories this pass fetched and the tokens from `/gw/sessions` asked
+    /// with the same `since`, which the gateway honours: 22, 32, 38 and 46
+    /// sessions came back for windows of 6, 12, 24 and 48 h (2026-08-24). What
+    /// they do not span *exactly* is measured rather than waved at — the series
+    /// begins where the gateway's retention lets it, which on that day was 0.2 to
+    /// 1.1 minutes after the `since` asked for, or 0.04% of a 48 h window.
+    ///
+    /// **A long window is both safer and cheaper here.** The exchange rate barely
+    /// moves with it — 6.934, 7.047 and 7.044 M tokens per point over windows of
+    /// 12, 24 and 48 h (2026-08-24, three accounts), a spread of 1.6% — while the
+    /// points it divides by are whole numbers, so a short window divides by very
+    /// few of them. At 6 h there is no figure at all on that fleet, and not
+    /// because of noise: `measure` refuses a span under `minimumMeasuredHours`,
+    /// and a series asked for 6 h comes back 5.99 h long. The window is the one
+    /// the histories were fetched over (`UsageStore.historyWindowSeconds`), which is
+    /// 48 h unless the setting takes it higher.
+    ///
+    /// **Its contributors are the accounts whose day could be split**, which is
+    /// the `measureHourly` set — a day of history, and not pinned at the ceiling
+    /// throughout. Capacity counts them and nobody else, exactly as both
+    /// estimators do: an account we could not measure must never widen a
+    /// denominator its own spending is missing from (§2.7).
+    ///
+    /// The tokens, on the other hand, are the fleet's whole spend over the
+    /// window, because `/gw/sessions` reports per session and a session is not
+    /// an account. **The mismatch is real and it errs towards the warning**: a
+    /// refused account's tokens stay in the numerator of the exchange rate while
+    /// its points leave the denominator, so the rate reads high, the allowance
+    /// reads high — and a high allowance makes the fleet look *safer*, which is
+    /// the unsafe direction. It is bounded by how much of the fleet's spend the
+    /// refused account served and it is not observable from here. On the live
+    /// fleet no account has been refused (2026-08-24, three accounts, all three
+    /// contributing).
+    ///
+    /// **Refusals, and what each one answers.** No account with a splittable day
+    /// — the same "unknown is not zero" both estimators make. No points burned
+    /// over the window, which is at once a fleet with nothing to price a token by
+    /// and a fleet at rest with no working hours to spread a week over: there is
+    /// no working rate to allow, and answering the flat weekly average instead
+    /// would be the very comparison the second paragraph refuses. No tokens spent
+    /// over the window — then there is no exchange rate either, and inventing one
+    /// would price every future hour off two numbers that never happened. And a
+    /// week whose sleeping hours already spend the whole capacity, which leaves
+    /// nothing for a working hour to be allowed: the answer there is not "zero
+    /// an hour", because the arithmetic that produced it has gone negative and a
+    /// floor would hide it.
+    ///
+    /// Note which of these is *not* a refusal: a current rate of zero. An idle
+    /// fleet genuinely spends nothing, that is a reading, and it is the caller's
+    /// figure rather than this one's.
+    ///
+    /// **It is the whole cost of the pass now, and it used to be half of it.**
+    /// While the demand estimators existed, this function ran `measureHourly` and
+    /// the split a second time over the same series in the same pass, because the
+    /// figure the estimator produced carried a field meaning "which estimator
+    /// ran" and filling it on the other path would have made that field lie. With
+    /// one reader left there is nothing to duplicate, and the duplication was
+    /// nearly the whole bill: measured 2026-08-24 on this machine over the live
+    /// fleet's own bodies (three accounts, 1616 / 1145 / 1020 readings, release
+    /// build, best of twenty over four runs) this function costs **0.697 to
+    /// 0.741 ms**, of which `measureHourly` over the three series is **0.676 to
+    /// 0.696 ms**. That decomposition is what ran twice, so the pass on the
+    /// projection path cost about twice this and now costs this.
+    ///
+    /// It runs once every ten minutes and off the main thread, so the figures are
+    /// named to save the next reader the measurement rather than because anything
+    /// has to be done about it. Note what they are *not* comparable with: the
+    /// 0.639 ms this comment used to quote was taken by another method on another
+    /// day, and a first cold run of the bench above answered 1.239 ms before
+    /// settling — a number from a different harness is not a baseline.
+    static func sustainable(histories: [String: HistorySeries],
+                            accounts: [AccountUsage],
+                            spentTokens: Double,
+                            timeZone: TimeZone = .current) -> SustainableRate? {
+        var measured: [HourlyMeasurement] = []
         var shortestHours = Double.greatestFiniteMagnitude
-        var contributors = 0
         var blocked = false
-        for account in measured {
-            var recent = 0.0
-            var recentHours = 0.0
-            if !workHours.isEmpty {
-                // An account that cannot fill the window leaves the way one with
-                // too little history does: without its demand and without its
-                // 100 pp of capacity. It keeps its say in the split above, and
-                // that is deliberate — which hours of the day are working ones is
-                // a true thing to have learned from a series too short to take a
-                // recent rate from.
-                guard let window = recentWorkWindow(account.buckets,
-                                                    workHours: workHours,
-                                                    wanted: recentWorkHours) else { continue }
-                recent = rate(over: window.buckets)
-                recentHours = window.hours
-            }
-            recentWorkRate += recent
-            sleepRate += rate(over: account.buckets.filter { !workHours.contains($0.hourOfDay) })
-            // Both minima are taken *before* the counter, which is what makes
-            // them answerable below: a positive `contributors` is exactly the
-            // statement that this line ran at least once, so neither can still
-            // hold its sentinel when the guard lets the figure out.
-            shortestRecent = min(shortestRecent, recentHours)
-            shortestHours = min(shortestHours, account.hours)
-            blocked = blocked || account.hitCeiling
-            contributors += 1
+        for account in accounts {
+            guard let series = histories[account.label],
+                  let hourly = measureHourly(series.points,
+                                             resetsAt: account.sevenDay?.resetsAt,
+                                             timeZone: timeZone) else { continue }
+            measured.append(hourly)
+            shortestHours = min(shortestHours, hourly.hours)
+            blocked = blocked || hourly.hitCeiling
         }
-        guard contributors > 0 else { return nil }
 
-        // Capacity counts the contributors and nobody else, exactly as on the
-        // other path.
-        let capacity = Double(contributors) * quotaPerAccount
-        let workPerDay = workHours.count
-        let demand = recentWorkRate * Double(workPerDay) * daysPerWeek
-            + sleepRate * Double(hoursPerDay - workPerDay) * daysPerWeek
-        return FleetLoad(percent: demand / capacity * 100,
-                         isLowerBound: blocked,
-                         accounts: contributors,
-                         measuredHours: shortestHours,
-                         projection: FleetLoad.Projection(
-                            workHoursPerDay: workPerDay,
-                            recentWorkRate: recentWorkRate,
-                            sleepRate: sleepRate,
-                            recentWorkHours: shortestRecent))
+        // **Nothing asks whether anybody was measured**, and that is the same
+        // omission the statement below documents rather than a second one. The
+        // burn is a sum over the contributors, so a fleet where nobody could be
+        // measured sums nothing and the price of a point refuses it three lines
+        // on. A `!measured.isEmpty` stood here and decided nothing on any input;
+        // it has been taken out, and what stands in its place is
+        // `testThePriceOfAPointDividesByTheContributorsAndNothingElse`, which
+        // pins the link the removal rests on — that the burn is that sum and
+        // only that sum.
+        //
+        // The same burn `measure` takes over the span, asked of the buckets so
+        // that one decomposition serves the whole file: over a whole series the
+        // stretch's edges *are* the first and last readings, which is the case
+        // the two methods agree on exactly (`HourBucket`). Clamped for
+        // `rate(over:)`'s reason — an account whose reading wobbled down by a
+        // point has not un-burned anything.
+        let burned = measured.reduce(0.0) { $0 + max(0, burn(over: $1.buckets)) }
+        // **One statement, and it stands in front of both divisions below.** A
+        // fleet that burned nothing over the window has no points to price a
+        // token by, *and* no work hours to spread a week over: the fleet's rate
+        // is what the threshold is a fraction of, so an hour clears 0.45 of it
+        // whenever that rate is above zero — and the rate is above zero exactly
+        // when the burn is, both being the same clamped sum over the same
+        // buckets. Asking the second half separately was tried and taken back
+        // out: no series reaches it, and a guard nothing can fire is a branch
+        // that cannot execute. What keeps `workHours.count` safe to divide by is
+        // therefore this line plus the test that pins the invariant,
+        // `testAnAnswerAlwaysHasWorkHoursToSpreadTheWeekOver`.
+        //
+        // A fleet at rest is the shape that reaches it, and refusing is the
+        // right answer: what is asked here is what an hour of work may cost, and
+        // a fleet that has not worked has not said. The lead figure it would have
+        // been drawn against is a measured zero, which the surface states on its
+        // own — a rate needs an allowance to be a ratio, and there is none.
+        guard burned > 0, spentTokens > 0 else { return nil }
+        let tokensPerPoint = spentTokens / burned
+
+        let workHours = workHoursOfDay(measured)
+        let sleepRate = measured.reduce(0.0) { total, account in
+            total + rate(over: account.buckets.filter { !workHours.contains($0.hourOfDay) })
+        }
+
+        let capacity = Double(measured.count) * quotaPerAccount
+        let sleepingWeek = sleepRate * Double(hoursPerDay - workHours.count) * daysPerWeek
+        let workingWeek = Double(workHours.count) * daysPerWeek
+        guard capacity - sleepingWeek > 0 else { return nil }
+        let allowedWorkRate = (capacity - sleepingWeek) / workingWeek
+        return SustainableRate(tokensPerHour: allowedWorkRate * tokensPerPoint,
+                               tokensPerPoint: tokensPerPoint,
+                               allowedWorkRate: allowedWorkRate,
+                               workHoursPerDay: workHours.count,
+                               sleepRate: sleepRate,
+                               accounts: measured.count,
+                               measuredHours: shortestHours,
+                               isLowerBound: blocked)
     }
 }

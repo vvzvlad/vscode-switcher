@@ -2680,32 +2680,34 @@ final class ConfigTests: XCTestCase {
         XCTAssertFalse(config.resolvedProjectRoots[0].path.contains("~"))
     }
 
-    /// The load window is one key and it carries hours; its length is what picks
-    /// the estimator (§2.7). A file that does not mention it is the state the
-    /// figure was always computed in, which is what makes the default the thing
-    /// nobody has to know about.
-    func testTheLoadWindowIsTunableAndItsAbsenceIsTheDefault() throws {
+    /// **A key this file has retired is a key nobody has to remove**, and that is
+    /// the whole promise made to a config written before it went.
+    ///
+    /// `usageLoadWindowHours` chose between two ways of estimating the week's
+    /// demand and, by the same number, how deep to fetch. Nothing estimates
+    /// demand any more — the gateway measures it — so both estimators went and
+    /// the key with them. `load` walks the keys it knows rather than the keys the
+    /// file has, so what is left of it is nothing at all: not a default, not a
+    /// warning, no effect on any other field.
+    ///
+    /// Asked alongside a key that *is* read, because "the file was ignored
+    /// wholesale" would satisfy the first half on its own and is the failure this
+    /// is really about — a retired key must not take its neighbours down with it.
+    func testARetiredKeyIsIgnoredWithoutDisturbingTheRest() throws {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("vscode-switcher-config-\(UUID().uuidString).json")
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
 
-        try #"{"scanDepth": 3}"#.write(to: url, atomically: true, encoding: .utf8)
-        XCTAssertEqual(Config.load(from: url).usageLoadWindowHours, 48,
-                       "a config with no such key is a config that asks for what it always got")
-
-        try #"{"usageLoadWindowHours": 6}"#.write(to: url, atomically: true, encoding: .utf8)
-        XCTAssertEqual(Config.load(from: url).usageLoadWindowHours, 6)
-
-        // Under the floor the rate is mostly sawtooth: one point spread over two
-        // hours is 18.6 points of load on a three-account fleet, which is most
-        // of the width of the whole warning band.
-        try #"{"usageLoadWindowHours": 2}"#.write(to: url, atomically: true, encoding: .utf8)
-        XCTAssertEqual(Config.load(from: url).usageLoadWindowHours, Config.default.usageLoadWindowHours,
-                       "a window under \(FleetCapacity.minimumRecentWorkHours) h is refused, not honoured")
-
-        try #"{"usageLoadWindowHours": 4}"#.write(to: url, atomically: true, encoding: .utf8)
-        XCTAssertEqual(Config.load(from: url).usageLoadWindowHours, 4,
-                       "the floor itself is a value to stand on, not one to fall through")
+        try #"{"usageLoadWindowHours": 6, "scanDepth": 3}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        let config = Config.load(from: url)
+        XCTAssertEqual(config.scanDepth, 3,
+                       "a key nobody reads any more took the whole file down with it")
+        XCTAssertEqual(config, {
+            var expected = Config.default
+            expected.scanDepth = 3
+            return expected
+        }(), "the retired key moved something, and it is not supposed to be able to")
     }
 }
 

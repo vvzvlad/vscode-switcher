@@ -1,13 +1,30 @@
 import XCTest
 @testable import VSCodeSwitcher
 
-/// Supply against demand over a week, and the ways of getting it wrong.
+/// The burn rule — how many percentage points an account spent over a span —
+/// and the ways of getting it wrong.
 ///
 /// The one that matters is the first test here: the utilisation series jitters
 /// by ±1 pp, so anything that reads burn as "how much did this go up" reads a
-/// quiet account as a busy one. Everything else holds the shape of the answer —
-/// which accounts are counted, over what span, and when there is no answer at
-/// all.
+/// quiet account as a busy one. Everything else holds the guards around it: what
+/// counts as a reset, when the schedule may be consulted, when there is no
+/// answer at all.
+///
+/// **These used to ask `FleetCapacity.load` and now ask `measure` directly**, and
+/// the reason is that `load` is gone: the week's demand was estimated here and is
+/// now measured by the gateway, so both estimators went with the setting that
+/// chose between them. The rule they were laundering through a fleet aggregation
+/// is `measure`'s, so the fixtures are unchanged and the question is asked one
+/// step closer to where it is answered — a one-account fleet's `percent` was only
+/// ever `burnPP` multiplied and divided back again.
+///
+/// **And `measure` is not on the app's path any more either.** Its reader is
+/// `FleetCapacityProjectionTests.testHourBucketsReconcileWithTheSpanMethod`: the
+/// hour-by-hour decomposition everything else stands on has to add back up to
+/// this, and this is the only thing it can be checked against. The guards below
+/// all live twice — once here over a span, once in `hourBuckets` over each step —
+/// and the tests that the *app* runs through are the ones in the two classes
+/// after this.
 final class FleetCapacityTests: XCTestCase {
 
     // MARK: - Fixtures
@@ -35,30 +52,9 @@ final class FleetCapacityTests: XCTestCase {
         return try UsageFixtures.decode(body, as: HistorySeries.self)
     }
 
-    /// The fleet's membership. `AccountUsage.label` is the key the object sat
-    /// under rather than a field of its own, so the whole report is decoded to
-    /// get labelled accounts — the same path the gateway's answer takes.
-    ///
-    /// `sevenDayResetsAt` is the end of the current window as the gateway
-    /// announces it, given to every account in the list. Left out, the accounts
-    /// come back the way the report reads when the window is unknown — with no
-    /// schedule to place a reset that fell inside a hole.
-    private func fleet(_ labels: [String], sevenDayResetsAt: Date? = nil) throws -> [AccountUsage] {
-        let window = sevenDayResetsAt.map { "{\"seven_day\": {\"resets_at\": \"\($0.formatted(.iso8601))\"}}" }
-        let body = labels.map { "\"\($0)\": \(window ?? "{}")" }.joined(separator: ",")
-        return try UsageFixtures.decode("{\"accounts\": {\(body)}}", as: UsageReport.self).accounts
-    }
-
-    private func histories(_ series: [HistorySeries]) -> [String: HistorySeries] {
-        Dictionary(uniqueKeysWithValues: series.map { ($0.label, $0) })
-    }
-
-    /// The percentage points one account burned, read back out of the answer:
-    /// `percent = burn / hours x 168 / capacity x 100`, and for a one-account
-    /// fleet capacity is exactly 100 pp. Only valid for such a fleet — with two
-    /// accounts of different depth there is no single span to invert.
-    private func burnedPP(_ load: FleetLoad) -> Double {
-        load.percent * load.measuredHours / 168
+    /// The burn one series answers, with no window boundary offered.
+    private func burnedPP(_ series: HistorySeries, resetsAt: Date? = nil) throws -> Double {
+        try XCTUnwrap(FleetCapacity.measure(series.points, resetsAt: resetsAt)).burnPP
     }
 
     // MARK: - Burn is the endpoints, not the steps
@@ -68,8 +64,8 @@ final class FleetCapacityTests: XCTestCase {
     /// A series that rises 0 → 50 over 48 h while jittering by ±1 pp on single
     /// samples. Read by its endpoints it burned 50 pp; summed as positive
     /// deltas every jitter tooth is charged as spend and the answer triples. The
-    /// live case is acc2 over 62 h: 158 pp against a true 50, from 111 spurious
-    /// spikes of one point each.
+    /// live case is acc2 over 46.79 h: 198 pp against a true 56, from 198
+    /// spurious single-point steps (2026-08-18, full depth).
     func testBurnIsTheEndpointsAndNeverASumOfPositiveDeltas() throws {
         // One sample every five minutes over 48 h, as the gateway takes them.
         let samples = 577
@@ -85,14 +81,11 @@ final class FleetCapacityTests: XCTestCase {
                              "the fixture has to be able to fool a delta sum, or this test proves nothing")
 
         let series = try history("main", values.map { Optional($0) }, overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["main"])))
-
-        XCTAssertEqual(burnedPP(load), 50, accuracy: 0.001, """
+        XCTAssertEqual(try burnedPP(series), 50, accuracy: 0.001, """
             burn must come from the endpoints and the resets between them, never from a sum of \
             positive deltas: this series carries \(Int(naive) - 50) jitter teeth of ±1 pp, and \
             summing its rises answers \(Int(naive)) pp for an account that burned 50. \
-            Live: acc2 read 158 pp over 62 h where the true figure was 50.
+            Live: acc2 read 198 pp over 46.79 h where the true figure was 56.
             """)
     }
 
@@ -105,9 +98,7 @@ final class FleetCapacityTests: XCTestCase {
     /// is the only one that can.
     func testAResetInsideTheIntervalIsAHundredPointsRestored() throws {
         let series = try history("main", [100, 100, 0, 25, 50], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["main"])))
-        XCTAssertEqual(burnedPP(load), 50, accuracy: 0.001,
+        XCTAssertEqual(try burnedPP(series), 50, accuracy: 0.001,
                        "the endpoints alone read −50 pp, which is an account that un-burned its quota")
     }
 
@@ -125,9 +116,7 @@ final class FleetCapacityTests: XCTestCase {
     /// readings 90 hours apart by a source that samples once a minute.
     func testTwoFallsInsideOneSpanCollapseToASingleReset() throws {
         let series = try history("main", [10, 90, 5, 95, 30], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["main"])))
-        XCTAssertEqual(burnedPP(load), 120, accuracy: 0.001, """
+        XCTAssertEqual(try burnedPP(series), 120, accuracy: 0.001, """
             30 − 10 over the interval plus the one window that turned over inside it; counting both \
             falls answers 220 pp for an account that could not have spent two windows in two days
             """)
@@ -139,9 +128,7 @@ final class FleetCapacityTests: XCTestCase {
     /// Counted as one it is charged +100 pp that never happened.
     func testALaggingSampleBesideAResetIsNotASecondReset() throws {
         let series = try history("main", [95, 0, 95, 3, 10], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["main"])))
-        XCTAssertEqual(burnedPP(load), 15, accuracy: 0.001, """
+        XCTAssertEqual(try burnedPP(series), 15, accuracy: 0.001, """
             10 − 95 over the interval plus the one window that turned over inside it; counting the \
             lagging sample as a second reset answers 115 pp for an account that burned about 15
             """)
@@ -152,19 +139,16 @@ final class FleetCapacityTests: XCTestCase {
     /// whose window turns over at 45 falls 40 pp, and 5 sits low enough to read
     /// that as the reset it is. Raise the constant past this fall and it goes
     /// uncounted: the interval then reads −25 pp, no schedule is offered to
-    /// place what happened, and the account is refused altogether, leaving both
-    /// halves of the fraction. From below the constant was already held: lower
-    /// it to 1.5 and the 2 and 3 pp falls the hole fixtures are built on are
-    /// charged as whole restored windows, which reddens three of them (checked
-    /// by mutation, 2026-08-17). From above nothing held it at all.
+    /// place what happened, and the account is refused altogether. From below the
+    /// constant was already held: lower it to 1.5 and the 2 and 3 pp falls the
+    /// hole fixtures are built on are charged as whole restored windows, which
+    /// reddens three of them (checked by mutation, 2026-08-17). From above
+    /// nothing held it at all.
     func testAFallDeeperThanTheSawtoothIsAResetEvenWithoutAWholeWindowBehindIt() throws {
         let series = try history("main", [45, 5, 10, 15, 20], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["main"])))
-        XCTAssertEqual(burnedPP(load), 75, accuracy: 0.001, """
+        XCTAssertEqual(try burnedPP(series), 75, accuracy: 0.001, """
             20 − 45 over the interval plus the window that turned over inside it; a threshold too \
-            high to see this fall does not answer 25 pp or 0, it refuses the account and takes its \
-            100 pp of capacity out with it
+            high to see this fall does not answer 25 pp or 0, it refuses the account outright
             """)
     }
 
@@ -176,9 +160,7 @@ final class FleetCapacityTests: XCTestCase {
     /// fixture here falls either well inside the threshold or well past it.
     func testAFallOfExactlyTheThresholdIsNotAReset() throws {
         let series = try history("main", [50, 50 - FleetCapacity.resetDropThreshold, 55], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["main"])))
-        XCTAssertEqual(burnedPP(load), 5, accuracy: 0.001,
+        XCTAssertEqual(try burnedPP(series), 5, accuracy: 0.001,
                        "55 − 50 with nothing but the signal in between; counting that fall as a reset answers 105 pp")
     }
 
@@ -191,10 +173,7 @@ final class FleetCapacityTests: XCTestCase {
     func testAResetHiddenInAHoleIsFoundThroughTheSchedule() throws {
         let series = try history("main", [95, nil, nil, nil, 92], overHours: 48)
         let boundaryInside = seriesStart.addingTimeInterval((24 + 168) * 3600)
-        let load = try XCTUnwrap(FleetCapacity.load(
-            histories: histories([series]),
-            accounts: try fleet(["main"], sevenDayResetsAt: boundaryInside)))
-        XCTAssertEqual(burnedPP(load), 97, accuracy: 0.001,
+        XCTAssertEqual(try burnedPP(series, resetsAt: boundaryInside), 97, accuracy: 0.001,
                        "the endpoints alone read −3 pp, which the clamp would serve as a confident 0%")
 
         // The control half, and it is the *same series* with only the schedule
@@ -211,9 +190,8 @@ final class FleetCapacityTests: XCTestCase {
             ("five minutes after the last reading", (48 + 168) * 3600 + 300),
         ]
         for (side, boundary) in outside {
-            XCTAssertNil(FleetCapacity.load(
-                histories: histories([series]),
-                accounts: try fleet(["main"], sevenDayResetsAt: seriesStart.addingTimeInterval(boundary))),
+            XCTAssertNil(FleetCapacity.measure(series.points,
+                                               resetsAt: seriesStart.addingTimeInterval(boundary)),
                          "a window that began \(side) cannot be the reset this interval hides")
         }
     }
@@ -226,17 +204,13 @@ final class FleetCapacityTests: XCTestCase {
     ///
     /// Replayed from acc2 on 2026-08-17 (boundary 2026-08-15 21:00:00Z, first
     /// post-reset reading 285 s later, 52 by the end): asking the schedule
-    /// without asking the readings answered 152 pp instead of 52, and took the
-    /// three-account fleet from 134% to 255%. It is not a rare alignment either
-    /// — every account passes through it for the quarter of an hour a week its
-    /// boundary spends inside the old tolerance.
+    /// without asking the readings answered 152 pp instead of 52. It is not a
+    /// rare alignment either — every account passes through it for the quarter of
+    /// an hour a week its boundary spends inside the old tolerance.
     func testAScheduleBoundaryBeforeARisingSeriesIsNotAHiddenReset() throws {
         let afterTheReset = try history("acc2", [0, 12, 25, 40, 52], overHours: 48)
         let boundaryJustBefore = seriesStart.addingTimeInterval(168 * 3600 - 5 * 60)
-        let load = try XCTUnwrap(FleetCapacity.load(
-            histories: histories([afterTheReset]),
-            accounts: try fleet(["acc2"], sevenDayResetsAt: boundaryJustBefore)))
-        XCTAssertEqual(burnedPP(load), 52, accuracy: 0.001, """
+        XCTAssertEqual(try burnedPP(afterTheReset, resetsAt: boundaryJustBefore), 52, accuracy: 0.001, """
             the series starts at zero and climbs: the window turned over before the interval opened, \
             not inside it, and charging it again answers 152 pp for an account that spent 52
             """)
@@ -244,7 +218,7 @@ final class FleetCapacityTests: XCTestCase {
 
     /// The same hidden reset with no schedule to place it. The fall is 3 pp,
     /// three times the sawtooth, so it is not jitter and `max(0, …)` would turn
-    /// it into a confident 0% for an account that spent most of a window. There
+    /// it into a confident 0 pp for an account that spent most of a window. There
     /// is no figure here (§2.7).
     ///
     /// The control for the other side of the boundary is the neighbouring
@@ -256,7 +230,7 @@ final class FleetCapacityTests: XCTestCase {
     /// rather than the absence of evidence.
     func testAFallPastTheSawtoothWithNoScheduleHasNoAnswer() throws {
         let series = try history("main", [95, nil, nil, nil, 92], overHours: 48)
-        XCTAssertNil(FleetCapacity.load(histories: histories([series]), accounts: try fleet(["main"])),
+        XCTAssertNil(FleetCapacity.measure(series.points, resetsAt: nil),
                      "a reset nobody saw and nothing can place is a missing figure, not zero burn")
     }
 
@@ -275,9 +249,9 @@ final class FleetCapacityTests: XCTestCase {
     /// `< -2` while both stay green.
     func testAFallOfExactlyTwoPointsIsAlreadyPastTheSawtooth() throws {
         let series = try history("main", [95, nil, nil, nil, 93], overHours: 48)
-        XCTAssertNil(FleetCapacity.load(histories: histories([series]), accounts: try fleet(["main"])), """
+        XCTAssertNil(FleetCapacity.measure(series.points, resetsAt: nil), """
             a one-sided ±1 tooth cannot take an interval two points below where it opened: something \
-            restored this window, nothing here can place it, and a missing figure beats a confident 0%
+            restored this window, nothing here can place it, and a missing figure beats a confident 0
             """)
     }
 
@@ -290,246 +264,105 @@ final class FleetCapacityTests: XCTestCase {
     /// two readings answers the same 10.
     func testAHoleIsSteppedOverRatherThanReadAsZero() throws {
         let series = try history("main", [50, nil, 60], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["main"])))
-        XCTAssertEqual(burnedPP(load), 10, accuracy: 0.001,
+        XCTAssertEqual(try burnedPP(series), 10, accuracy: 0.001,
                        "a hole read as zero fakes a reset and adds a whole window to the burn")
     }
 
     /// An idle account whose reading wobbles down by a point has not un-burned
-    /// anything. Left signed, its negative rate would make the rest of the fleet
-    /// look cheaper than it is.
+    /// anything. Left signed, its negative burn would make the rest of the fleet
+    /// look cheaper than it is — every reader of this figure sums across accounts.
     func testAnIdleAccountJitteringDownDoesNotSubtractDemand() throws {
         let series = try history("main", [50, 49, 50, 49], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["main"])))
-        XCTAssertEqual(load.percent, 0, accuracy: 0.001, "a fleet at rest is 0% loaded, not −3.5%")
+        XCTAssertEqual(try burnedPP(series), 0, accuracy: 0.001, "an account at rest burned 0, not −1")
     }
 
-    // MARK: - Rates per account, capacity over contributors
-
-    /// The accounts do not have the same depth of history — 2.16 / 2.18 / 2.74
-    /// days over acc2 / acc3 / main, live on 2026-08-17. It is not that the
-    /// gateway cut one of them at `max_points`: it cut *two*, and the account it
-    /// did not cut is the deepest of the three (see `FleetLoad.measuredHours`).
-    /// A rate per account, then summed; dividing one total by the longest span
-    /// would credit the shallow account with hours nobody measured it over.
-    func testRatesAreSummedPerAccountRatherThanDividedByTheLongestSpan() throws {
-        let deep = try history("acc2", [0, 48], overHours: 48)       // 1.0 pp/h
-        let shallow = try history("acc3", [10, 22], overHours: 24)   // 0.5 pp/h
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([deep, shallow]),
-                                                    accounts: try fleet(["acc2", "acc3"])))
-
-        // (1.0 + 0.5) pp/h x 168 = 252 pp/week against 200 pp of capacity.
-        XCTAssertEqual(load.percent, 126, accuracy: 0.001, """
-            the naive 60 pp over the longest span of 48 h answers 105%, which is the shallow \
-            account measured over hours it was never measured over
-            """)
-        XCTAssertEqual(load.measuredHours, 24, accuracy: 0.001,
-                       "the answer is as well measured as its worst-measured contributor")
-    }
+    // MARK: - The span, and when there is none
 
     /// The span runs between the first and last *readings*, not between the
     /// first and last points. A series whose tail is holes was measured up to
     /// its last reading and no further: stretched over the points it would be
-    /// 48 h instead of 12, and the rate a quarter of what it is.
+    /// 48 h instead of 12, and every rate taken from it a quarter of what it is.
     func testTheSpanIsMeasuredBetweenReadingsRatherThanPoints() throws {
         let series = try history("main", [50, 60, nil, nil, nil], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["main"])))
-
-        XCTAssertEqual(load.measuredHours, 12, accuracy: 0.001,
+        let measured = try XCTUnwrap(FleetCapacity.measure(series.points, resetsAt: nil))
+        XCTAssertEqual(measured.hours, 12, accuracy: 0.001,
                        "the last three samples said nothing, and hours nobody measured are not measured hours")
-        XCTAssertEqual(load.percent, 140, accuracy: 0.001,
-                       "10 pp over 12 h is 140 pp/week; over the whole 48 h it would read 35%")
-    }
-
-    /// An account with no usable history contributes neither demand nor its
-    /// 100 pp of capacity. Counting it into capacity alone would divide a
-    /// measured demand by a supply we could not see the spending of.
-    func testAnAccountWithoutHistoryDoesNotInflateCapacity() throws {
-        let first = try history("acc2", [0, 50], overHours: 48)
-        let second = try history("acc3", [20, 70], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([first, second]),
-                                                    accounts: try fleet(["acc2", "acc3", "main"])))
-
-        XCTAssertEqual(load.accounts, 2, "main was never measured and is not a supply we can count")
-        // 2 x (50 pp / 48 h) x 168 = 350 pp/week against 200 pp of capacity.
-        XCTAssertEqual(load.percent, 175, accuracy: 0.001,
-                       "capacity of 300 pp over three accounts would answer 116.7%")
-    }
-
-    // MARK: - A blocked account hides demand
-
-    /// While an account is at its ceiling the requests it turns away never reach
-    /// the series, so the demand behind them is invisible and the figure is a
-    /// floor. Live: acc2 spent 34 samples at 100 during the last 48 h.
-    func testASampleAtTheCeilingMakesTheAnswerALowerBound() throws {
-        let series = try history("acc2", [90, 100, 100, 0, 20], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["acc2"])))
-        XCTAssertTrue(load.isLowerBound, "the demand an exhausted account turned away is not in its series")
-    }
-
-    /// The flag is seeded from the first reading and then raised again inside
-    /// the loop, and only a series whose *first* sample is the ceiling can tell
-    /// the seed from the loop: an account that entered the measured interval
-    /// exhausted, reset out of it and never came near 100 again. Without this
-    /// fixture the seed can be written `false` and nothing goes red.
-    func testACeilingOnTheFirstReadingAloneIsStillALowerBound() throws {
-        let series = try history("acc2", [100, 5, 10, 15, 20], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["acc2"])))
-        XCTAssertTrue(load.isLowerBound, """
-            the account was at its ceiling when the interval opened, and the demand it turned away \
-            then is missing from the series exactly as much as a ceiling in the middle of it
-            """)
-    }
-
-    /// The other seed, and the same reason. `everBelowCeiling` is seeded from
-    /// the first reading and raised again inside a loop that starts at
-    /// `dropFirst()`, so only an account that entered the interval below its
-    /// ceiling and reached it on the second sample can tell the seed from the
-    /// loop — every other fixture that goes below the ceiling does so after the
-    /// first reading. Written `false`, the seed says this account was never
-    /// below its ceiling, `measure` refuses it as one that spent the whole
-    /// interval blocked, and it leaves both halves of the fraction — its demand
-    /// and its 100 pp of capacity — so the answer is recomputed over a fleet
-    /// smaller by one.
-    ///
-    /// How far that moves the answer is not a live figure, and a live figure was
-    /// claimed here. Replayed against the gateway on 2026-08-17 the delta is
-    /// **zero**: no account has this shape — all three are below their ceiling
-    /// somewhere after the first reading — so nothing changes hands and the seed
-    /// is unobservable on today's data. What the break costs has to be asked of
-    /// an account that has the shape, and then it is large: pinning each of the
-    /// three at its ceiling from the second reading on and computing twice, the
-    /// seed is worth +36.5, +37.7 and +56.8 points of load (same day, same three
-    /// series, only the pinned account swapped). It moves with which account is
-    /// pinned and with what the other two are burning, which is exactly why the
-    /// number belongs to a construction rather than to "the live fleet".
-    func testAnAccountBelowItsCeilingOnlyOnTheFirstReadingIsStillMeasured() throws {
-        let series = try history("acc2", [99, 100, 100, 100, 100], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["acc2"])))
-        XCTAssertEqual(load.accounts, 1, """
-            the account was below its ceiling when the interval opened and blocked for the rest of \
-            it: that is an account measured over a window it spent at the ceiling, not one nobody \
-            measured at all
-            """)
-        XCTAssertTrue(load.isLowerBound,
-                      "it sat at 100 from the second sample on, and what it turned away is not in the series")
-    }
-
-    /// An account that spent the *whole* interval at 100 is a different case
-    /// from one that touched the ceiling on the way: its series is flat, its
-    /// burn reads as zero, and counting it hands the fleet a whole window of
-    /// capacity against no demand — from the one account that certainly had none
-    /// to spare. Two accounts burning 50 pp each over 48 h read 175%; with the
-    /// exhausted one counted they read 116.7%, so the most alarming fact about a
-    /// fleet moves the number 58 points towards calm. Unknown is not zero
-    /// (§2.7), and blocked demand is unknown demand.
-    func testAnAccountPinnedAtItsCeilingContributesNeitherDemandNorCapacity() throws {
-        let exhausted = try history("acc2", [100, 100, 100, 100, 100], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(
-            histories: histories([exhausted,
-                                  try history("acc3", [0, 50], overHours: 48),
-                                  try history("main", [20, 70], overHours: 48)]),
-            accounts: try fleet(["acc2", "acc3", "main"])))
-
-        XCTAssertEqual(load.accounts, 2, "an account blocked throughout was watched, not measured")
-        XCTAssertEqual(load.percent, 175, accuracy: 0.001,
-                       "counting the exhausted account into capacity alone answers 116.7%")
-        XCTAssertFalse(load.isLowerBound, """
-            the flag is for a counted account whose demand was partly suppressed; this one is not \
-            counted at all, and where it went is `accounts`, which says 2 of 3
-            """)
-        XCTAssertNil(FleetCapacity.load(histories: histories([exhausted]), accounts: try fleet(["acc2"])),
-                     "and on its own it is not a fleet with zero load, it is a fleet nobody measured")
-    }
-
-    /// An account that never touched its ceiling served everything it was asked
-    /// for, and the figure is the figure.
-    func testAFleetBelowItsCeilingIsNotALowerBound() throws {
-        let series = try history("acc2", [90, 95, 99], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([series]),
-                                                    accounts: try fleet(["acc2"])))
-        XCTAssertFalse(load.isLowerBound, "99 is not the ceiling; nothing was turned away")
-    }
-
-    // MARK: - No answer beats a wrong answer
-
-    func testAFleetWithNoAccountsHasNoLoad() {
-        XCTAssertNil(FleetCapacity.load(histories: [:], accounts: []))
-    }
-
-    /// Membership comes from the account list, not from whatever histories are
-    /// lying around: a series under a label the fleet does not have is not
-    /// demand anybody can serve.
-    func testAHistoryUnderALabelTheFleetDoesNotHaveIsNotDemand() throws {
-        let ghost = try history("retired", [0, 50], overHours: 48)
-        XCTAssertNil(FleetCapacity.load(histories: histories([ghost]), accounts: try fleet(["acc2"])))
+        XCTAssertEqual(measured.burnPP, 10, accuracy: 0.001)
     }
 
     /// Every sample said nothing about the seven-day window. That is no
     /// readings, which is not a reading of zero — and zero burn over an
-    /// uncountable span is not 0%, it is no answer.
-    func testASeriesOfNothingButHolesHasNoLoad() throws {
+    /// uncountable span is not 0 pp, it is no answer.
+    func testASeriesOfNothingButHolesHasNoAnswer() throws {
         let series = try history("main", [nil, nil, nil], overHours: 48)
-        XCTAssertNil(FleetCapacity.load(histories: histories([series]), accounts: try fleet(["main"])))
+        XCTAssertNil(FleetCapacity.measure(series.points, resetsAt: nil))
     }
 
-    /// A rate from a couple of hours is noise multiplied by 168/span: at two
-    /// hours one point of sawtooth is 84 pp/week. The control half matters as
+    /// A span shorter than the floor is refused, and the control half matters as
     /// much as the refusal — the same fixture stretched to the minimum has to
     /// come back with an answer, or this would pass on a function that refuses
     /// everything.
+    ///
+    /// The floor is `measure`'s own and no longer anything the app can reach:
+    /// what the app runs is `measureHourly`, whose floor is a whole day. The
+    /// reasoning that chose six hours is on the constant, along with that.
     func testASpanShorterThanTheMinimumIsRefused() throws {
         let brief = try history("main", [0, 50], overHours: 4)
-        XCTAssertNil(FleetCapacity.load(histories: histories([brief]), accounts: try fleet(["main"])),
-                     "50 pp over 4 h extrapolates to 2100 pp/week, which is noise wearing a number")
+        XCTAssertNil(FleetCapacity.measure(brief.points, resetsAt: nil),
+                     "four hours is under the floor and answers nothing rather than a noisy figure")
 
         let long = try history("main", [0, 50], overHours: FleetCapacity.minimumMeasuredHours)
-        XCTAssertNotNil(FleetCapacity.load(histories: histories([long]), accounts: try fleet(["main"])),
+        XCTAssertNotNil(FleetCapacity.measure(long.points, resetsAt: nil),
                         "the minimum is a floor to stand on, not a floor to fall through")
     }
 
-    // MARK: - The live fleet
-
-    /// The measurement this metric was built against, replayed.
+    /// An account that spent the *whole* interval at 100 served nothing it was
+    /// asked for: its series is flat, its burn reads as zero, and counting it
+    /// would hand a fleet a whole window of capacity against no spending — from
+    /// the one account that certainly had none to spare. Unknown is not zero
+    /// (§2.7), and blocked spending is unknown spending.
     ///
-    /// 2026-08-17, three accounts over 48 h: acc2 went 100 → reset → 50 (50 pp),
-    /// acc3 went 54 → 93 (39 pp), main went 99 → reset → 18 (19 pp). That is
-    /// 108 pp over 48 h — 2.25 pp/h, or 378 pp/week — against a capacity of
-    /// 300 pp/week, so 126%. acc2 sat at its ceiling on the way, which makes the
-    /// figure a floor.
-    func testTheLiveThreeAccountFleetReadsAHundredAndTwentySixPerCent() throws {
-        let acc2 = try history("acc2", [100, 100, 0, 25, 50], overHours: 48)
-        let acc3 = try history("acc3", [54, 70, 93], overHours: 48)
-        let main = try history("main", [99, 99, 0, 9, 18], overHours: 48)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([acc2, acc3, main]),
-                                                    accounts: try fleet(["acc2", "acc3", "main"])))
+    /// What it costs a fleet is the allowance's own test
+    /// (`testAnAccountPinnedAtItsCeilingContributesNeitherAllowanceNorCapacity`);
+    /// what is held here is that the refusal is in the burn rule itself, on both
+    /// paths through a series.
+    func testAnAccountPinnedAtItsCeilingIsNotMeasuredAtAll() throws {
+        let exhausted = try history("acc2", [100, 100, 100, 100, 100], overHours: 48)
+        XCTAssertNil(FleetCapacity.measure(exhausted.points, resetsAt: nil),
+                     "a fleet of one exhausted account is not a fleet at rest, it is one nobody measured")
+    }
 
-        XCTAssertEqual(load.percent, 126, accuracy: 0.01, "378 pp of demand against 300 pp of capacity")
-        XCTAssertTrue(load.isLowerBound, "acc2 was blocked at 100 and could not show what it was asked for")
-        XCTAssertEqual(load.accounts, 3)
-        XCTAssertEqual(load.measuredHours, 48, accuracy: 0.001)
-        XCTAssertNil(load.projection, """
-            no window was named, so the default one ran, and the default is a window of two days — \
-            the average this whole file was built on
+    /// The other seed of the same flag, and only a series that goes below its
+    /// ceiling on the *second* reading can tell the seed from the loop:
+    /// `everBelowCeiling` starts from the first reading and is raised again
+    /// inside a loop that begins at `dropFirst()`. Written `false`, the seed says
+    /// this account was never below its ceiling and `measure` refuses it whole.
+    func testAnAccountBelowItsCeilingOnlyOnTheFirstReadingIsStillMeasured() throws {
+        let series = try history("acc2", [99, 100, 100, 100, 100], overHours: 48)
+        XCTAssertEqual(try burnedPP(series), 1, accuracy: 0.001, """
+            the account was below its ceiling when the interval opened and blocked for the rest of \
+            it: that is an account measured over a window it spent at the ceiling, not one nobody \
+            measured at all
             """)
     }
 }
 
-/// The projection: demand as the recent work-hour rate over a week's work hours
-/// plus the sleeping hours at their own rate.
+/// The hour-by-hour decomposition of a series, and the split of the day it
+/// feeds.
 ///
 /// The first section is the one everything else stands on. A per-hour
 /// decomposition that does not add back up to the span method is not a finer
 /// view of the same burn, it is a second and disagreeing answer — and the first
 /// prototype of this disagreed by a whole restored window on the one account
 /// whose history crossed a reset.
-final class FleetCapacityProjectionTests: XCTestCase {
+///
+/// **The demand estimator these were written for is gone**, so every test that
+/// asked it something asks `sustainable` instead — the one reader the buckets
+/// and the split have left. What went with the estimator went for good: the
+/// arithmetic that turned a rate into a week's demand, the recent-work-hour
+/// window it took that rate over, and the boundary that chose between two ways
+/// of estimating. The rules underneath are all still here, one caller along.
+final class FleetCapacityDecompositionTests: XCTestCase {
 
     // MARK: - Fixtures
 
@@ -583,9 +416,10 @@ final class FleetCapacityProjectionTests: XCTestCase {
         Dictionary(uniqueKeysWithValues: all.map { ($0.label, $0) })
     }
 
-    /// A window that selects the projection. Any value under a day does; six
-    /// hours is the default the setting documents.
-    private let projecting: Double = 6
+    /// A spend big enough to price a point by. Nothing here reads the allowance
+    /// itself — these tests ask the split and the refusals — so the figure only
+    /// has to be above zero.
+    private let spend: Double = 1_000_000
 
     // MARK: - The decomposition reconciles with the span method
 
@@ -863,122 +697,34 @@ final class FleetCapacityProjectionTests: XCTestCase {
                        "and it buys no time: the series is 30 h long however many readings share an instant")
     }
 
-    // MARK: - The window picks the estimator
-
-    /// The boundary is a day, and it is pinned from both sides at the place it
-    /// is written rather than wherever a comparison happens to land. Same
-    /// fixture, same fleet, one hundredth of an hour apart.
-    func testAWindowOfExactlyADayIsTheAverageAndAnythingUnderItIsTheProjection() throws {
-        let flat = try shaped("main", rates: Array(repeating: 1.0, count: 24), days: 2)
-        let accounts = try fleet(["main"])
-
-        let atADay = try XCTUnwrap(FleetCapacity.load(histories: histories([flat]), accounts: accounts,
-                                                      windowHours: 24, timeZone: utc))
-        XCTAssertNil(atADay.projection, """
-            24 h holds a whole sleep cycle, so the plain average over it is honest on its own and \
-            the projection would be machinery for nothing
-            """)
-
-        let justUnder = try XCTUnwrap(FleetCapacity.load(histories: histories([flat]), accounts: accounts,
-                                                         windowHours: 23.9, timeZone: utc))
-        XCTAssertNotNil(justUnder.projection,
-                        "23.9 h cannot hold one, and an average over it is a statement about part of a day")
-    }
-
-    /// With a window of a day or more the answer is what the estimator four
-    /// reviews approved produces, to the point. The fixture is the one the
-    /// window average's own suite reads at 126%, run through the new entry point:
-    /// if the dispatch ever routes it anywhere else, this is what says so.
-    func testAWindowOfADayOrMoreDoesNotDriftFromTheApprovedFigure() throws {
-        let deep = try series("acc2", [(midnight, 0), (midnight.addingTimeInterval(48 * 3600), 48)])
-        let shallow = try series("acc3", [(midnight, 10), (midnight.addingTimeInterval(24 * 3600), 22)])
-        for window in [24.0, 48.0, 168.0] {
-            let load = try XCTUnwrap(FleetCapacity.load(histories: histories([deep, shallow]),
-                                                        accounts: try fleet(["acc2", "acc3"]),
-                                                        windowHours: window, timeZone: utc))
-            XCTAssertEqual(load.percent, 126, accuracy: 0.001, "at a window of \(window) h")
-            XCTAssertEqual(load.measuredHours, 24, accuracy: 0.001)
-            XCTAssertNil(load.projection)
-        }
-    }
-
     // MARK: - The day is split from the data
 
-    /// The whole model in one fixture, and every number in it is arithmetic the
-    /// reader can redo.
-    ///
-    /// Eight hours of the day at 4 pp/h and sixteen at 0.05 pp/h. The mean is
-    /// (8 x 4 + 16 x 0.05) / 24 = 1.3667 pp/h, so the threshold is 0.615 and the
-    /// eight busy hours are the work hours. Demand is then
-    /// 4 x 8 x 7 + 0.05 x 16 x 7 = 224 + 5.6 = 229.6 pp against one account's
-    /// 100 pp of capacity.
-    func testDemandIsTheWorkHoursAtTheRecentRatePlusTheSleepingHoursAtTheirOwn() throws {
-        var rates = Array(repeating: 0.05, count: 24)
-        for hour in [0, 1, 18, 19, 20, 21, 22, 23] { rates[hour] = 4 }
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([try shaped("main", rates: rates, days: 2)]),
-                                                    accounts: try fleet(["main"]),
-                                                    windowHours: projecting, timeZone: utc))
-        let projection = try XCTUnwrap(load.projection)
-
-        XCTAssertEqual(projection.workHoursPerDay, 8, "the eight hours above 0.45 of the fleet's own mean")
-        XCTAssertEqual(projection.sleepHoursPerDay, 16, "and the day has 24 hours in it")
-        XCTAssertEqual(projection.recentWorkRate, 4, accuracy: 0.01,
-                       "the recent work hours are busy ones, whatever the clock hours behind them were")
-        XCTAssertEqual(projection.sleepRate, 0.05, accuracy: 0.005,
-                       "the sleeping hours keep their own small rate rather than being read as zero")
-        XCTAssertEqual(load.percent, 229.6, accuracy: 0.5, "4 x 8 x 7 + 0.05 x 16 x 7 against 100 pp")
-        XCTAssertGreaterThanOrEqual(projection.recentWorkHours, 6,
-                                    "the window asked for six work hours and got at least six")
-    }
-
     /// The sleeping hours are paid for, not assumed away. Same fixture with the
-    /// sleeping rate set to zero: demand loses exactly the 5.6 pp those hours
-    /// were charged, and nothing else moves.
+    /// sleeping rate set to zero: the week keeps exactly the 5.6 pp those hours
+    /// were charged, and a working hour is allowed more because of it.
     func testTheSleepingHoursAreNotReadAsZero() throws {
         var busy = Array(repeating: 0.05, count: 24)
         for hour in [0, 1, 18, 19, 20, 21, 22, 23] { busy[hour] = 4 }
         var silent = Array(repeating: 0.0, count: 24)
         for hour in [0, 1, 18, 19, 20, 21, 22, 23] { silent[hour] = 4 }
 
-        let withNights = try XCTUnwrap(FleetCapacity.load(
+        let withNights = try XCTUnwrap(FleetCapacity.sustainable(
             histories: histories([try shaped("main", rates: busy, days: 2)]),
-            accounts: try fleet(["main"]), windowHours: projecting, timeZone: utc))
-        let withoutNights = try XCTUnwrap(FleetCapacity.load(
+            accounts: try fleet(["main"]), spentTokens: spend, timeZone: utc))
+        let withoutNights = try XCTUnwrap(FleetCapacity.sustainable(
             histories: histories([try shaped("main", rates: silent, days: 2)]),
-            accounts: try fleet(["main"]), windowHours: projecting, timeZone: utc))
+            accounts: try fleet(["main"]), spentTokens: spend, timeZone: utc))
 
-        XCTAssertEqual(withNights.percent - withoutNights.percent, 5.6, accuracy: 0.3, """
-            the sleeping hours are 5.6 pp of the week here; dropping them from the model would hide \
-            spending that is really there — 0.129 pp/h over the live fleet, measured 2026-08-18
+        XCTAssertEqual(withNights.sleepRate, 0.05, accuracy: 0.005,
+                       "the sleeping hours keep their own small rate rather than being read as zero")
+        XCTAssertEqual(withoutNights.sleepRate, 0, accuracy: 0.0001)
+        // 0.05 x 16 x 7 = 5.6 pp of the week goes to the nights, and what is left
+        // is spread over 8 x 7 = 56 working hours.
+        XCTAssertEqual(withoutNights.allowedWorkRate - withNights.allowedWorkRate,
+                       5.6 / 56, accuracy: 0.001, """
+            dropping the sleeping hours from the model would hand a working hour spending that is \
+            really happening at night — 0.350 pp/h over the live fleet, measured 2026-08-18
             """)
-        XCTAssertEqual(try XCTUnwrap(withoutNights.projection).sleepRate, 0, accuracy: 0.0001)
-    }
-
-    /// **Work hours, not clock hours.** The series ends deep inside a sleeping
-    /// stretch, so the last six *clock* hours hold no work at all and a rate
-    /// taken over them would read zero every morning. Scanning back through the
-    /// work hours reaches the busy evening and answers the rate that is there.
-    func testTheRecentRateScansBackThroughWorkHoursRatherThanClockHours() throws {
-        var rates = Array(repeating: 0.02, count: 24)
-        for hour in 12...20 { rates[hour] = 5 }
-        // Two whole days, then nine more hours: the series stops at 09:00, which
-        // is the middle of the sleeping block.
-        let step = 300.0
-        var value = 0.0
-        var readings: [(Date, Double?)] = [(midnight, 0)]
-        for sample in 1...((48 + 9) * 12) {
-            value += rates[(sample - 1) / 12 % 24] * step / 3600
-            readings.append((midnight.addingTimeInterval(Double(sample) * step), value))
-        }
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([try series("main", readings)]),
-                                                    accounts: try fleet(["main"]),
-                                                    windowHours: projecting, timeZone: utc))
-        let projection = try XCTUnwrap(load.projection)
-        XCTAssertEqual(projection.recentWorkRate, 5, accuracy: 0.01, """
-            the last six clock hours are sleeping ones and hold 0.02 pp/h; asking for clock hours \
-            makes the figure undefined every morning and zero every morning it is not
-            """)
-        XCTAssertGreaterThanOrEqual(projection.recentWorkHours, 6)
     }
 
     // MARK: - Refusals
@@ -989,38 +735,16 @@ final class FleetCapacityProjectionTests: XCTestCase {
     /// this would pass on a function that refuses everything.
     func testASeriesShorterThanADayCannotBeSplitAndIsRefused() throws {
         let short = try series("main", [(midnight, 0), (midnight.addingTimeInterval(23 * 3600), 20)])
-        XCTAssertNil(FleetCapacity.load(histories: histories([short]), accounts: try fleet(["main"]),
-                                        windowHours: projecting, timeZone: utc),
+        XCTAssertNil(FleetCapacity.sustainable(histories: histories([short]),
+                                               accounts: try fleet(["main"]),
+                                               spentTokens: spend, timeZone: utc),
                      "23 h cannot say what the fleet does at the hour it never saw")
 
         let day = try series("main", [(midnight, 0), (midnight.addingTimeInterval(24 * 3600), 20)])
-        XCTAssertNotNil(FleetCapacity.load(histories: histories([day]), accounts: try fleet(["main"]),
-                                           windowHours: projecting, timeZone: utc),
+        XCTAssertNotNil(FleetCapacity.sustainable(histories: histories([day]),
+                                                  accounts: try fleet(["main"]),
+                                                  spentTokens: spend, timeZone: utc),
                         "the minimum is a floor to stand on, not a floor to fall through")
-    }
-
-    /// Fewer usable work hours than the floor is no figure rather than a noisy
-    /// one: the rate carries one point of sawtooth spread over its window, which
-    /// at two hours is 18.6 points of load on a three-account fleet — most of the
-    /// width of the warning band the colour ramp spends 30 points on.
-    ///
-    /// Two work hours a day over one day is two usable work hours. The control
-    /// half doubles the fixture's depth, which doubles the work hours available
-    /// and nothing else.
-    func testFewerUsableWorkHoursThanTheFloorIsRefused() throws {
-        var rates = Array(repeating: 0.0, count: 24)
-        rates[3] = 10
-        rates[4] = 10
-        XCTAssertNil(FleetCapacity.load(histories: histories([try shaped("main", rates: rates, days: 1)]),
-                                        accounts: try fleet(["main"]),
-                                        windowHours: projecting, timeZone: utc),
-                     "two work hours is under the floor of \(FleetCapacity.minimumRecentWorkHours)")
-
-        let deeper = try XCTUnwrap(FleetCapacity.load(histories: histories([try shaped("main", rates: rates, days: 2)]),
-                                                      accounts: try fleet(["main"]),
-                                                      windowHours: projecting, timeZone: utc))
-        XCTAssertEqual(try XCTUnwrap(deeper.projection).recentWorkHours, 4, accuracy: 0.001,
-                       "four work hours is the floor itself, and the floor is answerable")
     }
 
     /// The refusal `measure` makes over a span, made over a step. The series
@@ -1038,135 +762,97 @@ final class FleetCapacityProjectionTests: XCTestCase {
             (midnight.addingTimeInterval(28 * 3600), 92),
             (midnight.addingTimeInterval(48 * 3600), 96),
         ]
-        XCTAssertNil(FleetCapacity.load(histories: histories([try series("main", readings)]),
-                                        accounts: try fleet(["main"]),
-                                        windowHours: projecting, timeZone: utc),
+        XCTAssertNil(FleetCapacity.sustainable(histories: histories([try series("main", readings)]),
+                                               accounts: try fleet(["main"]),
+                                               spentTokens: spend, timeZone: utc),
                      "a reset nobody saw and nothing can place is a missing figure, not zero burn")
 
         // The same series with the schedule placing a window boundary inside the
         // fall: one variable moved, so a failure here is about the schedule and
         // nothing else.
         let inside = midnight.addingTimeInterval((24 + 168) * 3600)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([try series("main", readings)]),
-                                                    accounts: try fleet(["main"], sevenDayResetsAt: inside),
-                                                    windowHours: projecting, timeZone: utc))
-        XCTAssertNotNil(load.projection)
+        XCTAssertNotNil(FleetCapacity.sustainable(
+            histories: histories([try series("main", readings)]),
+            accounts: try fleet(["main"], sevenDayResetsAt: inside),
+            spentTokens: spend, timeZone: utc))
     }
 
-    /// An account pinned at its ceiling for the whole series is not a fleet with
-    /// no demand, it is a fleet nobody measured — and it leaves both halves of
-    /// the fraction, exactly as it does on the other path. A ceiling on part of
-    /// the series is the other thing and stays, with the `≥` on it.
+    /// An account pinned at its ceiling for the whole series is not a fleet that
+    /// spent nothing, it is a fleet nobody measured — and it leaves both halves of
+    /// the fraction. A ceiling on *part* of the series is the other thing and
+    /// stays, with the `≥` on it: the points it was blocked from burning are
+    /// missing from the price of a point, so the allowance came out too generous
+    /// and everything drawn against it is a floor.
+    ///
+    /// **The flag is `SustainableRate`'s now**, and it used to be the demand
+    /// estimate's. Where it goes on screen is the menu bar's accessibility
+    /// description and `--dump`, both of which write the ratio out as a number —
+    /// a colour cannot carry a `≥`, and no other surface prints this figure.
     func testTheCeilingRulesHoldOnThisPathToo() throws {
-        let pinned = try shaped("acc2", rates: Array(repeating: 0.0, count: 24), days: 2)
         var readings: [(Date, Double?)] = []
         for sample in 0...(48 * 12) {
             readings.append((midnight.addingTimeInterval(Double(sample) * 300),
                              sample < 12 ? 100 : Double(sample - 12) * 0.05))
         }
-        XCTAssertNil(FleetCapacity.load(histories: histories([try series("acc2", (0...(48 * 12)).map {
-            (midnight.addingTimeInterval(Double($0) * 300), 100)
-        })]), accounts: try fleet(["acc2"]), windowHours: projecting, timeZone: utc),
+        var pinned: [(Date, Double?)] = []
+        for sample in 0...(48 * 12) {
+            pinned.append((midnight.addingTimeInterval(Double(sample) * 300), 100))
+        }
+        XCTAssertNil(FleetCapacity.sustainable(histories: histories([try series("acc2", pinned)]),
+                                               accounts: try fleet(["acc2"]),
+                                               spentTokens: spend, timeZone: utc),
                      "flat at the ceiling throughout is an account that served nothing it was asked for")
-        XCTAssertNotNil(pinned, "fixture kept so the two shapes sit side by side")
 
-        let partly = try XCTUnwrap(FleetCapacity.load(histories: histories([try series("acc2", readings)]),
-                                                       accounts: try fleet(["acc2"]),
-                                                       windowHours: projecting, timeZone: utc))
-        XCTAssertTrue(partly.isLowerBound, "what an exhausted account turned away is not in its series")
+        let partly = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try series("acc2", readings)]),
+            accounts: try fleet(["acc2"]), spentTokens: spend, timeZone: utc))
+        XCTAssertTrue(partly.isLowerBound,
+                      "what an exhausted account was blocked from burning is not in its series, "
+                      + "so the price of a point reads high and the allowance with it")
+
+        // The seed of the same flag, and only a series whose *first* reading is
+        // the ceiling can tell it from the loop: an account that entered the
+        // window exhausted, reset out of it and never came near 100 again.
+        var fromTheCeiling: [(Date, Double?)] = [(midnight, 100)]
+        for sample in 1...(48 * 12) {
+            fromTheCeiling.append((midnight.addingTimeInterval(Double(sample) * 300),
+                                   Double(sample) * 0.05))
+        }
+        XCTAssertTrue(try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try series("acc2", fromTheCeiling)]),
+            accounts: try fleet(["acc2"]), spentTokens: spend, timeZone: utc)).isLowerBound, """
+            the account was at its ceiling when the window opened, and what it was blocked from \
+            burning then is missing from the measurement exactly as much as a ceiling in the middle
+            """)
+
+        // And an account that never touched its ceiling served everything it was
+        // asked for: the figure is the figure. 99 is not the ceiling.
+        var clear: [(Date, Double?)] = []
+        for sample in 0...(48 * 12) {
+            clear.append((midnight.addingTimeInterval(Double(sample) * 300),
+                          50 + Double(sample) * 0.08))
+        }
+        XCTAssertFalse(try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try series("acc2", clear)]), accounts: try fleet(["acc2"]),
+            spentTokens: spend, timeZone: utc)).isLowerBound,
+                       "nothing was turned away, so nothing is a floor")
     }
 
     // MARK: - The degenerate shapes
 
     /// A fleet that burns evenly around the clock has no sleeping hours, and then
-    /// the projection is arithmetically the window average with a fresher rate:
-    /// 1 pp/h over 24 work hours is 168 pp of demand against 100 pp of capacity.
+    /// the whole week is working hours: 100 pp spread over 24 x 7 of them.
     /// A flat profile is not an ambiguity to refuse, it is the answer.
     func testAFleetThatBurnsAroundTheClockHasNoSleepingHours() throws {
         let flat = try shaped("main", rates: Array(repeating: 1.0, count: 24), days: 2)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([flat]), accounts: try fleet(["main"]),
-                                                    windowHours: projecting, timeZone: utc))
-        let projection = try XCTUnwrap(load.projection)
-        XCTAssertEqual(projection.workHoursPerDay, 24)
-        XCTAssertEqual(projection.sleepHoursPerDay, 0)
-        XCTAssertEqual(load.percent, 168, accuracy: 0.5, "1 pp/h x 168 h against one account's 100 pp")
-    }
-
-    /// A fleet that burned nothing has no work hours either — no hour clears a
-    /// threshold of zero — and every hour is a sleeping hour at a rate of zero.
-    /// That is a fleet at rest reading 0%, which is what it is, and not a
-    /// refusal: `testAnIdleAccountJitteringDownDoesNotSubtractDemand` holds the
-    /// same thing on the other path.
-    func testAFleetAtRestReadsZeroRatherThanRefusing() throws {
-        let idle = try shaped("main", rates: Array(repeating: 0.0, count: 24), days: 2)
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([idle]), accounts: try fleet(["main"]),
-                                                    windowHours: projecting, timeZone: utc))
-        XCTAssertEqual(load.percent, 0, accuracy: 0.0001)
-        XCTAssertEqual(try XCTUnwrap(load.projection).workHoursPerDay, 0)
-    }
-
-    /// **A projection's `recentWorkHours` is always something that was measured**,
-    /// never the sentinel the fold starts from — and this is the invariant that
-    /// replaced a branch pretending otherwise.
-    ///
-    /// `recentWorkHours: shortestRecent == .greatestFiniteMagnitude ? 0 : shortestRecent`
-    /// stood in `projected` and could not execute: the `min` runs immediately
-    /// before `contributors += 1`, and the only way past the guard below is for
-    /// that line to have run. Removing it broke nothing, which is exactly what
-    /// the memo warns about — so what holds it now is the invariant rather than
-    /// the branch, asked of every shape this path answers for, degenerate ones
-    /// included. The zero case is real and is not a sentinel: a fleet with no
-    /// work hours never opens the recent window at all.
-    ///
-    /// **What this test can actually catch is narrower than its first assertion
-    /// message claims, and the message is the part that is wrong.** "Which is the
-    /// sentinel escaping" cannot happen on any of the four fixtures below: the
-    /// sentinel survives only when `recentWorkWindow` answers `nil` for *every*
-    /// account while `contributors` is positive, and no fixture here takes that
-    /// branch — each of them has work hours and a window long enough to fill.
-    /// Measured rather than argued (2026-08-18, mutation on a copy of
-    /// `FleetCapacity.swift`, restored by copy and checked by sha256): moving
-    /// `contributors += 1` above the guard — which is exactly what makes the
-    /// sentinel reachable — leaves **this test green** and is caught by
-    /// `testFewerUsableWorkHoursThanTheFloorIsRefused`, whose failure prints the
-    /// escaped `recentWorkHours: 1.7976931348623157e+308` in full. So what these
-    /// four fixtures hold are the two bounds asked below — no deeper than the
-    /// history, and either zero or at or over the floor — and the sentinel is
-    /// held by the ordering of `min` before the counter, one test along. Closing
-    /// that gap here needs a fixture where every account has work hours but a
-    /// window shorter than `minimumRecentWorkHours`, and adding one is a change
-    /// to the code rather than to this comment.
-    func testAProjectionNeverReportsASentinelAsItsRecentWorkHours() throws {
-        var evening = Array(repeating: 0.05, count: 24)
-        for hour in [18, 19, 20, 21, 22, 23] { evening[hour] = 4 }
-        let shapes: [(name: String, series: [HistorySeries], labels: [String])] = [
-            ("at rest", [try shaped("main", rates: Array(repeating: 0.0, count: 24), days: 2)], ["main"]),
-            ("around the clock",
-             [try shaped("main", rates: Array(repeating: 1.0, count: 24), days: 2)], ["main"]),
-            ("an ordinary day", [try shaped("main", rates: evening, days: 2)], ["main"]),
-            ("two accounts, one of them silent",
-             [try shaped("main", rates: evening, days: 2),
-              try shaped("acc2", rates: Array(repeating: 0.0, count: 24), days: 2)], ["main", "acc2"]),
-        ]
-        for (name, series, labels) in shapes {
-            let load = try XCTUnwrap(FleetCapacity.load(histories: histories(series),
-                                                        accounts: try fleet(labels),
-                                                        windowHours: projecting, timeZone: utc), name)
-            let projection = try XCTUnwrap(load.projection, name)
-            XCTAssertLessThanOrEqual(projection.recentWorkHours, load.measuredHours,
-                                     "\(name): the recent window cannot be deeper than the history "
-                                     + "it was taken from — \(projection.recentWorkHours) h against "
-                                     + "\(load.measuredHours) h, which is the sentinel escaping")
-            if projection.workHoursPerDay == 0 {
-                XCTAssertEqual(projection.recentWorkHours, 0, accuracy: 0.0001,
-                               "\(name): no work hours, so no recent work window was ever opened")
-            } else {
-                XCTAssertGreaterThanOrEqual(projection.recentWorkHours,
-                                            FleetCapacity.minimumRecentWorkHours,
-                                            "\(name): a window under the floor is refused rather "
-                                            + "than reported")
-            }
-        }
+        let answer = try XCTUnwrap(FleetCapacity.sustainable(histories: histories([flat]),
+                                                             accounts: try fleet(["main"]),
+                                                             spentTokens: spend, timeZone: utc))
+        XCTAssertEqual(answer.workHoursPerDay, 24)
+        XCTAssertEqual(answer.sleepHoursPerDay, 0)
+        XCTAssertEqual(answer.sleepRate, 0, "there are no sleeping hours to have a rate")
+        XCTAssertEqual(answer.allowedWorkRate, 100.0 / 168, accuracy: 0.0001,
+                       "nothing is taken out for the nights, so the whole window is the week's")
     }
 
     /// The threshold is held where a measurement put it, by an hour that sits
@@ -1185,10 +871,10 @@ final class FleetCapacityProjectionTests: XCTestCase {
         var rates = Array(repeating: 0.05, count: 24)
         for hour in [0, 1, 18, 19, 20, 21, 22, 23] { rates[hour] = 4 }
         rates[12] = 0.485
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([try shaped("main", rates: rates, days: 2)]),
-                                                    accounts: try fleet(["main"]),
-                                                    windowHours: projecting, timeZone: utc))
-        XCTAssertEqual(try XCTUnwrap(load.projection).workHoursPerDay, 8, """
+        let answer = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try shaped("main", rates: rates, days: 2)]),
+            accounts: try fleet(["main"]), spentTokens: spend, timeZone: utc))
+        XCTAssertEqual(answer.workHoursPerDay, 8, """
             0.485 pp/h is 0.35 of this fixture's mean: under \(FleetCapacity.self)'s threshold and \
             over a quarter of the mean, so the fraction is what decides it
             """)
@@ -1216,44 +902,458 @@ final class FleetCapacityProjectionTests: XCTestCase {
             """)
     }
 
-    /// An account whose reading wobbles down by a point has not un-burned
-    /// anything, and left signed its negative rate would make the rest of the
-    /// fleet look cheaper. The same fixture the window average reads as 0%
-    /// (`testAnIdleAccountJitteringDownDoesNotSubtractDemand`), cut into hours.
-    func testAnIdleAccountJitteringDownDoesNotSubtractDemandHereEither() throws {
-        var readings: [(Date, Double?)] = []
-        for sample in 0...(30 * 12) {
-            readings.append((midnight.addingTimeInterval(Double(sample) * 300),
-                             sample == 30 * 12 ? 49 : 50))
+    /// **A class of hours that nets downwards burns at zero, not below it.** The
+    /// buckets carry the ±1 sawtooth signed — that is what makes them telescope —
+    /// so a stretch of quiet hours can add up to a negative change, and a rate
+    /// left signed there would *widen* what a working hour is allowed. That is
+    /// the unsafe direction: the fleet would be told it may spend more because
+    /// one of its readings wobbled.
+    ///
+    /// The fixture works twelve hours a day at 4 pp/h and spends the other twelve
+    /// asleep, dropping a point a day and never recovering it: −2 pp over the two
+    /// days across every sleeping bucket. The clamp inside `rate(over:)` is what
+    /// turns that into 0.000 pp/h, and with it the nights take nothing out of the
+    /// week — `allowedWorkRate` is exactly 100 pp over 12 x 7 working hours.
+    /// Unclamped the same fixture pays the nights −7 pp of the week and hands a
+    /// working hour 1.274 pp/h instead of 1.190.
+    ///
+    /// Asked through `sustainable` rather than of the clamp directly, because
+    /// that is where the number goes: `rate(over:)` is private, and a test that
+    /// reached past the reader would be checking arithmetic nobody consumes.
+    func testAClassOfHoursThatNetsDownwardsBurnsAtZero() throws {
+        var value = 0.0
+        var readings: [(Date, Double?)] = [(midnight, 0)]
+        for sample in 1...(48 * 12) {
+            let hour = (sample - 1) / 12 % 24
+            if hour >= 12 {
+                value += 4 * 300 / 3600
+            } else if hour == 6, (sample - 1) % 12 == 0 {
+                // One step down a day, inside the sawtooth and so not a reset.
+                value -= 1
+            }
+            readings.append((midnight.addingTimeInterval(Double(sample) * 300), value))
         }
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([try series("main", readings)]),
-                                                    accounts: try fleet(["main"]),
-                                                    windowHours: projecting, timeZone: utc))
-        XCTAssertEqual(load.percent, 0, accuracy: 0.0001, "a fleet at rest is 0% loaded, not below it")
+        let answer = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try series("main", readings)]),
+            accounts: try fleet(["main"]), spentTokens: spend, timeZone: utc))
+        XCTAssertEqual(answer.workHoursPerDay, 12, "the fixture is not the day it was meant to be")
+        XCTAssertEqual(answer.sleepRate, 0, accuracy: 0.0001,
+                       "the sleeping hours net −2 pp; signed, they would give the week 7 pp back")
+        XCTAssertEqual(answer.allowedWorkRate, 100.0 / (12 * 7), accuracy: 0.0001,
+                       "a wobble downwards widened what a working hour may spend")
     }
 
-    // MARK: - Capacity over contributors
 
-    /// Capacity counts the accounts that gave a rate and nobody else, on this
-    /// path as on the other: an account with no usable history must not widen the
-    /// denominator its own demand is missing from.
-    func testCapacityCountsTheContributorsOnly() throws {
-        var rates = Array(repeating: 0.05, count: 24)
-        for hour in 18...23 { rates[hour] = 4 }
-        let measured = try shaped("acc2", rates: rates, days: 2)
-        let tooShort = try series("acc3", [(midnight, 0), (midnight.addingTimeInterval(6 * 3600), 5)])
-        let load = try XCTUnwrap(FleetCapacity.load(histories: histories([measured, tooShort]),
-                                                    accounts: try fleet(["acc2", "acc3", "main"]),
-                                                    windowHours: projecting, timeZone: utc))
-        XCTAssertEqual(load.accounts, 1, "acc3 has six hours and main has none: neither is a supply we can count")
+}
 
-        let both = try XCTUnwrap(FleetCapacity.load(
-            histories: histories([measured, try shaped("acc3", rates: rates, days: 2)]),
-            accounts: try fleet(["acc2", "acc3"]), windowHours: projecting, timeZone: utc))
-        XCTAssertEqual(both.accounts, 2)
-        XCTAssertEqual(both.percent, load.percent, accuracy: 0.5, """
-            two identical accounts double both halves of the fraction, so the load is the same — \
-            which is what says capacity followed the contributors rather than the account list
+/// The allowance: what the fleet may spend an hour of work and still have the
+/// week last, in the same unit the gateway reports spending in.
+///
+/// The arithmetic is a chain — points burned, tokens spent, the price of a
+/// point, the day split into work and sleep, and what a working hour is left
+/// with — and every link can fail on its own. The refusals are half of this
+/// file, and each of them is reached by a series that satisfies every link but
+/// one.
+final class FleetCapacityAllowanceTests: XCTestCase {
+
+    // MARK: - Fixtures
+
+    /// 2026-08-14 00:00:00 UTC, midnight so the hour buckets line up with the
+    /// numbers in the fixtures. The same instant and the same zone the
+    /// projection's tests use, and for the same reason.
+    private let midnight = Date(timeIntervalSince1970: 1_786_665_600)
+    private let utc = TimeZone(secondsFromGMT: 0)!
+
+    private func series(_ label: String, _ readings: [(Date, Double?)]) throws -> HistorySeries {
+        let points = readings.map { at, value in
+            "{\"ts\": \(at.timeIntervalSince1970), \"util_7d\": \(value.map { "\($0)" } ?? "null")}"
+        }
+        return try UsageFixtures.decode("""
+        {"label": "\(label)", "since": \(midnight.timeIntervalSince1970), \
+        "points": [\(points.joined(separator: ","))]}
+        """, as: HistorySeries.self)
+    }
+
+    /// A series shaped like a day, exactly as the projection's fixtures are
+    /// shaped: 24 hourly rates in pp/h, climbed at one sample every five
+    /// minutes.
+    private func shaped(_ label: String, rates: [Double], days: Int) throws -> HistorySeries {
+        let step = 300.0
+        var value = 0.0
+        var readings: [(Date, Double?)] = [(midnight, 0)]
+        for sample in 1...(days * 24 * 12) {
+            value += rates[(sample - 1) / 12 % 24] * step / 3600
+            readings.append((midnight.addingTimeInterval(Double(sample) * step), value))
+        }
+        return try series(label, readings)
+    }
+
+    private func fleet(_ labels: [String]) throws -> [AccountUsage] {
+        let body = labels.map { "\"\($0)\": {}" }.joined(separator: ",")
+        return try UsageFixtures.decode("{\"accounts\": {\(body)}}", as: UsageReport.self).accounts
+    }
+
+    private func histories(_ all: [HistorySeries]) -> [String: HistorySeries] {
+        Dictionary(uniqueKeysWithValues: all.map { ($0.label, $0) })
+    }
+
+    /// The day every test here works from: eight hours at 4 pp/h and sixteen at
+    /// 0.05, which is the projection's own fixture. The mean is 1.3667 pp/h, the
+    /// threshold 0.615, and the eight busy hours are the work hours.
+    private func workingDay(_ label: String = "main", sleeping: Double = 0.05,
+                            working: Double = 4, days: Int = 2) throws -> HistorySeries {
+        var rates = Array(repeating: sleeping, count: 24)
+        for hour in [0, 1, 18, 19, 20, 21, 22, 23] { rates[hour] = working }
+        return try shaped(label, rates: rates, days: days)
+    }
+
+    /// The tokens that make one point cost exactly a million over the standard
+    /// fixture: it burns 2 x (8 x 4 + 16 x 0.05) = 65.6 pp over its two days.
+    private let tokensForAMillionAPoint = 65_600_000.0
+
+    // MARK: - The allowance itself
+
+    /// The whole chain in one fixture, every number redoable on paper.
+    ///
+    /// 65.6 pp burned and 65.6M tokens spent make a point cost 1.000M. The
+    /// sleeping hours take 0.05 x 16 x 7 = 5.6 pp of the week, so 94.4 pp are
+    /// left for 8 x 7 = 56 working hours: 1.6857 pp/h, which at a million a
+    /// point is 1,685,714 tokens an hour.
+    func testTheAllowanceIsWhatTheSleepingHoursLeaveSpreadOverTheWorkingOnes() throws {
+        let answer = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try workingDay()]), accounts: try fleet(["main"]),
+            spentTokens: tokensForAMillionAPoint, timeZone: utc))
+
+        XCTAssertEqual(answer.tokensPerPoint, 1_000_000, accuracy: 100,
+                       "65.6M tokens over the 65.6 pp they cost")
+        XCTAssertEqual(answer.workHoursPerDay, 8, "the eight hours above 0.45 of the fleet's own mean")
+        XCTAssertEqual(answer.sleepHoursPerDay, 16, "and the day has 24 hours in it")
+        XCTAssertEqual(answer.sleepRate, 0.05, accuracy: 0.005,
+                       "the sleeping hours keep their own rate rather than being read as zero")
+        XCTAssertEqual(answer.allowedWorkRate, 1.6857, accuracy: 0.001, "(100 − 5.6) / 56")
+        XCTAssertEqual(answer.tokensPerHour, 1_685_714, accuracy: 500, "1.6857 pp/h at a million a point")
+        XCTAssertEqual(answer.accounts, 1)
+        XCTAssertEqual(answer.measuredHours, 48, accuracy: 0.1)
+    }
+
+    /// **It is the working rate and never the flat weekly average**, and the
+    /// difference is the whole reason this is not one division.
+    ///
+    /// What the allowance is compared against is measured over five minutes,
+    /// which is to say while somebody is working. Spread the same capacity over
+    /// all 168 hours of the week and this fixture would allow 595k tokens an
+    /// hour — so a fleet working at its true sustainable rate would read 283% and
+    /// every healthy working day would look like an overrun. That is the reading
+    /// this project already threw the gateway's own `pace` away for (§2.7).
+    func testTheAllowanceIsNotTheCapacitySpreadOverTheWholeWeek() throws {
+        let answer = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try workingDay()]), accounts: try fleet(["main"]),
+            spentTokens: tokensForAMillionAPoint, timeZone: utc))
+        let flat = 100.0 / 168 * answer.tokensPerPoint
+
+        XCTAssertEqual(flat, 595_238, accuracy: 500, "capacity over every hour of the week")
+        XCTAssertEqual(answer.tokensPerHour / flat, 2.83, accuracy: 0.05, """
+            the working hours carry the week, so an hour of work is allowed nearly three times what \
+            an hour of the week averages to — and against a rate measured while somebody works, the \
+            flat figure calls a healthy day an overrun
             """)
+    }
+
+    /// The exchange rate is the window's tokens over the window's points and
+    /// nothing else: twice the tokens for the same burn is twice the allowance.
+    ///
+    /// It is the one link in the chain that comes from outside the histories,
+    /// and a fixture that never varied it would pass on an allowance that
+    /// ignored the tokens altogether.
+    func testTheAllowanceScalesWithWhatAPointCosts() throws {
+        func allowance(spending tokens: Double) throws -> Double {
+            try XCTUnwrap(FleetCapacity.sustainable(
+                histories: histories([try workingDay()]), accounts: try fleet(["main"]),
+                spentTokens: tokens, timeZone: utc)).tokensPerHour
+        }
+        XCTAssertEqual(try allowance(spending: 2 * tokensForAMillionAPoint),
+                       2 * (try allowance(spending: tokensForAMillionAPoint)), accuracy: 1, """
+            the same week's quota buys half as many hours when an hour costs twice as much — the \
+            allowance is a price, and the price is measured rather than assumed
+            """)
+    }
+
+    /// The sleeping hours are paid before the working ones are allowed anything.
+    /// Same shape, a sleeping rate ten times higher: 8.4 pp more of the week goes
+    /// to the nights, and the working hours are allowed exactly that much less.
+    func testTheSleepingHoursAreTakenOutOfTheWeekBeforeTheWorkingOnesAreAllowed() throws {
+        let quiet = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try workingDay(sleeping: 0.05)]), accounts: try fleet(["main"]),
+            spentTokens: tokensForAMillionAPoint, timeZone: utc))
+        let noisy = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try workingDay(sleeping: 0.5)]), accounts: try fleet(["main"]),
+            spentTokens: tokensForAMillionAPoint, timeZone: utc))
+
+        XCTAssertEqual(noisy.workHoursPerDay, 8, "the split has not moved, so only the sleeping bill has")
+        XCTAssertLessThan(noisy.allowedWorkRate, quiet.allowedWorkRate, """
+            background agents spend at night, and a week that ignored them would allow the day \
+            hours a budget the nights have already taken
+            """)
+        XCTAssertEqual(quiet.allowedWorkRate - noisy.allowedWorkRate, (0.5 - 0.05) * 16 * 7 / 56,
+                       accuracy: 0.001, "the extra nightly spend, spread over the week's work hours")
+    }
+
+    /// Capacity counts the accounts that could be measured and nobody else, the
+    /// rule both estimators follow: a second identical account doubles capacity,
+    /// doubles the points burned and doubles the tokens, so the allowance per
+    /// hour of the fleet's work doubles with it.
+    func testCapacityCountsTheContributorsOnly() throws {
+        let one = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try workingDay("acc2")]), accounts: try fleet(["acc2", "acc3"]),
+            spentTokens: tokensForAMillionAPoint, timeZone: utc))
+        XCTAssertEqual(one.accounts, 1, "acc3 sent no history: it is not a supply anybody can count")
+
+        let two = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try workingDay("acc2"), try workingDay("acc3")]),
+            accounts: try fleet(["acc2", "acc3"]),
+            spentTokens: 2 * tokensForAMillionAPoint, timeZone: utc))
+        XCTAssertEqual(two.accounts, 2)
+        XCTAssertEqual(two.tokensPerHour, 2 * one.tokensPerHour, accuracy: 1, """
+            two accounts hold two weeks' quota and their work is spread over the same hours of the \
+            day, so the fleet may work twice as fast — the figure follows the contributors
+            """)
+    }
+
+    /// **A rate per account, then summed — never one total over one span.** The
+    /// accounts are watched over different depths (2.16 / 2.18 / 2.74 days over
+    /// acc2 / acc3 / main, live 2026-08-17), so dividing one total by the longest
+    /// of them credits the shallow account with hours nobody measured it over.
+    ///
+    /// The fixture is two identical days, one account watched for two of them and
+    /// one for one. Both sleep at 0.05 pp/h, so the fleet sleeps at 0.100; a
+    /// single total over the deeper account's 32 sleeping hours answers 0.075,
+    /// and the whole shape of the rule is the difference between those two.
+    func testTheSleepingRateIsSummedPerAccountRatherThanDividedByTheLongestSpan() throws {
+        let answer = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try workingDay("acc2", days: 2), try workingDay("acc3", days: 1)]),
+            accounts: try fleet(["acc2", "acc3"]),
+            spentTokens: tokensForAMillionAPoint, timeZone: utc))
+
+        XCTAssertEqual(answer.accounts, 2)
+        XCTAssertEqual(answer.sleepRate, 0.100, accuracy: 0.002, """
+            one total over the deeper account's span answers 0.075 pp/h, which is the shallow \
+            account measured over hours it was never measured over
+            """)
+        XCTAssertEqual(answer.measuredHours, 24, accuracy: 0.001,
+                       "the answer is as well measured as its worst-measured contributor")
+    }
+
+    /// A fleet with no accounts at all is not a fleet spending nothing, and the
+    /// tokens beside it do not make one: there is nothing to price them against.
+    func testAFleetWithNoAccountsHasNoAllowance() {
+        XCTAssertNil(FleetCapacity.sustainable(histories: [:], accounts: [],
+                                               spentTokens: tokensForAMillionAPoint, timeZone: utc))
+    }
+
+    /// Membership comes from the account list and not from whatever histories are
+    /// lying around: a series under a label the fleet does not have is not
+    /// capacity anybody can spend.
+    func testAHistoryUnderALabelTheFleetDoesNotHaveIsNotCapacity() throws {
+        let ghost = try workingDay("retired")
+        XCTAssertNil(FleetCapacity.sustainable(histories: histories([ghost]),
+                                               accounts: try fleet(["acc2"]),
+                                               spentTokens: tokensForAMillionAPoint, timeZone: utc),
+                     "a retired account's series was counted as a live account's capacity")
+    }
+
+    // MARK: - Refusals
+
+    /// A series shorter than a day cannot be split into work and sleep, so it
+    /// contributes neither an allowance nor its 100 pp of capacity — the same
+    /// refusal the projection makes, for the same reason: an hour nobody watched
+    /// is not a sleeping hour.
+    func testAnAccountWithoutAWholeDayOfHistoryIsRefused() throws {
+        let short = try series("main", [(midnight, 0), (midnight.addingTimeInterval(23 * 3600), 20)])
+        XCTAssertNil(FleetCapacity.sustainable(histories: histories([short]), accounts: try fleet(["main"]),
+                                               spentTokens: tokensForAMillionAPoint, timeZone: utc),
+                     "23 h has not seen the hour it never watched")
+
+        let day = try series("main", [(midnight, 0), (midnight.addingTimeInterval(24 * 3600), 20)])
+        XCTAssertNotNil(FleetCapacity.sustainable(histories: histories([day]), accounts: try fleet(["main"]),
+                                                  spentTokens: tokensForAMillionAPoint, timeZone: utc),
+                        "the minimum is a floor to stand on, not one to fall through")
+    }
+
+    /// **A fleet at rest has no allowance**, and that is a different answer from
+    /// the projection's, which reads such a fleet as 0% loaded. The question here
+    /// is what an hour of work may cost, and a fleet that has not worked has not
+    /// said. Answering the flat weekly average instead would be exactly the
+    /// comparison this figure exists to avoid.
+    func testAFleetAtRestHasNoAllowance() throws {
+        let idle = try shaped("main", rates: Array(repeating: 0, count: 24), days: 2)
+        XCTAssertNil(FleetCapacity.sustainable(histories: histories([idle]), accounts: try fleet(["main"]),
+                                               spentTokens: tokensForAMillionAPoint, timeZone: utc),
+                     "nothing burned is nothing to price an hour of work by")
+    }
+
+    /// **The invariant that keeps the week of work hours from being zero hours
+    /// long**, and the reason there is no separate guard for it.
+    ///
+    /// A fleet that burned something always has at least one working hour: the
+    /// threshold is a fraction of the fleet's own rate, so an hour clears it
+    /// whenever that rate is above zero — and the rate is above zero exactly when
+    /// the burn is, both being the same clamped sum over the same buckets. A
+    /// guard asking it a second time was written and taken back out, because no
+    /// series reaches it and a branch that cannot execute is not a safeguard.
+    /// This is what stands in its place, and it is asked over every shape this
+    /// file can make: a working day, a flat fleet that never sleeps, a day with
+    /// one busy hour in it, and a series of two readings a day apart.
+    func testAnAnswerAlwaysHasWorkHoursToSpreadTheWeekOver() throws {
+        var oneBusyHour = Array(repeating: 0.0, count: 24)
+        oneBusyHour[3] = 10
+        let shapes: [(String, HistorySeries)] = [
+            ("a working day", try workingDay()),
+            ("a fleet that never sleeps", try shaped("main", rates: Array(repeating: 2, count: 24), days: 2)),
+            ("one busy hour", try shaped("main", rates: oneBusyHour, days: 2)),
+            ("two readings a day apart",
+             try series("main", [(midnight, 0), (midnight.addingTimeInterval(24 * 3600), 20)])),
+        ]
+        for (name, shape) in shapes {
+            let answer = try XCTUnwrap(FleetCapacity.sustainable(
+                histories: histories([shape]), accounts: try fleet(["main"]),
+                spentTokens: tokensForAMillionAPoint, timeZone: utc), "\(name) had no answer at all")
+            XCTAssertGreaterThanOrEqual(answer.workHoursPerDay, 1, """
+                \(name) burned points and answered zero work hours: the week the allowance is \
+                spread over is then zero hours long, and the figure is an infinity
+                """)
+            XCTAssertTrue(answer.tokensPerHour.isFinite, "\(name) answered an allowance that is not a number")
+        }
+    }
+
+    /// **The invariant that makes a guard on an empty contributor set
+    /// unnecessary**, and the sibling of the one above.
+    ///
+    /// The burn the price of a point divides by is the sum over the contributors
+    /// and nothing else. An account nobody could measure is not in that sum, so
+    /// a fleet where nobody could be measured sums nothing and `burned > 0`
+    /// refuses it. A `!measured.isEmpty` stood in front of that and decided
+    /// nothing on any input: removing it killed 0 of the 531 tests the suite then
+    /// held (2026-08-24), so it is gone.
+    ///
+    /// **Asking only whether such a fleet is refused would not hold this**, which
+    /// is why the two tests that look like its cover are not it: the capacity of
+    /// no contributors is zero, so `capacity - sleepingWeek > 0` refuses the same
+    /// fleet a second time and the answer stays `nil` however the burn is formed.
+    /// What is asked instead is the sum itself, through the one figure that
+    /// prints it — `tokensPerPoint` is the fleet's tokens over exactly that sum —
+    /// and then the step from "the sum over the contributors" to "an empty sum is
+    /// zero": an account nobody could measure joins the fleet and moves neither
+    /// the price nor the count.
+    func testThePriceOfAPointDividesByTheContributorsAndNothingElse() throws {
+        let day = try workingDay()
+        let measured = try XCTUnwrap(FleetCapacity.measureHourly(day.points, resetsAt: nil,
+                                                                 timeZone: utc))
+        let burned = max(0, FleetCapacity.burn(over: measured.buckets))
+
+        let answer = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([day]), accounts: try fleet(["main"]),
+            spentTokens: tokensForAMillionAPoint, timeZone: utc))
+        XCTAssertEqual(answer.tokensPerPoint, tokensForAMillionAPoint / burned, accuracy: 0.001, """
+            the price of a point is not the fleet's tokens over the burn its contributors summed \
+            to, so an empty set of them is not a division by nothing either
+            """)
+
+        // The second link, and the one the removed guard was standing on: an
+        // account that cannot be measured is not a contributor, so it adds
+        // nothing to that sum — which is what makes the sum over *no* contributor
+        // a zero rather than something a guard had to catch first.
+        let unmeasurable = try series("acc2", [(midnight, 0),
+                                               (midnight.addingTimeInterval(23 * 3600), 20)])
+        XCTAssertNil(FleetCapacity.measureHourly(unmeasurable.points, resetsAt: nil, timeZone: utc),
+                     "the fixture has to be unmeasurable, or it proves nothing")
+        let joined = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([day, unmeasurable]), accounts: try fleet(["main", "acc2"]),
+            spentTokens: tokensForAMillionAPoint, timeZone: utc))
+        XCTAssertEqual(joined.tokensPerPoint, answer.tokensPerPoint, accuracy: 0.001,
+                       "an account nobody could measure moved the burn it is not part of")
+        XCTAssertEqual(joined.accounts, 1, "and it was counted as a contributor")
+    }
+
+    /// **A fleet that worked and came back to where it started burned nothing**,
+    /// and a point cannot be priced by dividing into that.
+    ///
+    /// This is the shape that keeps the second guard from being the first one
+    /// again: the series climbs 5 pp over the small hours and gives every point
+    /// back a tenth at a time — falls inside the sawtooth, so nothing is refused
+    /// as a hidden reset — and it plainly has work hours. What it has not got is
+    /// a net burn.
+    func testASeriesThatEndsWhereItBeganPricesNoPoint() throws {
+        var readings: [(Date, Double?)] = [(midnight, 0)]
+        var value = 0.0
+        for sample in 1...(48 * 12) {
+            let hour = (sample - 1) / 12 % 24
+            // Up through the first five hours of the day, back down through the
+            // rest of it, a tenth of a point at a time.
+            value += hour < 5 ? 0.5 : -0.5 * 5 / 19
+            readings.append((midnight.addingTimeInterval(Double(sample) * 300), max(0, value)))
+        }
+        let there = try series("main", readings)
+        let hourly = try XCTUnwrap(FleetCapacity.measureHourly(there.points, resetsAt: nil, timeZone: utc))
+        XCTAssertEqual(FleetCapacity.burn(over: hourly.buckets), 0, accuracy: 0.5,
+                       "the fixture has to end where it began, or it proves nothing")
+
+        XCTAssertNil(FleetCapacity.sustainable(histories: histories([there]), accounts: try fleet(["main"]),
+                                               spentTokens: tokensForAMillionAPoint, timeZone: utc),
+                     "no points burned, so nothing says what a point costs")
+    }
+
+    /// The other half of the same guard: points were burned and the gateway
+    /// reported no spending to price them with. Unknown is not zero (§2.7), and
+    /// a price of nothing an hour would be drawn as a fleet with no budget at
+    /// all rather than as a figure nobody measured.
+    func testAWindowWithNoSpendingInItPricesNoPoint() throws {
+        XCTAssertNil(FleetCapacity.sustainable(histories: histories([try workingDay()]),
+                                               accounts: try fleet(["main"]),
+                                               spentTokens: 0, timeZone: utc),
+                     "the sessions half named no tokens: that is silence, not a week that cost nothing")
+    }
+
+    /// **A week whose nights already spend the whole quota leaves the days
+    /// nothing**, and the honest answer is no figure rather than "zero an hour".
+    ///
+    /// Eight hours at 10 pp/h and sixteen at 0.9 — the threshold is 1.77, so the
+    /// nights stay nights — and 0.9 x 16 x 7 = 100.8 pp of a 100 pp week is gone
+    /// before a working hour is allowed anything. The control drops the nights to
+    /// 0.85, which is 95.2 pp and leaves 4.8 to spread.
+    func testAWeekAlreadySpentOnItsNightsHasNoAllowance() throws {
+        XCTAssertNil(FleetCapacity.sustainable(
+            histories: histories([try workingDay(sleeping: 0.9, working: 10, days: 1)]),
+            accounts: try fleet(["main"]), spentTokens: tokensForAMillionAPoint, timeZone: utc), """
+            100.8 pp of nights against a 100 pp week: the subtraction has gone negative, and a floor \
+            at zero would draw that as a budget rather than as arithmetic with no answer
+            """)
+
+        let control = try XCTUnwrap(FleetCapacity.sustainable(
+            histories: histories([try workingDay(sleeping: 0.85, working: 10, days: 1)]),
+            accounts: try fleet(["main"]), spentTokens: tokensForAMillionAPoint, timeZone: utc))
+        XCTAssertGreaterThan(control.allowedWorkRate, 0, "95.2 pp of nights still leaves 4.8 pp to spread")
+    }
+
+    /// An account pinned at its ceiling for the whole window is not an account
+    /// that spent nothing, it is one whose spending was refused and never
+    /// measured — so it takes its capacity out with it, exactly as it does on
+    /// both estimators (§2.7).
+    func testAnAccountPinnedAtItsCeilingContributesNeitherAllowanceNorCapacity() throws {
+        let pinned = try series("acc3", (0...48).map {
+            (midnight.addingTimeInterval(Double($0) * 3600), Double?(100))
+        })
+        XCTAssertNil(FleetCapacity.sustainable(histories: histories([pinned]),
+                                               accounts: try fleet(["acc3"]),
+                                               spentTokens: tokensForAMillionAPoint, timeZone: utc),
+                     "a flat 100 is a blocked account, and its demand was never zero")
+
+        // The control: the same account with one reading below the ceiling is
+        // measured again, which is what says the refusal is about the ceiling
+        // rather than about the shape of the fixture.
+        var below = (0...48).map { (midnight.addingTimeInterval(Double($0) * 3600), Double?(60)) }
+        for hour in [18, 19, 20, 42, 43, 44] { below[hour].1 = Double(60 + hour) }
+        XCTAssertNotNil(FleetCapacity.sustainable(histories: histories([try series("acc3", below)]),
+                                                  accounts: try fleet(["acc3"]),
+                                                  spentTokens: tokensForAMillionAPoint, timeZone: utc))
     }
 }

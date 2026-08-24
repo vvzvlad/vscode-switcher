@@ -32,6 +32,38 @@ enum UsageFixtures {
                            "seven_day": {"utilization": 5.0, "resets_at": "2026-08-22T21:00:00Z", "known": true}, "...": {}}}}
     """
 
+    /// The same report with a second account in it, for the one question a
+    /// one-account fleet cannot ask: what it costs when an account is refused and
+    /// leaves with its 100 pp of capacity.
+    static let usageTwoAccounts = """
+    {"fleet": {"accounts": 2, "eligible": 2,
+      "seven_day": {"mean": 58.667, "min": 5.0, "max": 99.0, "best_label": "acc2", "accounts": 2, "no_data": 0}},
+     "accounts": {"acc2": {"seven_day": {"utilization": 5.0, "known": true}},
+                  "acc3": {"seven_day": {"utilization": 40.0, "known": true}}}}
+    """
+
+    /// The same endpoint on 2026-08-24, when it had grown the `tokens` block the
+    /// headline's lead figure is read from. Copied verbatim, one account and the
+    /// fleet, so the two can be checked against each other: the fleet's four
+    /// rates are the sum of the accounts'.
+    static let usageWithTokens = """
+    {"fleet": {"accounts": 3, "eligible": 2,
+      "tokens": {"window_seconds": 300,
+                 "per_second": {"input_tokens": 218.53, "output_tokens": 174.427,
+                                "cache_read_input_tokens": 55836.677,
+                                "cache_creation_input_tokens": 1091.747},
+                 "responses": 69, "incomplete": 0, "sessions": 6},
+      "seven_day": {"mean": 50.0, "min": 10.0, "max": 99.0, "best_label": "main", "accounts": 3, "no_data": 0}},
+     "accounts": {"acc2": {"five_hour": {"utilization": 25.0, "resets_at": "2026-08-24T00:50:00Z", "known": true},
+                           "seven_day": {"utilization": 41.0, "resets_at": "2026-08-29T21:00:00Z", "known": true},
+                           "tokens": {"window_seconds": 300,
+                                      "per_second": {"input_tokens": 120.483, "output_tokens": 62.253,
+                                                     "cache_read_input_tokens": 18936.567,
+                                                     "cache_creation_input_tokens": 468.033},
+                                      "responses": 21, "incomplete": 0, "sessions": 2},
+                           "eligible": true, "unified_status": "allowed"}}}
+    """
+
     static let history = """
     {"label": "main", "since": 1786700000, "now": 1786786400, "units": "percent",
      "max_points": 2000, "truncated": false,
@@ -124,6 +156,104 @@ final class UsageDecodingTests: XCTestCase {
     func testAFleetMeanOverNoAccountsIsNil() throws {
         let report = try UsageFixtures.decode(UsageFixtures.usageWithoutReadings, as: UsageReport.self)
         XCTAssertNil(report.fleet?.sevenDay?.mean)
+    }
+
+    // MARK: - The live token rate
+
+    /// The block the headline's lead figure is read straight out of, weighted
+    /// the one way four differently priced counters may be weighted.
+    ///
+    /// `218.53 + 5 x 174.427 + 1.25 x 1091.747 + 0.1 x 55836.677 = 8039.0164`
+    /// input-equivalent tokens a second, which is 28,940,459 an hour. Every
+    /// number is the live body of 2026-08-24 and the arithmetic is redoable on
+    /// paper.
+    func testTheFleetsTokenRateIsWeightedAndCarriedToTheHour() throws {
+        let report = try UsageFixtures.decode(UsageFixtures.usageWithTokens, as: UsageReport.self)
+        let tokens = try XCTUnwrap(report.fleet?.tokens)
+        XCTAssertEqual(tokens.windowSeconds, 300, "the body's own window, never a constant of ours")
+        XCTAssertEqual(try XCTUnwrap(tokens.perHour()), 28_940_459.22, accuracy: 0.01, """
+            output is billed at five times input and a cache read at a tenth, so the raw sum of \
+            the four is a number that appears on no invoice (§2.7)
+            """)
+    }
+
+    /// An older gateway has no `tokens` block at all, and that must cost the
+    /// quota figures beside it nothing: the popover falls back to the weekly
+    /// mean, which is exactly what it drew before this figure existed.
+    func testAGatewayWithNoTokenBlockStillReportsItsQuota() throws {
+        let report = try UsageFixtures.decode(UsageFixtures.usage, as: UsageReport.self)
+        XCTAssertNil(report.fleet?.tokens, "the 2026-08-16 body, which had no such block")
+        XCTAssertEqual(report.fleet?.sevenDay?.mean, 58.667, "and the half that was there still arrives")
+    }
+
+    /// Every way the block can be there and still not carry a rate. Each answers
+    /// `nil`, and `nil` is what moves the headline back to the quota rather than
+    /// what puts a wrong number on it.
+    ///
+    /// **"Every" was a promise this made and did not keep**, and the two forms it
+    /// did not ask were the two that the arithmetic refuses rather than the
+    /// decoder: a counter that is negative, and a counter so large that the
+    /// figure overflows on its way to an hour. Both decode without complaint —
+    /// they are ordinary JSON numbers — and removing the guard they land on
+    /// killed 0 of 531 tests until they were added (2026-08-24). They also ask
+    /// the guard from its two sides: the negative one is refused before the
+    /// multiplication and the huge one only after it.
+    func testEveryUnusableTokenBlockIsNoRateRatherThanZero() throws {
+        func rate(_ body: String) throws -> TokenRate? {
+            try UsageFixtures.decode("{\"fleet\": {\(body)}}", as: UsageReport.self).fleet?.tokens
+        }
+        let full = """
+        "per_second": {"input_tokens": 1.0, "output_tokens": 2.0, \
+        "cache_read_input_tokens": 3.0, "cache_creation_input_tokens": 4.0}
+        """
+
+        XCTAssertNil(try rate("\"tokens\": null"), "statistics off: a null block is not a rate of zero")
+        XCTAssertNil(try rate("\"tokens\": {\"window_seconds\": 0, \(full)}")?.perHour(), """
+            the gateway divided by this window, so a window of zero means whatever came back is \
+            not a rate at all
+            """)
+        XCTAssertNil(try rate("\"tokens\": {\(full)}")?.perHour(),
+                     "a block that names no window cannot say what its rates are an average of")
+        XCTAssertNil(try rate("\"tokens\": {\"window_seconds\": 300}")?.perHour(),
+                     "a window with no rates under it")
+        XCTAssertNil(try rate("""
+            "tokens": {"window_seconds": 300, "per_second": {"input_tokens": 1.0, \
+            "cache_read_input_tokens": 3.0, "cache_creation_input_tokens": 4.0}}
+            """)?.perHour(), """
+            all four counters or none: output is five times input, so a rate missing it understates \
+            by most of itself — and this figure has no `≥` to say so with (§2.7)
+            """)
+        XCTAssertNil(try rate("""
+            "tokens": {"window_seconds": 300, "per_second": {"input_tokens": -1.0, \
+            "output_tokens": 0.0, "cache_read_input_tokens": 0.0, \
+            "cache_creation_input_tokens": 0.0}}
+            """)?.perHour(), """
+            a counter below zero decodes as happily as any other number, and a negative rate is \
+            not a slower one — it is a body this app cannot state. The other three are zero on \
+            purpose: what is refused is the weighted rate rather than the counter, and beside \
+            the fixture above's own 2.0 / 3.0 / 4.0 a -1.0 input still totals +14.3 a second
+            """)
+        XCTAssertNil(try rate("""
+            "tokens": {"window_seconds": 300, "per_second": {"input_tokens": 1e306, \
+            "output_tokens": 0.0, "cache_read_input_tokens": 0.0, \
+            "cache_creation_input_tokens": 0.0}}
+            """)?.perHour(), """
+            1e306 a second is a finite rate and 3600 times it is not: the check has to stand on \
+            the figure that leaves, or the headline reads `infB/h` and the ramp is pinned red
+            """)
+    }
+
+    /// Zero is the one reading here that is not an absence. A fleet with nothing
+    /// running spends nothing, and drawing `0/h` over its allowance is the true
+    /// picture of that; answering `nil` instead would move the headline back to
+    /// the quota exactly when the news is good.
+    func testAFleetSpendingNothingReadsZeroRatherThanNothing() throws {
+        let idle = """
+        {"fleet": {"tokens": {"window_seconds": 300, "per_second": {"input_tokens": 0.0, \
+        "output_tokens": 0.0, "cache_read_input_tokens": 0.0, "cache_creation_input_tokens": 0.0}}}}
+        """
+        let tokens = try XCTUnwrap(try UsageFixtures.decode(idle, as: UsageReport.self).fleet?.tokens)
+        XCTAssertEqual(tokens.perHour(), 0, "a reading of nothing spent, not the absence of a reading")
     }
 
     func testHistoryBodyDecodes() throws {
@@ -1045,14 +1175,19 @@ final class UsageStoreTests: XCTestCase {
     private func transport(usage: String? = UsageFixtures.usage,
                            sessions: String? = "{\"since\": 1786761516, \"sessions\": []}",
                            history: String? = UsageStoreTests.risingHistory,
+                           historyByLabel: [String: String] = [:],
                            status: Int = 200,
                            log: RequestLog? = nil) -> UsageClient.Transport {
         { request in
             let path = request.url?.path ?? ""
-            log?.record(path)
+            log?.record(request.url)
             let body: String?
             if path.hasSuffix("/history") {
-                body = history
+                // `/gw/usage/<label>/history`, so the label is the component
+                // before the last one — which is what lets a fixture give two
+                // accounts two different series.
+                let label = request.url?.pathComponents.dropLast().last ?? ""
+                body = historyByLabel[label] ?? history
             } else if path.hasSuffix("/sessions") {
                 body = sessions
             } else {
@@ -1089,6 +1224,109 @@ final class UsageStoreTests: XCTestCase {
 
     private func client(_ transport: @escaping UsageClient.Transport) -> UsageClient {
         UsageClient(baseURL: Config.default.resolvedUsageBaseURL, transport: transport)
+    }
+
+    /// A window's worth of spending, so the allowance half has tokens to price its
+    /// points with. One session, and its counters weigh 65.6M input-equivalent:
+    /// `50 + 5 x 24264 + 1.25 x 41120 + 0.1 x 654_181_300`.
+    private static let spendingSessions = """
+    {"since": 1786761516, "sessions": [
+      {"session_id": "s-1", "input_tokens": 50, "output_tokens": 24264,
+       "cache_creation_input_tokens": 41120, "cache_read_input_tokens": 654181300}]}
+    """
+
+    /// **The two halves of the exchange rate are measured over one window.**
+    ///
+    /// The points come from the histories and the tokens from `/gw/sessions`, and
+    /// a ratio of two different windows is not a price of anything. So the
+    /// allowance half asks its own `/gw/sessions` with the `since` it asked the
+    /// histories with — which is not the week the panel's per-project figures are
+    /// asked over, and that second window has to stay where it is.
+    func testTheAllowanceHalfMeasuresItsTwoQuestionsOverOneWindow() async {
+        let log = RequestLog()
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        _ = await UsageStore.poll(client: client(transport(usage: UsageFixtures.usageWithTokens,
+                                                           sessions: Self.spendingSessions,
+                                                           log: log)),
+                                  previous: .empty, now: now)
+
+        let histories = log.windows(of: "/history")
+        let sessions = log.windows(of: "/sessions")
+        XCTAssertEqual(histories.count, 1)
+        XCTAssertEqual(sessions.count, 2,
+                       "the allowance half asks a question of its own, and it asks it once")
+        XCTAssertEqual(sessions.first, histories.first, """
+            the points and the tokens were counted over two different windows, which makes their \
+            ratio the price of nothing
+            """)
+        XCTAssertEqual(sessions.last ?? 0,
+                       (now.timeIntervalSince1970 - UsageStore.windowSeconds).rounded(.down),
+                       accuracy: 1,
+                       "the week the panel's own figures are counted over moved with it")
+    }
+
+    /// A good pass produces both rates, and the arithmetic behind the second one
+    /// is the arithmetic `FleetCapacity.sustainable` was tested on.
+    ///
+    /// The fixture's series is a straight climb, so every hour of the day burns
+    /// the same and all 24 are work hours — the degenerate split, where the
+    /// allowance collapses to the week's capacity spread evenly. 100 pp over
+    /// 168 h is 0.5952 pp/h, and 65.6M tokens over 50 pp makes a point cost
+    /// 1.312M, so an hour is allowed 780,952 tokens.
+    func testAGoodPassProducesBothOfTheHeadlinesRates() async {
+        let snapshot = await UsageStore.poll(
+            client: client(transport(usage: UsageFixtures.usageWithTokens,
+                                     sessions: Self.spendingSessions)),
+            previous: .empty, now: Date())
+
+        XCTAssertEqual(snapshot.fleetTokenRate ?? 0, 28_940_459.22, accuracy: 0.01,
+                       "the live rate is the gateway's own, weighted and carried to the hour")
+        let allowance = try? XCTUnwrap(snapshot.sustainable)
+        XCTAssertEqual(allowance?.tokensPerPoint ?? 0, 1_312_000, accuracy: 1000)
+        XCTAssertEqual(allowance?.allowedWorkRate ?? 0, 100.0 / 168, accuracy: 0.0001,
+                       "a fleet that burns around the clock has no sleeping hours to pay for")
+        XCTAssertEqual(allowance?.tokensPerHour ?? 0, 780_952, accuracy: 1000)
+    }
+
+    /// Two requests make up the allowance half and the blame names whichever
+    /// failed — a half that fails without saying which request is a half nobody
+    /// can debug (§4).
+    func testEachRequestOfTheAllowanceHalfIsBlamedByItsOwnName() async {
+        let noHistory = await UsageStore.poll(
+            client: client(transport(usage: UsageFixtures.usageWithTokens,
+                                     sessions: Self.spendingSessions, history: nil)),
+            previous: .empty, now: Date())
+        XCTAssertEqual(noHistory.allowanceFailure?.contains("/gw/usage/<label>/history"), true)
+        XCTAssertNil(noHistory.sessionsFailure, "the week's own half answered and is not to blame")
+
+        let noSessions = await UsageStore.poll(
+            client: client(transport(usage: UsageFixtures.usageWithTokens, sessions: nil)),
+            previous: .empty, now: Date())
+        XCTAssertEqual(noSessions.allowanceFailure?.contains("/gw/sessions"), true,
+                       "the allowance half lost its prices and blamed the endpoint that answers them")
+        XCTAssertEqual(noSessions.allowanceFailure?.contains("/history"), false,
+                       "the histories answered: blaming them would send the reader to the wrong place")
+    }
+
+    /// One request of the half failing takes the whole half with it, previous
+    /// figures and all — the same rule one account's history failing already
+    /// follows. A lead that stated a fresh spend against last hour's allowance
+    /// would be two moments in one sentence.
+    func testAHalfThatLosesOneRequestKeepsNeitherOfItsFigures() async {
+        var previous = UsageSnapshot.empty
+        previous.sustainable = FleetCapacity.SustainableRate(
+            tokensPerHour: 11_100_000, tokensPerPoint: 7_019_000, allowedWorkRate: 1.58,
+            workHoursPerDay: 15, sleepRate: 0.056, accounts: 3, measuredHours: 48,
+            isLowerBound: false)
+        previous.allowanceFetchedAt = Date(timeIntervalSince1970: 1_786_700_000)
+
+        let snapshot = await UsageStore.poll(
+            client: client(transport(usage: UsageFixtures.usageWithTokens, sessions: nil)),
+            previous: previous, now: Date())
+        XCTAssertEqual(snapshot.sustainable?.tokensPerHour, 11_100_000,
+                       "the previous figure stayed, as it always has")
+        XCTAssertEqual(snapshot.allowanceFetchedAt, previous.allowanceFetchedAt,
+                       "and it kept the stamp it arrived under")
     }
 
     func testAGoodPassFillsInEverythingAndReportsNoFailure() async {
@@ -1209,45 +1447,84 @@ final class UsageStoreTests: XCTestCase {
                        "the pass waited for a main thread that is standing right here")
     }
 
-    // MARK: - The load figure's own half
+    // MARK: - The allowance's own half
 
-    /// The span asked for is not the window calculated over, and the two part
-    /// company on exactly one side of the boundary (§2.7).
+    /// **The window the histories are asked over is a constant, and this holds
+    /// the value, not merely a floor under it.**
     ///
-    /// On the average path the request *is* the window, because that estimator
-    /// averages over whatever comes back. On the projection path the recent rate
-    /// wants a few hours but the hour-of-day split wants a whole day of them, so
-    /// the request stays at the fixed two days and the setting only reaches back
-    /// inside it. Written the obvious way — asking for the window on both paths —
-    /// a six-hour window would fetch six hours and every account would be refused
-    /// for having less than a day of history.
-    func testTheHistoryRequestFollowsTheEstimatorRatherThanTheWindow() {
-        XCTAssertEqual(UsageStore.historySeconds(loadWindowHours: 6),
-                       UsageStore.fleetLoadWindowSeconds,
-                       "six hours of history could not split a day, and a split day is what it needs")
-        XCTAssertEqual(UsageStore.historySeconds(loadWindowHours: 23.9),
-                       UsageStore.fleetLoadWindowSeconds)
-        XCTAssertEqual(UsageStore.historySeconds(loadWindowHours: 24), 24 * 3600,
-                       "at a day the average path takes over, and it averages over what it asked for")
-        XCTAssertEqual(UsageStore.historySeconds(loadWindowHours: 48),
-                       UsageStore.fleetLoadWindowSeconds,
-                       "the default asks for exactly what it always asked for")
+    /// It was a setting — `usageLoadWindowHours`, which chose between two ways of
+    /// estimating the week's demand and, by the same number, how deep to fetch.
+    /// Both estimators are gone and the setting with them, so the depth is fixed,
+    /// and it is fixed at 48 h for a reason on each side.
+    ///
+    /// **From below**: the allowance needs each account's day split into working
+    /// and sleeping hours, and a series shorter than a day has not seen every
+    /// hour of the day even once. Below 24 h the pass does not answer a worse
+    /// figure, it answers none at all — which is the control half here, and it is
+    /// what makes the floor a claim rather than a preference.
+    ///
+    /// **From above**: a long window is what makes the price of a point steady —
+    /// 6.934, 7.047 and 7.044 M tokens a point over 12, 24 and 48 h, a spread of
+    /// 1.6% (2026-08-24, live series) — and deeper than 48 h the gateway keeps
+    /// nothing to ask for. Neither of those is a boundary a fixture can be walked
+    /// to, so this side is held by an equality on the value with the reasoning
+    /// written beside it: moving the constant is then a deliberate act with a
+    /// place to read first.
+    ///
+    /// **A floor alone would not have held it, and that was measured rather than
+    /// reasoned.** With only `>= 24 h` asserted here, shortening the constant on
+    /// a copy of the source killed nothing at all at 48 → 24 h — 0 of 532 — and
+    /// killed exactly this test at 24 → 23 h (2026-08-24). So the half of the
+    /// reasoning that argues for 48 specifically was held by nothing, and the
+    /// depth could have halved in silence. The equality is what closes that, and
+    /// it makes the old `>= 24 h` line an assertion that can no longer fail: the
+    /// floor is stated in the message and proved by the control half below.
+    func testTheHistoriesAreAskedOverAFixedWindowDeepEnoughToSplitADay() async {
+        let log = RequestLog()
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        _ = await UsageStore.poll(client: client(transport(log: log)), previous: .empty, now: now)
+
+        XCTAssertEqual(log.windows(of: "/history"),
+                       [now.timeIntervalSince1970 - UsageStore.historyWindowSeconds],
+                       "the pass asked for a window of its own rather than the one constant")
+        XCTAssertEqual(UsageStore.historyWindowSeconds, 48 * 3600, """
+            48 h, and both ends of that are measured: under a day the split of the day has \
+            nothing to split and the pass answers nothing at all, over 48 h the gateway keeps \
+            nothing to ask for, and the price of a point is steady across the range between \
+            them. Move it and re-measure both ends — the docblock above says how
+            """)
+
+        // The control, and it is the whole point: at 23 h of history nothing is
+        // answered, so the floor is a boundary rather than a taste.
+        let shallow = await UsageStore.poll(
+            client: client(transport(sessions: Self.spendingSessions,
+                                     history: Self.historySeries(readings: [0, 25, 50],
+                                                                 overHours: 23))),
+            previous: .empty, now: now)
+        XCTAssertNil(shallow.sustainable,
+                     "23 h of history answered an allowance, so the floor is not where it says")
+        let deep = await UsageStore.poll(
+            client: client(transport(sessions: Self.spendingSessions,
+                                     history: Self.historySeries(readings: [0, 25, 50],
+                                                                 overHours: 24))),
+            previous: .empty, now: now)
+        XCTAssertNotNil(deep.sustainable, "a day is a floor to stand on, not one to fall through")
     }
 
-    /// The same deadlock, one endpoint further on. `fleetLoadWindowSeconds` is
+    /// The same deadlock, one endpoint further on. `historyWindowSeconds` is
     /// another `static let` on a `@MainActor` type read straight from the
     /// `nonisolated async` pass, and losing `nonisolated` on it hops the rest of
     /// the pass — two HTTP calls, the histories and the transcript walk — onto a
     /// main thread that is standing on a semaphore right here.
     ///
     /// Only that one, and the difference is worth naming because the two
-    /// constants read alike. `fleetLoadIntervalSeconds` has no `async` reader —
-    /// `shouldFetchFleetLoad` is synchronous and `UsagePopoverView.loadStaleSeconds`
+    /// constants read alike. `allowanceIntervalSeconds` has no `async` reader —
+    /// `shouldFetchAllowance` is synchronous and `UsagePopoverView.allowanceStaleSeconds`
     /// is a constant — so there is nowhere for the compiler to put a hop: taking
     /// its `nonisolated` off (2026-08-17) leaves this test green and fails the
     /// build instead, under the `-strict-concurrency=complete` the project has to
     /// be clean under. What holds it is the compiler; what holds
-    /// `fleetLoadWindowSeconds` is the timeout below.
+    /// `historyWindowSeconds` is the timeout below.
     ///
     /// The timeout is the whole test. Without it a regression is a run that
     /// never comes back, which is what this looked like when it happened to
@@ -1256,7 +1533,7 @@ final class UsageStoreTests: XCTestCase {
     ///
     /// A previous snapshot with no stamp, so the half actually runs — a pass
     /// that skipped it would never read either constant and would prove nothing.
-    func testTheFleetLoadPassDoesNotNeedTheMainThread() {
+    func testTheAllowancePassDoesNotNeedTheMainThread() {
         let client = client(transport())
         let semaphore = DispatchSemaphore(value: 0)
         let answer = PollAnswer()
@@ -1266,7 +1543,11 @@ final class UsageStoreTests: XCTestCase {
         }
         XCTAssertEqual(semaphore.wait(timeout: .now() + 5), .success,
                        "the pass waited for a main thread that is standing right here")
-        XCTAssertNotNil(answer.value.fleetLoad,
+        // The arrival stamp and not the figure: this fixture's `/gw/sessions` is
+        // empty, so there is nothing to price a point by and the allowance
+        // rightly refuses. What the stamp says is that the half ran and both its
+        // requests answered, which is the whole claim — the constants were read.
+        XCTAssertNotNil(answer.value.allowanceFetchedAt,
                         "the histories were never fetched, so neither constant was ever read")
     }
 
@@ -1286,22 +1567,23 @@ final class UsageStoreTests: XCTestCase {
 
         let first = await UsageStore.poll(client: client, previous: .empty, now: start)
         XCTAssertEqual(log.historyRequests, 1, "the first pass did not fetch a history at all")
-        XCTAssertEqual(first.fleetLoadFetchedAt, start)
-        XCTAssertEqual(first.fleetLoadCheckedAt, start,
+        XCTAssertEqual(first.allowanceFetchedAt, start)
+        XCTAssertEqual(first.allowanceCheckedAt, start,
                        "on a pass that answered, the attempt and the arrival are one moment")
 
-        let interval = UsageStore.fleetLoadIntervalSeconds
+        let interval = UsageStore.allowanceIntervalSeconds
         let soon = await UsageStore.poll(client: client, previous: first,
                                          now: start.addingTimeInterval(interval - 1))
         XCTAssertEqual(log.historyRequests, 1,
                        "the histories were fetched again a second before the interval was up")
-        XCTAssertEqual(soon.fleetLoad, first.fleetLoad, "the figure changed on a pass that never asked")
-        XCTAssertEqual(soon.fleetLoadFetchedAt, start, "a skipped pass moved the stamp")
+        XCTAssertEqual(soon.sustainable?.tokensPerHour, first.sustainable?.tokensPerHour,
+                       "the figure changed on a pass that never asked")
+        XCTAssertEqual(soon.allowanceFetchedAt, start, "a skipped pass moved the stamp")
 
         let later = await UsageStore.poll(client: client, previous: soon,
                                           now: start.addingTimeInterval(interval))
         XCTAssertEqual(log.historyRequests, 2, "the interval came round and nothing was fetched")
-        XCTAssertEqual(later.fleetLoadFetchedAt, start.addingTimeInterval(interval))
+        XCTAssertEqual(later.allowanceFetchedAt, start.addingTimeInterval(interval))
     }
 
     /// The points that reach `FleetCapacity` are the gateway's own.
@@ -1321,27 +1603,72 @@ final class UsageStoreTests: XCTestCase {
     /// filter is run on the very same points to show it does change them, and the
     /// smoothed series is then put through `FleetCapacity` to show what that
     /// would have cost.
-    func testTheLoadIsBuiltFromRawPointsRatherThanSmoothedOnes() async throws {
-        let raw = Self.historySeries(readings: [100, 99, 100, 100, 100])
-        let series = try UsageFixtures.decode(raw, as: HistorySeries.self)
+    ///
+    /// **The fixture has to burn as well as touch its ceiling**, and that is what
+    /// changed when the demand estimators went. A series flat at 100 with one 99
+    /// in it was enough while the load figure was the reader — the load needed
+    /// only a rate — but the allowance also needs points to price a token by, and
+    /// a flat series burns none. So the fixture resets: it opens at its ceiling,
+    /// dips to 99 for one sample, turns its window over and climbs again. The
+    /// filter still deletes the dip, and deleting it is still what refuses the
+    /// account.
+    func testTheAllowanceIsBuiltFromRawPointsRatherThanSmoothedOnes() async throws {
+        // The shape the filter destroys: a lone reading one point under a ceiling
+        // it is otherwise pinned to. That one 99 is the only evidence the account
+        // was measured at all rather than merely watched.
+        let pinned = Self.historySeries(label: "acc2", readings: [100, 99, 100, 100, 100])
+        let series = try UsageFixtures.decode(pinned, as: HistorySeries.self)
         XCTAssertEqual(UsageHistoryModel.withoutSourceLag(series.points).map(\.sevenDay),
                        [100, 100, 100, 100, 100],
                        "the fixture is not a series the filter changes, so it proves nothing")
 
-        let accounts = try UsageFixtures.decode(UsageFixtures.usage, as: UsageReport.self).accounts
-        let smoothed = try UsageFixtures.decode(Self.historySeries(readings: [100, 100, 100, 100, 100]),
-                                                as: HistorySeries.self)
-        XCTAssertNil(FleetCapacity.load(histories: ["acc2": smoothed], accounts: accounts),
-                     "smoothed, this account is refused — which is the whole cost being avoided")
+        // **It takes two accounts to see the cost, and that is new.** While the
+        // week's demand was estimated, one pinned account was enough: it answered
+        // a rate on its own and the filter took the whole answer away. The
+        // allowance needs points to price a token by, and a series pinned at its
+        // ceiling burns none — so on its own it is refused either way, and the
+        // filter changes nothing observable. What it costs is only visible beside
+        // an account that does burn: the pinned one leaves with its 100 pp of
+        // capacity and with the `≥` that says the fleet was blocked.
+        let burning = Self.historySeries(label: "acc3", readings: [0, 25, 50])
+        let both = [pinned, burning]
+        let smoothed = [Self.historySeries(label: "acc2", readings: [100, 100, 100, 100, 100]), burning]
+        func allowance(_ bodies: [String]) throws -> FleetCapacity.SustainableRate? {
+            let accounts = try UsageFixtures.decode(UsageFixtures.usageTwoAccounts,
+                                                    as: UsageReport.self).accounts
+            var byLabel: [String: HistorySeries] = [:]
+            for body in bodies {
+                let series = try UsageFixtures.decode(body, as: HistorySeries.self)
+                byLabel[series.label] = series
+            }
+            return FleetCapacity.sustainable(histories: byLabel, accounts: accounts,
+                                             spentTokens: 65_600_000)
+        }
+        let raw = try XCTUnwrap(try allowance(both))
+        let filtered = try XCTUnwrap(try allowance(smoothed))
+        XCTAssertEqual(raw.accounts, 2)
+        XCTAssertTrue(raw.isLowerBound, "acc2 sat at its ceiling for four of five samples")
+        XCTAssertEqual(filtered.accounts, 1,
+                       "smoothed, the pinned account has no reading below its ceiling left and is "
+                       + "refused — which is the whole cost being avoided")
+        XCTAssertFalse(filtered.isLowerBound, "and the `≥` on a blocked fleet went with it")
+        XCTAssertLessThan(filtered.tokensPerHour, raw.tokensPerHour,
+                          "an account's whole window of capacity left the numerator")
 
-        let snapshot = await UsageStore.poll(client: client(transport(history: raw)), previous: .empty)
-        let load = try XCTUnwrap(snapshot.fleetLoad, """
-            the pass answered nothing for an account that spent one sample below its ceiling: \
-            the points were smoothed on the way in and the account went out of the fraction \
+        // And the pass hands over what the client returned. Two accounts, two
+        // series, and the answer has to be the raw one.
+        let snapshot = await UsageStore.poll(
+            client: client(transport(usage: UsageFixtures.usageTwoAccounts,
+                                     sessions: Self.spendingSessions,
+                                     historyByLabel: ["acc2": pinned, "acc3": burning])),
+            previous: .empty)
+        let landed = try XCTUnwrap(snapshot.sustainable, """
+            the pass answered nothing for a fleet with one account below its ceiling on one sample: \
+            the points were smoothed on the way in and that account went out of the fraction \
             with its capacity
             """)
-        XCTAssertEqual(load.accounts, 1)
-        XCTAssertTrue(load.isLowerBound, "it sat at 100 for four of five samples")
+        XCTAssertEqual(landed.accounts, 2)
+        XCTAssertTrue(landed.isLowerBound, "it sat at 100 for four of five samples")
     }
 
     /// A history that does not answer is ordinary, and it is one half of three.
@@ -1352,17 +1679,20 @@ final class UsageStoreTests: XCTestCase {
     func testAFailedHistoryHalfKeepsThePreviousFigureAndBlamesItsOwnEndpoint() async {
         let earlier = Date(timeIntervalSince1970: 1_786_700_000)
         var previous = UsageSnapshot.empty
-        previous.fleetLoad = FleetLoad(percent: 126, isLowerBound: true, accounts: 3, measuredHours: 48)
-        previous.fleetLoadFetchedAt = earlier
-        previous.fleetLoadCheckedAt = earlier
+        previous.sustainable = FleetCapacity.SustainableRate(
+            tokensPerHour: 12_600_000, tokensPerPoint: 7_019_000, allowedWorkRate: 1.8,
+            workHoursPerDay: 15, sleepRate: 0.056, accounts: 3, measuredHours: 48,
+            isLowerBound: true)
+        previous.allowanceFetchedAt = earlier
+        previous.allowanceCheckedAt = earlier
 
         let now = Date()
         let snapshot = await UsageStore.poll(client: client(transport(history: nil)),
                                              previous: previous, now: now)
-        XCTAssertEqual(snapshot.fleetLoad, previous.fleetLoad, "the figure blinked to blank")
-        XCTAssertEqual(snapshot.fleetLoadFetchedAt, earlier,
+        XCTAssertEqual(snapshot.sustainable, previous.sustainable, "the figure blinked to blank")
+        XCTAssertEqual(snapshot.allowanceFetchedAt, earlier,
                        "the age of the figure moved to an attempt that brought nothing back")
-        XCTAssertEqual(snapshot.fleetLoadFailure?.contains("history"), true)
+        XCTAssertEqual(snapshot.allowanceFailure?.contains("history"), true)
         XCTAssertNil(snapshot.quotaFailure, "the quota endpoint answered and is blamed anyway")
         XCTAssertNil(snapshot.sessionsFailure)
         XCTAssertEqual(snapshot.quotaFetchedAt, now)
@@ -1376,7 +1706,7 @@ final class UsageStoreTests: XCTestCase {
     /// over the live fleet is 481 KB (2026-08-18, three accounts, a 48 h
     /// window), which is 2.9 MB/h at ten minutes — and every minute, carrying
     /// every account but the one that failed, some 19 MB/h, the figure
-    /// `fleetLoadIntervalSeconds` exists to avoid.
+    /// `allowanceIntervalSeconds` exists to avoid.
     /// Affordable now because the screen says so: the figure keeps the age it
     /// arrived under and the footer prints both that and the reason.
     ///
@@ -1390,8 +1720,8 @@ final class UsageStoreTests: XCTestCase {
 
         let failed = await UsageStore.poll(client: broken, previous: .empty, now: start)
         XCTAssertEqual(log.historyRequests, 1, "the failing pass never asked, so it skipped nothing")
-        XCTAssertNotNil(failed.fleetLoadFailure)
-        XCTAssertNil(failed.fleetLoadFetchedAt, "nothing arrived, so nothing may carry an age")
+        XCTAssertNotNil(failed.allowanceFailure)
+        XCTAssertNil(failed.allowanceFetchedAt, "nothing arrived, so nothing may carry an age")
 
         let minuteLater = await UsageStore.poll(client: broken, previous: failed,
                                                 now: start.addingTimeInterval(60))
@@ -1399,7 +1729,7 @@ final class UsageStoreTests: XCTestCase {
                        "a failed round was retried a minute later, which is the 19 MB/h on a "
                        + "tether that the ten-minute cadence exists to avoid")
 
-        let interval = UsageStore.fleetLoadIntervalSeconds
+        let interval = UsageStore.allowanceIntervalSeconds
         _ = await UsageStore.poll(client: broken, previous: minuteLater,
                                   now: start.addingTimeInterval(interval))
         XCTAssertEqual(log.historyRequests, 2, "the interval came round and the retry never happened")
@@ -1427,29 +1757,32 @@ final class UsageStoreTests: XCTestCase {
                                              previous: previous)
         XCTAssertEqual(log.historyRequests, 0,
                        "a history was fetched for a fleet whose membership nobody just confirmed")
-        XCTAssertNil(snapshot.fleetLoad)
-        XCTAssertNil(snapshot.fleetLoadFailure, "the history half is blamed for the quota half's failure")
+        XCTAssertNil(snapshot.sustainable)
+        XCTAssertNil(snapshot.allowanceFailure, "the history half is blamed for the quota half's failure")
     }
 
     /// A `nil` from `FleetCapacity` is an arrival, not a failure: it is the
     /// answer "this fleet supports no figure", which happens when no account has
-    /// six hours of history and when every one of them is pinned at its ceiling.
-    /// So it is stamped, it clears the blame, and it replaces whatever was there
-    /// — holding the previous number over it would draw a load for a fleet that
-    /// stopped having one.
+    /// a whole day of history and when every one of them is pinned at its
+    /// ceiling. So it is stamped, it clears the blame, and it replaces whatever
+    /// was there — holding the previous number over it would state an allowance
+    /// for a fleet that stopped supporting one.
     func testAFleetThatSupportsNoFigureReplacesTheOneBeforeIt() async {
         var previous = UsageSnapshot.empty
-        previous.fleetLoad = FleetLoad(percent: 126, isLowerBound: false, accounts: 3, measuredHours: 48)
-        previous.fleetLoadFetchedAt = Date(timeIntervalSince1970: 1_786_700_000)
+        previous.sustainable = FleetCapacity.SustainableRate(
+            tokensPerHour: 12_600_000, tokensPerPoint: 7_019_000, allowedWorkRate: 1.8,
+            workHoursPerDay: 15, sleepRate: 0.056, accounts: 3, measuredHours: 48,
+            isLowerBound: false)
+        previous.allowanceFetchedAt = Date(timeIntervalSince1970: 1_786_700_000)
 
         let now = Date()
-        // Four hours of history, under the six the metric will extrapolate from.
+        // Four hours of history, under the day the split needs.
         let brief = Self.historySeries(readings: [0, 50], overHours: 4)
         let snapshot = await UsageStore.poll(client: client(transport(history: brief)),
                                              previous: previous, now: now)
-        XCTAssertNil(snapshot.fleetLoad, "a figure nobody can measure was kept from the pass before")
-        XCTAssertEqual(snapshot.fleetLoadFetchedAt, now)
-        XCTAssertNil(snapshot.fleetLoadFailure, "nothing failed: the gateway answered and said so")
+        XCTAssertNil(snapshot.sustainable, "a figure nobody can measure was kept from the pass before")
+        XCTAssertEqual(snapshot.allowanceFetchedAt, now)
+        XCTAssertNil(snapshot.allowanceFailure, "nothing failed: the gateway answered and said so")
     }
 }
 
@@ -1458,18 +1791,31 @@ final class UsageStoreTests: XCTestCase {
 /// `@unchecked Sendable`: every access is under the lock.
 private final class RequestLog: @unchecked Sendable {
     private let lock = NSLock()
-    private var paths: [String] = []
+    private var requests: [URL] = []
 
-    func record(_ path: String) {
+    func record(_ url: URL?) {
+        guard let url else { return }
         lock.lock()
-        paths.append(path)
+        requests.append(url)
         lock.unlock()
     }
 
-    var historyRequests: Int {
+    private var all: [URL] {
         lock.lock()
         defer { lock.unlock() }
-        return paths.filter { $0.hasSuffix("/history") }.count
+        return requests
+    }
+
+    var historyRequests: Int { all.filter { $0.path.hasSuffix("/history") }.count }
+
+    /// The `since` every request to one endpoint asked for, oldest first — which
+    /// is what says whether two halves of one figure were measured over the same
+    /// window.
+    func windows(of endpoint: String) -> [Double] {
+        all.filter { $0.path.hasSuffix(endpoint) }.compactMap { url in
+            URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "since" }?.value.flatMap(Double.init)
+        }
     }
 }
 
