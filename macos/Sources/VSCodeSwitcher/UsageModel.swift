@@ -572,17 +572,16 @@ struct UsageSnapshot: Sendable {
                                      quotaFailure: nil,
                                      sessionsFailure: nil)
 
-    /// The fleet's weekly quota as a whole per cent — the one figure two
-    /// surfaces show, rounded in one place so they cannot disagree about it.
+    /// The fleet's weekly quota as a whole per cent, rounded in one place so that
+    /// two readers cannot disagree about it.
     ///
-    /// Rounding here rather than at each drawing also makes the menu bar picture
-    /// a pure function of one `Int?`, which is what lets its owner dedupe on the
-    /// value and redraw only when it really changed.
+    /// Rounded here rather than at each drawing, so that two readers cannot round
+    /// it two ways. There is one reader now: the menu bar drew this figure until
+    /// 2026-08-24 and draws the spend ratio instead (§4).
     ///
     /// Freshness is deliberately not part of it: whether an old reading may
-    /// still be shown is a question each surface answers for itself, and they
-    /// answer it differently — see `MenuBarIcon.percent` and the popover's
-    /// headline.
+    /// still be shown is the surface's question, and the popover's headline
+    /// answers it by keeping the figure and dating it in the footer.
     var fleetSevenDayPercent: Int? {
         fleetSevenDayMean.map { Int($0.rounded()) }
     }

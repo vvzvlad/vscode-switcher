@@ -1865,6 +1865,48 @@ final class MenuBarIconTests: XCTestCase {
         MenuBarIcon.barRect.minY...MenuBarIcon.barRect.maxY
     }
 
+    /// The rows where the bar's frame is the only thing that can be drawn: above
+    /// the fill's own bounds and inside the bar's.
+    ///
+    /// It exists because the fill's length became the ratio. While it was the
+    /// quota mean, a fixture at a mean of 0 left the whole bar band to the frame
+    /// and the two could be told apart by choosing the figure; now anything the
+    /// warning boundary fires on has a full capsule under it, and a band that
+    /// held both would measure the fill and call it the frame.
+    ///
+    /// The lower edge is measured and not declared. Probed 2026-08-24 at scale 4
+    /// with the predicate `chromaticMean` actually applies — alpha over a half
+    /// and relative chroma over 0.3 — on both plates, at ratios 30, 60 and
+    /// 99.999: the fill is at full strength from y = 16.00 down, reaches y = 16.25
+    /// at alphas up to 0.88 with most of the row clearing the cut, and reaches
+    /// y = 16.50 only at 0.04 to 0.48 on the light plate and 0.04 to 0.24 on the
+    /// dark — where **not one pixel** clears it. From 16.75 up there is no fill
+    /// colour at any alpha, until the frame itself takes one. (An earlier note
+    /// here named a 0.54 row at 16.50 and made the edge turn on it; no row at
+    /// 16.50 came out over half on either plate, and it is not in the data.)
+    ///
+    /// So `barFillBounds.maxY` of 16.5 would do, and the mutation says so rather
+    /// than a comment: moving the edge exactly onto it leaves all 532 tests green
+    /// (2026-08-24). The quarter point is slack, not a boundary — what it buys is
+    /// a band whose lower edge is the first row carrying no fill colour *at all*,
+    /// instead of one that rests on the alpha cut with 0.02 to spare. What the
+    /// edge does have to stay above is the fill itself: widening the band to the
+    /// whole bar reddens three tests (same day) —
+    /// `testOverCapacityIsLoudOnTheFrameAndTheNumberToo`,
+    /// `testTheFrameAndTheNumberAreInkBelowCapacityAndTakeTheRampAbove` and
+    /// `testTheWarningIsNeverQuieterThanTheCalmStateItReplaces`.
+    private static var frameBand: ClosedRange<CGFloat> {
+        (MenuBarIcon.barFillBounds.maxY + 0.25)...MenuBarIcon.barRect.maxY
+    }
+
+    /// The rows the fill occupies, its own bounds. The frame's rounded ends do
+    /// sweep through them at either edge of the picture, which costs nothing: on
+    /// the readings where the frame is coloured at all it is the fill's own
+    /// colour, and below that boundary it is ink and the chroma filter drops it.
+    private static var fillBand: ClosedRange<CGFloat> {
+        MenuBarIcon.barFillBounds.minY...MenuBarIcon.barFillBounds.maxY
+    }
+
     private static let scale = 4.0
 
     /// A spend ratio to colour a bar by, given as a per cent of the allowance.
@@ -1881,11 +1923,9 @@ final class MenuBarIconTests: XCTestCase {
     /// no longer a template, so what colour it comes out is decided by an input —
     /// and a suite that inherited the appearance of whoever ran it would pass or
     /// fail by the time of day.
-    private func render(_ percent: Int?,
-                        rates: UsagePopoverView.HeadlineRates? = nil,
+    private func render(_ rates: UsagePopoverView.HeadlineRates?,
                         appearance: NSAppearance? = NSAppearance(named: .aqua)) throws -> Rendered {
-        let image = MenuBarIcon.image(for: MenuBarIcon.Reading(percent: percent, rates: rates),
-                                      appearance: try XCTUnwrap(appearance))
+        let image = MenuBarIcon.image(for: rates, appearance: try XCTUnwrap(appearance))
         XCTAssertFalse(image.isTemplate, """
             the status item picture is a template again: the system would tint the bar's fill \
             for the menu bar and the colour that says whether the week holds the demand would \
@@ -1931,7 +1971,8 @@ final class MenuBarIconTests: XCTestCase {
     /// the presence of a figure at all, which is the second way a status item
     /// can be made to twitch, once a minute, whenever a tunnel goes down.
     func testThePictureIsTheSameWidthWhateverTheFigure() throws {
-        let widths = try [nil, 0, 5, 42, 100].map { try render($0).width }
+        let widths = try [nil, rates(0), rates(5), rates(42), rates(100), rates(197),
+                          rates(999), rates(1000), rates(1e12)].map { try render($0).width }
         for width in widths {
             XCTAssertEqual(width, widths[0], accuracy: 0.001, "widths: \(widths)")
         }
@@ -1939,7 +1980,7 @@ final class MenuBarIconTests: XCTestCase {
         // 5% string happened to need.
         XCTAssertEqual(widths[0], Double(MenuBarIcon.width), accuracy: 0.001)
         XCTAssertEqual(MenuBarIcon.numberColumnWidth,
-                       ceil(NSAttributedString(string: "100%",
+                       ceil(NSAttributedString(string: "\(MenuBarIcon.ceilingPercent)%",
                                                attributes: [.font: MenuBarIcon.font]).size().width),
                        accuracy: 0.001)
     }
@@ -1956,10 +1997,10 @@ final class MenuBarIconTests: XCTestCase {
     /// picture has to be as wide as is the widest string it can ever hold, and
     /// that is a thing this test can measure for itself.
     func testThePictureIsExactlyTheNumbersColumnWide() throws {
-        let widest = ceil(NSAttributedString(string: "100%",
+        let widest = ceil(NSAttributedString(string: "\(MenuBarIcon.ceilingPercent)%",
                                              attributes: [.font: MenuBarIcon.font]).size().width)
         XCTAssertEqual(MenuBarIcon.width, widest, accuracy: 0.001)
-        XCTAssertEqual(try render(100).width, Double(widest), accuracy: 0.001)
+        XCTAssertEqual(try render(rates(100)).width, Double(widest), accuracy: 0.001)
         XCTAssertLessThan(MenuBarIcon.width, 30,
                           "the item is back to taking a row of the menu bar: \(MenuBarIcon.width) pt")
         // And the stack fills the height a status item is drawn at, exactly.
@@ -1969,14 +2010,14 @@ final class MenuBarIconTests: XCTestCase {
         XCTAssertEqual(MenuBarIcon.contentHeight, MenuBarIcon.height, accuracy: 0.001,
                        "bar \(MenuBarIcon.barHeight) + gap \(MenuBarIcon.gap) "
                        + "+ number \(MenuBarIcon.numberHeight) is not the 18 pt of the picture")
-        XCTAssertEqual(try render(42).height, Double(MenuBarIcon.height), accuracy: 0.001)
+        XCTAssertEqual(try render(rates(42)).height, Double(MenuBarIcon.height), accuracy: 0.001)
     }
 
     /// Drawn, and not merely declared: the number's ink is below the bar's, the
     /// two do not touch, and the bar is drawn across the whole width of the
     /// picture rather than in a column of its own.
     func testTheNumberIsDrawnUnderTheBarAndNothingOverlaps() throws {
-        let rendered = try render(42)
+        let rendered = try render(rates(42))
         // Two clusters of ink with clear picture between them, found in the
         // bitmap: this is what "under" means, and asking the declared bands
         // instead is a question that cannot come out wrong (checked by drawing the
@@ -2011,82 +2052,161 @@ final class MenuBarIconTests: XCTestCase {
     }
 
     /// The number sits flush with the right edge of the picture, so the `%` stays
-    /// in one place while the digits in front of it come and go — and the widest
-    /// figure still fits the width that was measured for it.
+    /// in one place while the digits in front of it come and go — and every
+    /// figure the picture can draw fits the width that was measured for it.
+    ///
+    /// **The string is asked to fit as well, and that is what the ratio added.**
+    /// While the number was the quota it had a top of 100 and three digits were
+    /// all it could ever want; a ratio has no top, so a figure that outgrew the
+    /// column would be drawn at a negative x and lose its leading digit to the
+    /// image bounds — silently, and in the direction of calm.
+    ///
+    /// It is the laid-out width that is asked, and **not** where the ink starts,
+    /// because where the ink starts cannot tell: measured 2026-08-24, `1000%`
+    /// drawn flush right in this 27 pt picture comes back inked from 0.25 to
+    /// 26.25 — the very same span as `999%` — since what falls off is the leading
+    /// glyph and the one behind it has a left side bearing of its own. The
+    /// bitmaps do differ, and that difference is where
+    /// `testTheFigureIsCappedAtThreeDigitsAndNeverClipped` looks.
     func testEveryFigureEndsAtTheSameEdgeAndFitsItsColumn() throws {
         var rightEdges: [Double] = []
-        for percent in [0, 5, 42, 100] {
-            let columns = try render(percent).columns(in: MenuBarIcon.numberRows)
+        for percent in [0.0, 5, 42, 100, 197, 999, 1000, 1e12] {
+            let columns = try render(rates(percent)).columns(in: MenuBarIcon.numberRows)
             XCTAssertFalse(columns.isEmpty, "nothing drawn for \(percent)%")
             rightEdges.append(try XCTUnwrap(columns.max()))
+            XCTAssertLessThanOrEqual(MenuBarIcon.label(for: rates(percent)).size().width,
+                                     MenuBarIcon.width,
+                                     "at \(percent)% the string is wider than the column and the "
+                                     + "leading digit is drawn outside the picture")
         }
         for edge in rightEdges {
             XCTAssertEqual(edge, rightEdges[0], accuracy: 0.5, "right edges: \(rightEdges)")
         }
-        // Nothing is clipped on the left, either: the picture is exactly as wide
-        // as the widest string it can hold.
-        XCTAssertLessThanOrEqual(MenuBarIcon.label(forPercent: 100).size().width,
-                                 MenuBarIcon.width)
     }
 
-    /// No reading, no number. Not `0%` — a poll that failed carries the previous
-    /// figures and a percentage in the menu bar has no room to say "as of a
-    /// while ago" (§2.4: a confidently wrong figure is worse than a missing
-    /// one). A genuine zero *is* drawn, which is the other half of the same
-    /// rule: the two states have to look different.
+    /// No reading, no number — and the picture does not fall back to the weekly
+    /// quota the way the popover's headline does.
+    ///
+    /// The two surfaces answer the same question and part here on purpose: the
+    /// popover writes a caption under its lead saying which quantity it is
+    /// showing, and 27 points of menu bar have no room for one. A number that is
+    /// sometimes the ratio and sometimes the quota, with nothing to say which,
+    /// is read as the one the item normally carries — and the wrong reading of
+    /// the two is the calm one. A genuine zero *is* drawn, which is the other
+    /// half of the same rule: "nothing measured" and "spending nothing" have to
+    /// look different.
     func testWithoutAReadingNoNumberIsDrawnAtAll() throws {
         let blank = try render(nil)
         XCTAssertTrue(blank.rows(in: MenuBarIcon.numberRows).isEmpty,
                       "something was drawn in the number's rows with no reading")
         XCTAssertFalse(blank.rows(in: Self.barBand).isEmpty,
                        "the dashed bar is missing too: the measurement is not about the number")
-        XCTAssertFalse(try render(0).rows(in: MenuBarIcon.numberRows).isEmpty,
+        XCTAssertFalse(try render(rates(0)).rows(in: MenuBarIcon.numberRows).isEmpty,
                        "a genuine 0% drew no number")
-    }
 
-    /// And what decides that is the snapshot, not the drawing: a failed poll
-    /// keeps its previous numbers on purpose, so `fleetSevenDayMean` alone is
-    /// not enough to say there is a reading.
-    ///
-    /// The half that failed is what decides it, though — the figure comes from
-    /// `/gw/usage` and from nowhere else. Blanking it on any failure meant that
-    /// `/gw/sessions`, which feeds the per-project spend and has nothing to do
-    /// with quotas, wiped a quota reading that had arrived in the same pass,
-    /// intact and a second old.
-    func testOnlyAFailureOfTheQuotaHalfTakesTheFigureAway() {
+        // And the fallback is refused where it would be taken: a snapshot with a
+        // quota to fall back on and no rates draws exactly the same nothing.
         var snapshot = UsageSnapshot.empty
         snapshot.fleetSevenDayMean = 47.4
-        XCTAssertEqual(MenuBarIcon.percent(for: snapshot), 47)
-        snapshot.sessionsFailure = "/gw/sessions: unreachable"
-        XCTAssertEqual(MenuBarIcon.percent(for: snapshot), 47,
-                       "the sessions endpoint knows nothing about quotas")
-        snapshot.quotaFailure = "/gw/usage: unreachable"
-        XCTAssertNil(MenuBarIcon.percent(for: snapshot))
-        snapshot.quotaFailure = nil
-        snapshot.fleetSevenDayMean = nil
-        XCTAssertNil(MenuBarIcon.percent(for: snapshot))
+        XCTAssertNil(MenuBarIcon.rates(for: snapshot),
+                     "the fixture has rates after all and cannot say anything about the fallback")
+        XCTAssertEqual(UsagePopoverView.quotaLabel(for: snapshot), "47%",
+                       "the popover has a quota to lead with here, which is the whole point")
+        XCTAssertTrue(try render(MenuBarIcon.rates(for: snapshot))
+            .rows(in: MenuBarIcon.numberRows).isEmpty,
+                      "the menu bar fell back to the quota, in a picture with no room to say so")
+    }
+
+    /// The number is the spend ratio and not the week's mean — the whole of this
+    /// round, asked of the drawing.
+    ///
+    /// Both figures are in the snapshot and they differ, so a picture drawing
+    /// either one can be told from a picture drawing the other. Compared against
+    /// separate renderings of the two rather than against a string, because what
+    /// changed is what lands on the menu bar: the ink of `126%` is the assertion
+    /// and the ink of `47%` is the control.
+    func testTheNumberIsTheRatioAndNotTheWeeksMean() throws {
+        var snapshot = UsageSnapshot.empty
+        snapshot.fleetSevenDayMean = 47.4
+        snapshot.fleetTokenRate = 12_600_000
+        snapshot.sustainable = UsagePopoverLabelTests.allowance(10_000_000)
+        snapshot.allowanceFetchedAt = Date()
+        let drawn = try render(MenuBarIcon.rates(for: snapshot))
+            .columns(in: MenuBarIcon.numberRows)
+        XCTAssertEqual(drawn, try render(rates(126)).columns(in: MenuBarIcon.numberRows),
+                       "the number is not the 126% the two rates come to")
+        XCTAssertNotEqual(drawn, try render(rates(47)).columns(in: MenuBarIcon.numberRows),
+                          "the number is still the weekly mean")
+        XCTAssertEqual(MenuBarIcon.label(for: try XCTUnwrap(MenuBarIcon.rates(for: snapshot))).string,
+                       "126%")
     }
 
     /// The bar says the same thing the number does. Measured as area, because
     /// the outline spans the whole bar in every state and a span would not tell
     /// an empty bar from a full one.
-    func testTheBarFillsUpWithTheFigure() throws {
-        let inked = try [nil, 0, 50, 100].map { try render($0).pixels(in: Self.barBand) }
+    ///
+    /// **And it stops at the allowance**, exactly as the popover's lead bar does:
+    /// past that point the length has nothing left to say and the figure under it
+    /// says the rest. A scale stretched to three allowances would put the point
+    /// the whole reading turns on a third of the way along.
+    func testTheBarFillsWithTheRatioAndStopsAtTheAllowance() throws {
+        let inked = try [nil, rates(0), rates(50), rates(100)]
+            .map { try render($0).pixels(in: Self.barBand) }
         // Dashed and empty is the least ink of all; a bar drawn 0% full is a
         // solid outline and already more.
         XCTAssertLessThan(inked[0], inked[1], "the dashed empty bar is not the emptiest: \(inked)")
         XCTAssertLessThan(inked[1], inked[2], "0% is not emptier than 50%: \(inked)")
         XCTAssertLessThan(inked[2], inked[3], "50% is not emptier than 100%: \(inked)")
+
+        // The clamp, in points of fill rather than in pixels of band, because the
+        // band carries the frame too and the frame changes colour at the anchor.
+        XCTAssertEqual(MenuBarIcon.fillWidth(for: rates(50)),
+                       MenuBarIcon.barFillBounds.width / 2, accuracy: 0.001)
+        for percent in [100.0, 130, 300, 1e12] {
+            XCTAssertEqual(MenuBarIcon.fillWidth(for: rates(percent)),
+                           MenuBarIcon.barFillBounds.width, accuracy: 0.001,
+                           "at \(percent)% the fill is not stopped at the allowance")
+        }
     }
 
-    /// Above the top of the scale the quota is spent, and the picture says so
-    /// rather than growing a column for a fourth digit.
-    func testAFigureAboveTheScaleIsDrawnAsAFullBar() throws {
-        let full = try render(100)
-        let over = try render(140)
-        XCTAssertEqual(over.width, full.width, accuracy: 0.001)
-        XCTAssertEqual(MenuBarIcon.label(forPercent: 140).string, "100%")
-        XCTAssertEqual(MenuBarIcon.label(forPercent: -20).string, "0%")
+    /// The figure is capped at three digits, and what the cap buys is measured
+    /// rather than argued.
+    ///
+    /// The ratio has no top — the allowance goes to zero as the week runs out —
+    /// while the column is a constant, because a status item that resizes itself
+    /// drags every item to its left along with it. Drawn flush right, `1000%` at
+    /// 32.75 pt starts at −5.75 in a 27 pt picture and the leading digit is
+    /// clipped away by the image bounds. What lands is measured and not imagined
+    /// (2026-08-24): the clipped `1000%` is **pixel for pixel the drawing of
+    /// `000%`** — 1947 inked pixels, the same bitmap — against 2085 for `999%`.
+    /// The loudest reading this item has turns into the calmest one it can draw.
+    /// So `999%` is the top of the drawn scale, and it is a floor rather than a
+    /// reading: the accessibility description, which has no width to run out of,
+    /// says what was measured.
+    func testTheFigureIsCappedAtThreeDigitsAndNeverClipped() throws {
+        XCTAssertEqual(MenuBarIcon.label(for: rates(999)).string, "999%")
+        XCTAssertEqual(MenuBarIcon.label(for: rates(1000)).string, "999%")
+        XCTAssertEqual(MenuBarIcon.label(for: rates(1e12)).string, "999%")
+        // Not a cap on the reading: the description carries the figure whole.
+        XCTAssertEqual(MenuBarIcon.describe(rates(1240)),
+                       "1240% of the sustainable spend rate")
+
+        // Drawn, and identical to the drawing of the cap itself. The comparison
+        // is the ink and not its span: a clipped `1000%` spans 0.25…26.25, which
+        // is exactly what `999%` spans, so a test on the edges would pass over
+        // the defect it is named after.
+        let capped = try render(rates(1000)).columns(in: MenuBarIcon.numberRows)
+        XCTAssertEqual(capped, try render(rates(999)).columns(in: MenuBarIcon.numberRows))
+        // The column is measured on the cap and nothing else, so moving the cap
+        // moves the column instead of overflowing it.
+        XCTAssertEqual(MenuBarIcon.numberColumnWidth,
+                       ceil(NSAttributedString(string: "\(MenuBarIcon.ceilingPercent)%",
+                                               attributes: [.font: MenuBarIcon.font]).size().width),
+                       accuracy: 0.001)
+        // And the rounding is the popover's, so the two surfaces print the same
+        // digits wherever the picture is not capped.
+        XCTAssertEqual(MenuBarIcon.label(for: rates(125.6)).string, "126%")
+        XCTAssertEqual(MenuBarIcon.label(for: rates(0)).string, "0%")
     }
 
     // MARK: - Colour, now that the picture owns it
@@ -2107,18 +2227,19 @@ final class MenuBarIconTests: XCTestCase {
     /// every sample is asserted, and `chromaticMean` returns `nil` where nothing
     /// was drawn in a colour of its own at all.
     ///
-    /// The number under the bar is 60 at every sample, and that is deliberate:
-    /// the fill's *length* is the quota already spent and its *colour* is the
-    /// demand against supply. Colouring it by the length instead would leave most
-    /// of this ramp unreachable — the length tops out at exactly the green
-    /// anchor.
+    /// The length and the colour are one quantity now, which is what this round
+    /// changed: the fill is as long as the ratio and coloured by the same ratio,
+    /// so every sample past the anchor is a full capsule in its own colour. It
+    /// used to be the quota's length under the ratio's colour — two readings in
+    /// one shape — and the ramp above the anchor was reachable only because the
+    /// colour was asked separately.
     func testTheFillIsARampFromBlueThroughGreenToRed() throws {
         for name in [NSAppearance.Name.aqua, .darkAqua] {
             let appearance = try XCTUnwrap(NSAppearance(named: name))
             let plate = MenuBarIcon.background(for: appearance)
             var drawn: [Double] = []
             for percent in rampSamples {
-                let fill = try XCTUnwrap(render(60, rates: rates(percent), appearance: appearance)
+                let fill = try XCTUnwrap(render(rates(percent), appearance: appearance)
                     .chromaticMean(in: Self.barBand),
                                          "at \(percent)% of capacity the bar on a \(name.rawValue) "
                                          + "menu bar has no colour of its own at all")
@@ -2134,10 +2255,10 @@ final class MenuBarIconTests: XCTestCase {
             assertRamp(drawn, on: name.rawValue)
         }
 
-        // And with no load at all the bar is not painted: an unmeasured fleet
+        // And with no reading at all the bar is not painted: an unmeasured fleet
         // must be neither good news nor bad.
-        XCTAssertNil(try render(60).chromaticMean(in: Self.barBand),
-                     "a bar with no load behind it was drawn in a colour that means something")
+        XCTAssertNil(try render(nil).chromaticMean(in: Self.barBand),
+                     "a bar with no reading behind it was drawn in a colour that means something")
     }
 
     /// The one boundary the colour rules keep: the frame and the number are ink
@@ -2151,15 +2272,20 @@ final class MenuBarIconTests: XCTestCase {
     /// the ramp's green and by 130% it is the ramp's red, which is the whole of
     /// the correction.
     ///
-    /// The mean is 0 at every sample, which is what makes this about the frame
-    /// and the number: at that figure there is no fill in the picture at all.
+    /// **The frame is read off `frameBand` and not off the whole bar**, which the
+    /// fill's new length forced. A fixture at a mean of 0 used to leave the bar
+    /// band to the frame alone; now the length is the ratio, so every sample past
+    /// the anchor has a full capsule in it and the calm sample a hair under the
+    /// anchor is a bar all but full — measuring the band would be measuring the
+    /// fill and calling it the frame. Those rows sit above the fill's own bounds
+    /// and only the stroke reaches them.
     func testTheFrameAndTheNumberAreInkBelowCapacityAndTakeTheRampAbove() throws {
         for name in [NSAppearance.Name.aqua, .darkAqua] {
             let appearance = try XCTUnwrap(NSAppearance(named: name))
             let plate = MenuBarIcon.background(for: appearance)
-            let calm = try render(0, rates: rates(UsagePopoverView.greenRatioPercent - 0.001),
+            let calm = try render(rates(UsagePopoverView.greenRatioPercent - 0.001),
                                   appearance: appearance)
-            XCTAssertNil(calm.chromaticMean(in: Self.barBand),
+            XCTAssertNil(calm.chromaticMean(in: Self.frameBand),
                          "a hair under capacity the frame was painted on \(name.rawValue)")
             XCTAssertNil(calm.chromaticMean(in: MenuBarIcon.numberRows),
                          "a hair under capacity the number was painted on \(name.rawValue)")
@@ -2167,8 +2293,8 @@ final class MenuBarIconTests: XCTestCase {
             var frames: [Double] = []
             var numbers: [Double] = []
             for percent in rampSamples where percent >= UsagePopoverView.greenRatioPercent {
-                let warned = try render(0, rates: rates(percent), appearance: appearance)
-                let frame = try XCTUnwrap(warned.chromaticMean(in: Self.barBand),
+                let warned = try render(rates(percent), appearance: appearance)
+                let frame = try XCTUnwrap(warned.chromaticMean(in: Self.frameBand),
                                           "at \(percent)% the frame carries no warning at all")
                 let number = try XCTUnwrap(warned.chromaticMean(in: MenuBarIcon.numberRows),
                                            "at \(percent)% the number carries no warning at all")
@@ -2242,32 +2368,31 @@ final class MenuBarIconTests: XCTestCase {
         return hue(of: (srgb.redComponent, srgb.greenComponent, srgb.blueComponent))
     }
 
-    /// The warning has to survive a bar with nothing in it to colour.
+    /// Past the allowance the warning is on the frame and on the number, not on
+    /// the fill alone — and what that is worth changed with this round.
     ///
-    /// The fill's length is the mean, so at a mean near zero there is no fill —
-    /// measured at a load of 300%, the red ink is 0.00 pt² at a mean of 0, 0.25
-    /// at 1% and 2.12 at 3%. That state is not exotic: it is the fleet just
-    /// after its windows turn over, which is exactly when a 300% burn is worth
-    /// knowing, and the glance this item exists for showed an empty outline and
-    /// no warning at all. So the frame and the number take the colour too.
+    /// It used to be worth the warning existing at all. The fill's length was the
+    /// quota mean, so at a mean near zero there was nothing to colour — measured
+    /// at a load of 300%, the red ink was 0.00 pt² at a mean of 0, 0.25 at 1% and
+    /// 2.12 at 3% — and that is the fleet just after its windows turn over, which
+    /// is exactly when a 300% burn is worth knowing. With the length now the
+    /// ratio itself, anything the boundary fires on has a full capsule under it,
+    /// so the frame and the number are no longer the only marks: they are what
+    /// separates 105% from 900%, both of which fill the bar to the same end.
     ///
     /// Asked of the frame's band and of the number's rows **separately**, and
     /// that separation is the test. Over the whole picture at once it could not
     /// fail for either half on its own: a red number satisfied it with a
     /// colourless frame and a red frame satisfied it with a colourless number.
-    /// Both mutations were run and both were green — `inkColor(for:)` forced to
-    /// `.labelColor`, and the number's label asked for without a colour, which
-    /// makes the whole on-demand colouring path deletable. Re-run 2026-08-18
-    /// against the ramp: both still redden this test.
-    ///
-    /// And the other half of the fix is asserted here too: the bar carries no
-    /// more ink than it did, so nothing invented a minimum fill — a capsule drawn
-    /// at a mean of 0 would be a claim about quota nobody spent.
-    func testOverCapacityIsVisibleWithNoFillToColour() throws {
-        let alarming = try render(0, rates: rates(300))
-        let frame = try XCTUnwrap(alarming.chromaticMean(in: Self.barBand), """
-            at a mean of 0 the bar drew nothing in a colour of its own: the fill is empty at \
-            that figure, so a warning that lives in the fill alone reaches nobody (§4)
+    /// Both mutations were run and both were green — `warningColor` forced to
+    /// `nil`, and the number's label asked for without a colour, which makes the
+    /// whole on-demand colouring path deletable. Re-run 2026-08-24 against the
+    /// ratio: both still redden this test.
+    func testOverCapacityIsLoudOnTheFrameAndTheNumberToo() throws {
+        let alarming = try render(rates(300))
+        let frame = try XCTUnwrap(alarming.chromaticMean(in: Self.frameBand), """
+            past the allowance the bar's frame drew nothing in a colour of its own, so the \
+            warning is carried by the fill and by nothing else (§4)
             """)
         XCTAssertGreaterThan(frame.red, frame.green + 0.2,
                              "the frame at 300% of capacity is not red: \(frame)")
@@ -2276,39 +2401,18 @@ final class MenuBarIconTests: XCTestCase {
         XCTAssertGreaterThan(number.red, number.green + 0.2,
                              "the number at 300% of capacity is not red: \(number)")
 
-        // Below capacity both bands are ink and nothing else: the loud state has
-        // to be the one that means something, and it has to be loud in both
-        // places or the assertions above stop being two.
-        let quiet = try render(0, rates: rates(30))
-        XCTAssertNil(quiet.chromaticMean(in: Self.barBand),
-                     "a fleet well inside its capacity coloured the bar anyway")
+        // Below capacity both are ink and nothing else: the loud state has to be
+        // the one that means something, and it has to be loud in both places or
+        // the assertions above stop being two. The fill is coloured here — it
+        // carries the whole ramp and always has — so the fixture asks the frame's
+        // own rows and the number's, which is what the boundary is about.
+        let quiet = try render(rates(30))
+        XCTAssertNil(quiet.chromaticMean(in: Self.frameBand),
+                     "a fleet well inside its capacity coloured the frame anyway")
         XCTAssertNil(quiet.chromaticMean(in: MenuBarIcon.numberRows),
                      "a fleet well inside its capacity coloured the number anyway")
-
-        // And no fill was invented for the sake of having something to colour.
-        //
-        // Asked inside the fill's own bounds rather than by counting the whole
-        // band, and the change is not cosmetic: the warning frame is drawn opaque
-        // while the calm one keeps its 0.55 (§4), so a count over the band
-        // compares two different strokes — it moved by 20 pixels of antialiasing
-        // the moment the warning stopped being softened, which is a true fact
-        // about the frame and nothing at all about a fill. The columns skip a cap
-        // at each end, because the frame's rounded ends do curve through the top
-        // and bottom rows of `barFillBounds`; between them the stroke is a point
-        // and a half outside, so anything found there is fill.
-        let cap = Double(MenuBarIcon.barHeight) / 2
-        for (name, picture) in [("300%", alarming), ("30%", quiet)] {
-            let inside = picture.ink.filter {
-                $0.alpha > 0.5
-                    && $0.x >= Double(MenuBarIcon.barFillBounds.minX) + cap
-                    && $0.x <= Double(MenuBarIcon.barFillBounds.maxX) - cap
-                    && $0.y >= Double(MenuBarIcon.barFillBounds.minY)
-                    && $0.y <= Double(MenuBarIcon.barFillBounds.maxY)
-            }
-            XCTAssertTrue(inside.isEmpty,
-                          "at a mean of 0 the bar at \(name) drew \(inside.count) pixels inside the "
-                          + "fill's own bounds, which is a capsule drawn for quota nobody spent")
-        }
+        XCTAssertNotNil(quiet.chromaticMean(in: Self.barBand),
+                        "the fixture has no fill at all, so the two nils above prove nothing")
     }
 
     /// A band of the picture as it lands on the plate underneath: the pixels the
@@ -2427,11 +2531,13 @@ final class MenuBarIconTests: XCTestCase {
             let short = plate == .light ? "light" : "dark "
 
             // The calm state the warning replaces: a thousandth under capacity,
-            // where the frame and the number are still ink. The mean is 0, so
-            // there is no fill in the way of either.
-            let calm = try render(0, rates: rates(UsagePopoverView.greenRatioPercent - 0.001),
+            // where the frame and the number are still ink. The frame is read off
+            // its own rows, which the fill cannot reach — at this figure the fill
+            // is a hair short of full and a reading over the whole band would be
+            // the fill's.
+            let calm = try render(rates(UsagePopoverView.greenRatioPercent - 0.001),
                                   appearance: appearance)
-            let calmFrame = try XCTUnwrap(onPlate(calm, in: Self.barBand, on: plate))
+            let calmFrame = try XCTUnwrap(onPlate(calm, in: Self.frameBand, on: plate))
             let calmNumber = try XCTUnwrap(onPlate(calm, in: MenuBarIcon.numberRows, on: plate))
             table.append(String(format: "%@  99.9  frame   %.3f %.3f %.3f (ink)  %6.2f",
                                 short, calmFrame.red, calmFrame.green, calmFrame.blue,
@@ -2441,19 +2547,20 @@ final class MenuBarIconTests: XCTestCase {
                                 calmNumber.contrast))
 
             for percent in legibilityLoadSamples {
-                // Two renderings per load, because the three marks cannot all be
-                // told apart in one: at a mean of 60 the bar's band is the fill,
-                // at a mean of 0 there is no fill and the same band is the frame.
-                let filled = try render(60, rates: rates(percent), appearance: appearance)
-                let bare = try render(0, rates: rates(percent), appearance: appearance)
-                let fill = try XCTUnwrap(onPlate(filled, in: Self.barBand, on: plate,
+                // One rendering per load now, and the marks are told apart by
+                // where they are: the fill inside its own bounds, the frame in
+                // the rows above them. Two were needed while the fill's length
+                // was a second quantity that could be set to zero to get it out
+                // of the way; a picture drawn from one reading has no such knob.
+                let drawn = try render(rates(percent), appearance: appearance)
+                let fill = try XCTUnwrap(onPlate(drawn, in: Self.fillBand, on: plate,
                                                  colouredOnly: true),
                                          "at \(percent)% on \(short) the fill has no colour at all")
                 var marks = [("fill  ", fill)]
                 if percent >= UsagePopoverView.greenRatioPercent {
-                    marks.append(("frame ", try XCTUnwrap(onPlate(bare, in: Self.barBand, on: plate,
+                    marks.append(("frame ", try XCTUnwrap(onPlate(drawn, in: Self.frameBand, on: plate,
                                                                   colouredOnly: true))))
-                    marks.append(("number", try XCTUnwrap(onPlate(bare, in: MenuBarIcon.numberRows,
+                    marks.append(("number", try XCTUnwrap(onPlate(drawn, in: MenuBarIcon.numberRows,
                                                                   on: plate, colouredOnly: true))))
                 }
                 for (label, mark) in marks {
@@ -2492,41 +2599,40 @@ final class MenuBarIconTests: XCTestCase {
         print(table.joined(separator: "\n"))
     }
 
-    /// A fill too narrow to see is not a ratio the picture carries, and the
-    /// description may not name one.
+    /// A fill too narrow to see is not drawn — and the reading still reaches the
+    /// reader, because it is printed under the bar.
     ///
-    /// `showsRatio` used to ask `(reading.percent ?? 0) > 0` — `drawBar`'s old
-    /// exit condition rather than a question about what is on screen. At 1% the
-    /// fill is 0.24 pt across, less than one pixel on a 2x display, and VoiceOver
-    /// was handed "8%" and the caption of the day over a picture with no
-    /// colour anywhere in it. Both now read one threshold on one arithmetic
-    /// (`MenuBarIcon.fillWidth` against `minimumVisibleFillWidth`), so the two
-    /// cannot come apart.
+    /// The threshold is one constant on one arithmetic (`MenuBarIcon.fillWidth`
+    /// against `minimumVisibleFillWidth`), and it decides one thing: whether a
+    /// shape a quarter of a point wide goes on screen as its own antialiasing. It
+    /// used to decide a second thing as well — whether the description was
+    /// allowed to name the ratio — because the ratio reached the picture as
+    /// colour and nothing else, and a fill nobody can see carried nothing. The
+    /// number is that ratio now, so `showsRatio` is gone and the description
+    /// names the figure at every one of these widths.
     ///
     /// Measured rather than reasoned, at every figure either side of the
-    /// threshold: what the rendering did with the fill is what the description
-    /// has to agree with.
-    func testAFillTooNarrowToSeeIsNotARatioThePictureCarries() throws {
-        let quiet = rates(8)
-        for percent in 0...5 {
-            let reading = MenuBarIcon.Reading(percent: percent, rates: quiet)
-            let drawn = try render(percent, rates: quiet).chromaticMean(in: Self.barBand) != nil
-            XCTAssertEqual(MenuBarIcon.showsRatio(reading), drawn, """
-                at \(percent)% the picture \(drawn ? "drew" : "drew no") colour while `showsRatio` \
-                said \(MenuBarIcon.showsRatio(reading)) — fill \(MenuBarIcon.fillWidth(forPercent: percent)) pt
+    /// threshold.
+    func testAFillTooNarrowToSeeIsNotDrawnAtAll() throws {
+        for percent in [0.0, 1, 2, 3, 4, 5] {
+            let figure = rates(percent)
+            let drawn = try render(figure).chromaticMean(in: Self.fillBand) != nil
+            XCTAssertEqual(MenuBarIcon.fillWidth(for: figure) >= MenuBarIcon.minimumVisibleFillWidth,
+                           drawn, """
+                at \(percent)% the picture \(drawn ? "drew" : "drew no") fill while the threshold \
+                said otherwise — fill \(MenuBarIcon.fillWidth(for: figure)) pt
                 """)
-            XCTAssertEqual(MenuBarIcon.describe(reading).contains(UsagePopoverView.ratioCaption), drawn,
-                           "at \(percent)% the description and the picture disagree")
+            XCTAssertTrue(MenuBarIcon.describe(figure).contains(UsagePopoverView.ratioCaption),
+                          "at \(percent)% the description dropped a reading the number carries")
+            XCTAssertFalse(try render(figure).rows(in: MenuBarIcon.numberRows).isEmpty,
+                           "at \(percent)% the number is not on screen either")
         }
         // The fixture is one where the threshold decides: the smallest figures
-        // are below it and the largest of the five is above, so the loop is not
+        // are below it and the largest of the six is above, so the loop is not
         // green by being all one answer.
-        XCTAssertLessThan(MenuBarIcon.fillWidth(forPercent: 1), MenuBarIcon.minimumVisibleFillWidth)
-        XCTAssertGreaterThanOrEqual(MenuBarIcon.fillWidth(forPercent: 5),
+        XCTAssertLessThan(MenuBarIcon.fillWidth(for: rates(1)), MenuBarIcon.minimumVisibleFillWidth)
+        XCTAssertGreaterThanOrEqual(MenuBarIcon.fillWidth(for: rates(5)),
                                     MenuBarIcon.minimumVisibleFillWidth)
-        // Over capacity none of it applies: the frame carries the warning at any
-        // figure, which is what the tinting is for.
-        XCTAssertTrue(MenuBarIcon.showsRatio(MenuBarIcon.Reading(percent: 1, rates: rates(300))))
     }
 
     /// The picture is resolved against the status item button's appearance, and
@@ -2554,7 +2660,7 @@ final class MenuBarIconTests: XCTestCase {
         let chosen = MenuBarIcon.appearance(ofButton: button, system: light)
         XCTAssertEqual(chosen.name, .darkAqua,
                        "the picture followed the system theme past a button that has its own")
-        let dark = try XCTUnwrap(try render(42, appearance: chosen).luminance(in: MenuBarIcon.numberRows))
+        let dark = try XCTUnwrap(try render(rates(42), appearance: chosen).luminance(in: MenuBarIcon.numberRows))
         XCTAssertGreaterThan(dark, 0.7,
                              "drawn against the button's dark appearance the number is not light "
                              + "ink (luminance \(dark))")
@@ -2562,8 +2668,8 @@ final class MenuBarIconTests: XCTestCase {
         // No button, no picture of its own to resolve: the application's
         // appearance is all there is, and it is what the drawing gets.
         XCTAssertEqual(MenuBarIcon.appearance(ofButton: nil, system: light).name, .aqua)
-        let ink = try XCTUnwrap(try render(42, appearance: MenuBarIcon.appearance(ofButton: nil,
-                                                                                 system: light))
+        let ink = try XCTUnwrap(try render(rates(42), appearance: MenuBarIcon.appearance(ofButton: nil,
+                                                                                        system: light))
             .luminance(in: MenuBarIcon.numberRows))
         XCTAssertLessThan(ink, 0.3, "the fallback did not draw against the appearance given")
     }
@@ -2600,8 +2706,8 @@ final class MenuBarIconTests: XCTestCase {
     func testTheNumberAndTheFrameFollowTheAppearanceTheyAreDrawnAgainst() throws {
         let dark = NSAppearance(named: .darkAqua)
 
-        let lightNumber = try XCTUnwrap(try render(42).luminance(in: MenuBarIcon.numberRows))
-        let darkNumber = try XCTUnwrap(try render(42, appearance: dark)
+        let lightNumber = try XCTUnwrap(try render(rates(42)).luminance(in: MenuBarIcon.numberRows))
+        let darkNumber = try XCTUnwrap(try render(rates(42), appearance: dark)
             .luminance(in: MenuBarIcon.numberRows))
         XCTAssertLessThan(lightNumber, 0.3,
                           "the number is not dark ink on a light menu bar (luminance \(lightNumber))")
@@ -2611,7 +2717,9 @@ final class MenuBarIconTests: XCTestCase {
             """)
 
         // The frame on its own, with no reading — then there is no fill inside it
-        // and the bar's band is the frame and nothing else.
+        // and the bar's band is the frame and nothing else. (`frameBand` would do
+        // as well; the bar band says more here, because with no reading the whole
+        // of it has to be ink.)
         let lightFrame = try XCTUnwrap(try render(nil).luminance(in: Self.barBand))
         let darkFrame = try XCTUnwrap(try render(nil, appearance: dark).luminance(in: Self.barBand))
         XCTAssertLessThan(lightFrame, 0.3,
@@ -2622,91 +2730,84 @@ final class MenuBarIconTests: XCTestCase {
             """)
     }
 
-    /// Colour reaches nobody using VoiceOver, and in this picture the ratio is
-    /// carried by colour alone — so it has to be in the description too.
-    func testTheDescriptionCarriesWhatOnlyTheColourSays() {
-        XCTAssertEqual(MenuBarIcon.describe(MenuBarIcon.Reading()), "Weekly quota: no data")
-        XCTAssertEqual(MenuBarIcon.describe(MenuBarIcon.Reading(percent: 47)), "Weekly quota: 47%")
-        XCTAssertEqual(MenuBarIcon.describe(MenuBarIcon.Reading(percent: 47, rates: rates(126))),
-                       "Weekly quota: 47%, 126% of the sustainable spend rate")
-        XCTAssertEqual(MenuBarIcon.describe(MenuBarIcon.Reading(percent: 47,
-                                                                rates: rates(126, lowerBound: true))),
-                       "Weekly quota: 47%, ≥126% of the sustainable spend rate",
+    /// What the picture says, for a reader who cannot see it — and it no longer
+    /// says "weekly quota", because the picture no longer draws one.
+    ///
+    /// Two things are in here that the drawing cannot carry, and both are the
+    /// same fact about a description having no width: the `≥` of a ratio that is
+    /// only a floor, and a figure the column would have had to cap.
+    func testTheDescriptionCarriesTheRatioAndNamesItRight() {
+        XCTAssertEqual(MenuBarIcon.describe(nil), "Spend rate: no data")
+        XCTAssertEqual(MenuBarIcon.describe(rates(126)), "126% of the sustainable spend rate")
+        XCTAssertEqual(MenuBarIcon.describe(rates(126, lowerBound: true)),
+                       "≥126% of the sustainable spend rate",
                        "a floor was read out as if it were the figure")
+        XCTAssertFalse(MenuBarIcon.describe(rates(126)).contains("quota"),
+                       "the description still calls the ratio a quota")
+        // Where the drawing caps, this does not.
+        XCTAssertEqual(MenuBarIcon.label(for: rates(1240)).string, "999%")
+        XCTAssertEqual(MenuBarIcon.describe(rates(1240)), "1240% of the sustainable spend rate")
     }
 
-    /// And it says it on exactly the terms the picture says it on, which is the
-    /// half that was missing.
+    /// And it names the same reading the picture draws, at every figure either
+    /// side of the one boundary in the colour rules.
     ///
-    /// A quota failure skips the whole allowance block (`UsageStore.poll`), so the
-    /// figure freezes where it was while the picture stops carrying it at all:
-    /// with no reading there is no fill, and below capacity everything else is
-    /// ink. Measured with the gateway down over a stored 60%: not a coloured
-    /// pixel anywhere, and VoiceOver reading out "Weekly quota: no data, 60%" and the caption of
-    /// the day — the sighted user told there is no
-    /// data and the other handed a number, which is the reverse of what
-    /// describing the colour is for.
-    ///
-    /// Each case is asked of the rendering as well as of the string, because
-    /// "what the picture carries" is a claim about the picture.
-    func testTheDescriptionNamesTheRatioOnlyWhereThePictureCarriesIt() throws {
-        let whole = 0...MenuBarIcon.height
-        func coloured(_ reading: MenuBarIcon.Reading) throws -> Bool {
-            try render(reading.percent, rates: reading.rates).chromaticMean(in: whole) != nil
+    /// It used to have to agree with the *colour*, through `showsRatio`: the
+    /// ratio reached the drawing as a shade and nothing else, so a description
+    /// that named it over an uncoloured picture told the two readers two
+    /// different things — measured with the gateway down over a stored 60%, the
+    /// picture had not a coloured pixel in it while VoiceOver read out a number.
+    /// The number is the ratio now, so the agreement is about digits: whatever
+    /// the picture prints, the description contains, capping aside.
+    func testTheDescriptionAndThePictureNameOneNumber() throws {
+        for percent in [0.0, 1, 60, 99.999, 100, 130, 300, 999] {
+            let figure = rates(percent)
+            let printed = MenuBarIcon.label(for: figure).string
+            XCTAssertTrue(MenuBarIcon.describe(figure).hasPrefix(printed),
+                          "the picture prints \(printed) and the description says "
+                          + MenuBarIcon.describe(figure))
+            XCTAssertFalse(try render(figure).rows(in: MenuBarIcon.numberRows).isEmpty,
+                           "at \(percent)% the description names a number the picture never drew")
         }
-
-        // The measured case: no reading, a stored ratio below capacity.
-        let frozen = MenuBarIcon.Reading(percent: nil, rates: rates(60))
-        XCTAssertFalse(try coloured(frozen), "the fixture is not the state being described")
-        XCTAssertEqual(MenuBarIcon.describe(frozen), "Weekly quota: no data")
-
-        // A mean of exactly nought is the same shape one step along: the fill is
-        // zero points wide and never drawn, so below capacity nothing is red.
-        let empty = MenuBarIcon.Reading(percent: 0, rates: rates(60))
-        XCTAssertFalse(try coloured(empty))
-        XCTAssertEqual(MenuBarIcon.describe(empty), "Weekly quota: 0%")
-
-        // And where the picture does carry it, the description does too — both
-        // ways round, which is what makes this about agreement rather than about
-        // silence. Over capacity the frame is red at either figure.
-        for reading in [MenuBarIcon.Reading(percent: nil, rates: rates(300)),
-                        MenuBarIcon.Reading(percent: 0, rates: rates(300)),
-                        MenuBarIcon.Reading(percent: 47, rates: rates(60))] {
-            XCTAssertTrue(try coloured(reading), "nothing was coloured for \(reading)")
-            XCTAssertTrue(MenuBarIcon.describe(reading).contains(UsagePopoverView.ratioCaption),
-                          "the picture is coloured by a ratio the description does not name: "
-                          + MenuBarIcon.describe(reading))
-        }
+        // With no rates neither says anything, which is the other half: a
+        // description that named a figure over a dashed empty bar would be the
+        // reverse of what describing a picture is for.
+        XCTAssertEqual(MenuBarIcon.describe(nil), "Spend rate: no data")
+        XCTAssertTrue(try render(nil).rows(in: MenuBarIcon.numberRows).isEmpty)
     }
 
-    /// What the owner of the picture redraws on, and the half of it that is new:
-    /// the spend ratio moves without the weekly figure moving, so a reading that
-    /// carried the figure alone would dedupe the colour change away and leave a
-    /// green bar over a fleet that has gone past what it may spend.
-    func testTheReadingChangesWhenOnlyTheRatioDoes() {
+    /// What the owner of the picture redraws on: the pair of rates, and both
+    /// halves of it, because either can move without the other.
+    func testThePictureIsRedrawnOnEitherHalfOfThePair() throws {
         var snapshot = UsageSnapshot.empty
-        snapshot.fleetSevenDayMean = 47.4
-        let quiet = MenuBarIcon.reading(for: snapshot)
-        // 12.6M/h against an allowance of 10M/h, which is the 126% the picture is
-        // then coloured at.
+        // 12.6M/h against an allowance of 10M/h, which is the 126% the picture
+        // then draws and is coloured at.
         snapshot.fleetTokenRate = 12_600_000
         snapshot.sustainable = UsagePopoverLabelTests.allowance(10_000_000)
         // With its arrival, which is half of what the picture asks of a figure —
         // see `testAFigureNobodyHasConfirmedForTwoIntervalsIsNotDrawnOnEitherSurface`.
         snapshot.allowanceFetchedAt = Date()
-        let loaded = MenuBarIcon.reading(for: snapshot)
+        let loaded = try XCTUnwrap(MenuBarIcon.rates(for: snapshot))
+        XCTAssertEqual(loaded.percent, 126)
 
-        XCTAssertEqual(quiet.percent, loaded.percent, "the fixture moved the figure as well")
-        XCTAssertNotEqual(quiet, loaded, "the ratio is not part of what the picture is redrawn on")
+        // The numerator moves on the minute poll, the denominator every ten
+        // minutes, and a picture deduped on one of them would hold a stale ramp
+        // over a fleet that has gone past what it may spend.
+        var faster = snapshot
+        faster.fleetTokenRate = 20_000_000
+        XCTAssertNotEqual(MenuBarIcon.rates(for: faster), loaded)
+        var poorer = snapshot
+        poorer.sustainable = UsagePopoverLabelTests.allowance(5_000_000)
+        XCTAssertNotEqual(MenuBarIcon.rates(for: poorer), loaded)
 
-        // And its own half's failure takes it away, while the other half's does
-        // not: the same rule the figure follows, applied to the right endpoint.
+        // And its own half's failure takes the whole picture away, while the
+        // other half's does not: the refusals are the endpoints', one each.
         snapshot.sessionsFailure = "/gw/sessions: unreachable"
         XCTAssertEqual(MenuBarIcon.rates(for: snapshot)?.percent, 126,
                        "the sessions endpoint knows nothing about the histories")
         snapshot.allowanceFailure = "/gw/usage/<label>/history: unreachable"
         XCTAssertNil(MenuBarIcon.rates(for: snapshot),
-                     "a colour outlived the reading behind it, with no room up here to say so")
+                     "a reading outlived the figures behind it, with no room up here to say so")
     }
 }
 
@@ -4717,8 +4818,8 @@ final class UsagePopoverLabelTests: XCTestCase {
         var strings = [UsagePopoverView.headlineCaption,
                        UsagePopoverView.ratioCaption,
                        UsagePopoverView.ratioLabel(for: rates(126, lowerBound: true))]
-        strings.append(MenuBarIcon.describe(MenuBarIcon.Reading(percent: 47, rates: rates(126))))
-        strings.append(MenuBarIcon.describe(MenuBarIcon.Reading()))
+        strings.append(MenuBarIcon.describe(rates(126)))
+        strings.append(MenuBarIcon.describe(nil))
         for text in strings {
             XCTAssertFalse(text.lowercased().contains("fleet"),
                            "\"\(text)\" says \"fleet\" to somebody who does not work on this app")
@@ -5067,34 +5168,35 @@ final class UsagePopoverLabelTests: XCTestCase {
                        "The gateway named no accounts")
     }
 
-    /// The big number and the menu bar picture are one reading, rounded in one
-    /// place (`UsageSnapshot.fleetSevenDayPercent`): two ways of working it out
-    /// would drift apart the day one of them changed.
+    /// The weekly quota is this surface's alone since 2026-08-24, and it is
+    /// rounded in one place (`UsageSnapshot.fleetSevenDayPercent`).
     ///
-    /// They differ in exactly one thing, and it is not the arithmetic. The menu
-    /// bar drops a figure whose last pass failed, because up there is no room to
-    /// say "as of an hour ago" and a bare percentage reads as the truth right
-    /// now (§2.4). The popover keeps it: the footer under it gives the age, and
-    /// the account rows below go on showing their stored percentages — gated the
-    /// same way, the headline was a dash over live numbers, and the dash was the
-    /// false statement of the two.
-    func testTheHeadlineAndTheIconComputeTheSameFigure() {
+    /// The menu bar drew the same figure until then, under a colour that meant
+    /// something else, and the pair of them needed a rule each: the icon dropped
+    /// a figure whose last pass had failed, because up there is no room to say
+    /// "as of an hour ago". Only the keeping half is left. The popover keeps a
+    /// stale quota because the footer under it gives the age, and because the
+    /// account rows below go on showing their stored percentages — gated the same
+    /// way, the headline was a dash over live numbers, and the dash was the false
+    /// statement of the two.
+    func testTheWeeklyQuotaIsThisSurfacesAloneAndSurvivesAFailedPass() throws {
         var snapshot = UsageSnapshot.empty
         snapshot.fleetSevenDayMean = 58.667
         XCTAssertEqual(snapshot.fleetSevenDayPercent, 59)
-        XCTAssertEqual(UsagePopoverView.headlinePercent(for: snapshot), MenuBarIcon.percent(for: snapshot),
-                       "two surfaces, two figures")
+        XCTAssertEqual(UsagePopoverView.headlinePercent(for: snapshot), 59)
         XCTAssertEqual(UsagePopoverView.percentLabel(snapshot.fleetSevenDayMean), "59%")
 
-        // The one difference, in both directions.
+        // Kept when the pass that brings it fails, and dated by the footer.
         snapshot.quotaFailure = "/gw/usage: unreachable"
-        XCTAssertNil(MenuBarIcon.percent(for: snapshot), "the menu bar showed a figure it cannot caveat")
         XCTAssertEqual(UsagePopoverView.headlinePercent(for: snapshot), 59,
                        "the headline blanked a reading it has, over rows that are showing it")
 
-        // And a reading nobody ever took is a dash on both surfaces.
+        // And the menu bar has nothing to draw from this snapshot at all: the
+        // quota is not a figure it falls back to.
+        XCTAssertNil(MenuBarIcon.rates(for: snapshot))
+
+        // A reading nobody ever took is a dash.
         XCTAssertNil(UsagePopoverView.headlinePercent(for: .empty))
-        XCTAssertNil(MenuBarIcon.percent(for: .empty))
     }
 
     /// The accounts section speaks for the poll it draws — `/gw/usage`, which is
