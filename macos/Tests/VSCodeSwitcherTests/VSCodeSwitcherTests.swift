@@ -4976,18 +4976,111 @@ final class SessionProcessSyscallTests: XCTestCase {
         SessionProcesses.cpuNanos(of: pid) != nil && SessionProcesses.parentAndStart(of: pid) == nil
     }
 
-    /// **Finding 1, against a real zombie.** A child burns 3 s of CPU and exits;
-    /// its parent does not call `wait` for another three seconds. Through that
-    /// window the sweep cannot see the child at all, and its counter has not
-    /// gone anywhere — the parent's `ri_child_*` does not move until the `wait`.
+    /// **Finding 1, against a real zombie.** A child burns 3.0 core-seconds and
+    /// exits; its parent does not call `wait` until the sampling loop below
+    /// hands it the `reap` file, which that loop writes only once a pass has
+    /// both seen the zombie and swept past it. Through that window the sweep
+    /// cannot see the child at all, and its counter has not gone anywhere — the
+    /// parent's `ri_child_*` does not move until the `wait`.
     ///
     /// Deducted on disappearance, this fixture reports the child's whole
-    /// lifetime inside the tick where the reap lands: 3 s of CPU in a 1 s pass
-    /// is 300%, and the pass where the child turned into a zombie floors to
-    /// zero, because the deduction is charged to a parent that gained nothing.
-    /// With `swift build` in the child's place that spike is the 60000% §2.8
-    /// names. The ledger defers instead: no growth, nothing settled, and the
-    /// debt waits for the pass where the reap really lands.
+    /// lifetime inside the tick where the reap lands, while the pass where the
+    /// child turned into a zombie floors to zero, because the deduction is
+    /// charged to a parent that gained nothing. With `swift build` in the
+    /// child's place that spike is the 60000% §2.8 names. The ledger defers
+    /// instead: no growth, nothing settled, and the debt waits for the pass
+    /// where the reap really lands.
+    ///
+    /// **How much the child burns is what makes `peak < 150` discriminate, so
+    /// it is derived from the pass rather than picked.** Deducted on
+    /// disappearance the whole reaped total lands in one pass, so the ceiling
+    /// can only fire when that total is over 1.5 passes' worth — and a pass was
+    /// measured rather than assumed: a second of sleep plus a sweep costs
+    /// 1.0043–1.0195 s over five instrumented runs, 27.08.2026. The sweep in
+    /// that second is a *warm* one, which §6 puts at about a millisecond;
+    /// §6's 5.9–6.6 ms is the cold sweep, and exactly one sweep here is cold —
+    /// the baseline one before the loop, outside every tick measured. What
+    /// fills the rest of the spread is `Thread.sleep` overshoot and scheduling
+    /// jitter, which was not measured and is not being sized here. At the 1.5
+    /// core-seconds this loop used to spin, the threshold was 1.5 passes ≈
+    /// 1.51 s of burn against 1.50 reaped: the mutation peaked at 148.795% and
+    /// 149.457% and **passed**, while the fixture stayed green and said
+    /// nothing. At 3.0 a pass would have to stretch to 2.0 s — double what was
+    /// measured — before the ceiling stopped catching it, and the mutation now
+    /// comes to 296.995% and 296.242% over two runs the same day, failing on
+    /// the ceiling and on the integral both (4.9990 and 5.9294 core-seconds
+    /// against 3.000983 and 3.000826 reaped, 1.67× and 1.98×, where the bound
+    /// below is 1.2×).
+    ///
+    /// What moved is the burn and not the ceiling, because the healthy peak is
+    /// a *rate* and does not know how long the child spins: 99.969%, 99.874%
+    /// and 100.003% over three runs at 3.0, against 96.355% and 99.457% from
+    /// the 1.5 child — the same one core either way. Those four figures are
+    /// unloaded runs, and the peak moves with load: later the same day, minutes
+    /// apart and under other work, the same fixture read 89.9–99.8% at 3.0 and
+    /// 76.2–86.0% at 1.5. The claim rests on the mechanism rather than on them.
+    /// The most a healthy pass can report for one attributed process is what
+    /// that process burned since the previous sweep, which cannot exceed one
+    /// core's worth of one pass, over the sampler's own interval; the row's
+    /// figure sums over every process of the session
+    /// (`cpuPercentBySessionPID`), so the strict bound is one core per
+    /// attributed process, and it comes to ~100% here only because the parent
+    /// sleeps in its polling loop. That interval is bounded below by the
+    /// `Thread.sleep(1)` plus the sweep, so contention moves the figure down by
+    /// whole percents. Up it can move only by one residual skew: the counters
+    /// are read *inside* the sweep while `now` is taken after it
+    /// (`SessionProcesses.sample`, where "same side both times is the whole of
+    /// the fix"), and where in a sweep a given process is read still differs
+    /// between two passes, so the interval the numerator covers can slightly
+    /// outrun the one the denominator measures. That is what the 100.003%
+    /// opening this paragraph is — a fraction of a percent, and no size is
+    /// being put on it here. Lowering the ceiling to
+    /// the size of the spike would have eaten the 50 points of slack that
+    /// absorb a loaded machine — the very margin the load flake cured below
+    /// turned on. **The price of the burn is a pass, and it is counted in
+    /// passes because seconds cannot express it:** a run is a whole number of
+    /// ~1 s passes and the machine decides how many the child needs, so
+    /// neither the run's length nor the difference between two burns is a
+    /// fixed number of seconds — the difference is quantised the same way the
+    /// absolute is. Counted, 27.08.2026, six runs at each burn back to back in
+    /// one session with the pass count printed from the loop: at 1.5 the run
+    /// took 4 passes five times and 5 once (4.166, 4.173, 4.168, 5.187, 4.177
+    /// and 4.182 s), at 3.0 it took 5 passes three times, 6 twice and 8 once
+    /// (5.111, 5.122, 8.817, 6.128, 5.175 and 6.118 s). One pass between the
+    /// two usual shapes, and a spread of one pass at 1.5 against three at 3.0,
+    /// because the child's exit lands on a pass boundary rather than safely
+    /// between two. The counts say where: a run ends two passes after the one
+    /// that saw the zombie, so 5 and 6 passes put the exit either side of the
+    /// third check — which is what the mutation's own integrals already
+    /// showed, 4.9990 and 5.9294 being a pass apart, the child last seen on
+    /// the second pass and on the third. The eight-pass run is that boundary
+    /// moved and not the account failing: it puts the exit between the fifth
+    /// check and the sixth, a loaded machine taking five to six *passes* — 5.5
+    /// to 6.6 wall seconds at the 1.0923 s its own passes averaged — to hand
+    /// the child its three core-seconds. Against that 1.0923 s stand
+    /// 1.0066–1.0123 s in the other eight instrumented runs at 3.0: the five
+    /// of the six counted above that are not this one, plus the three of the
+    /// `print`-cost check below. Every set of seconds recorded here before is
+    /// one of these shapes rather than a disagreement with another — 4.10 and 4.14 s are
+    /// the four-pass run at 1.5, 5.11/5.13/5.13 the five-pass run at 3.0,
+    /// 6.13/6.14/6.13 the six-pass one — so a re-measure is only readable
+    /// beside its own pass count. One shape has a second sighting and the
+    /// other does not: 6.13/6.14/6.13 is the six-pass record just quoted, not
+    /// a repeat of it, while 5.116/5.100/5.113/5.127 is genuinely new — a
+    /// separate uninstrumented sitting of the same unchanged fixture the same
+    /// day. Neither sitting had its passes counted, so calling them the
+    /// six-pass and the five-pass shape is read off the bands the counted runs
+    /// establish — 5.111–5.175 s for five passes, 6.118/6.128 for six — and is
+    /// an inference, not a reading. Anyone taking the burn back down to 1.5 to
+    /// save that pass is buying it with the ceiling, which stops
+    /// discriminating at that size. Every per-pass figure above was read with
+    /// a `print` inside the loop, which costs nothing the clock can see:
+    /// three further runs with it came to 5.12, 5.13 and 5.14 s against the
+    /// 5.11, 5.13 and 5.13 s without it, both of them the five-pass shape and
+    /// therefore comparable, and all twelve runs of the count above carried
+    /// it too. The 227.95% and 281.22% §2.8 records are not this fixture's
+    /// margin either: those runs reaped 2.30 and 2.85 core-seconds, so
+    /// whatever else they measured, it was not this child.
     ///
     /// The table-driven fixtures cannot express this at all — in them a
     /// disappearance and the reap that follows it always fall in the same gap,
@@ -5008,19 +5101,44 @@ final class SessionProcessSyscallTests: XCTestCase {
     /// A run that never saw the zombie state would prove nothing, so that is
     /// asserted too.
     ///
-    /// **Every wait in here is on a condition, and it took a red run to get
-    /// there.** The child used to spin for 3 s of *wall* time, which on a
+    /// **Every wait in here is on a condition, and it took two rounds of red runs
+    /// to get there.** The child used to spin for 3 s of *wall* time, which on a
     /// machine with its own work to do is not an amount of CPU at all: under a
     /// concurrent build it came out below the half-core-second the canary
     /// demands and the test failed for the machine's reasons rather than the
     /// ledger's. The child now spins until `time.process_time()` says it has
-    /// burned 1.5 **core**-seconds, signals its exit through a file so the
-    /// zombie window is a window and not a guess, and the sampling loop runs
-    /// until the reap has landed and a pass has carried it rather than for a
+    /// burned the **core**-seconds sized above, signals its exit through a file
+    /// so the zombie window is a window and not a guess, and the sampling loop
+    /// runs until the reap has landed and a pass has carried it rather than for a
     /// fixed nine passes — because how many wall seconds those core-seconds
     /// take now belongs to the machine. Same fix as
     /// `testARealGrandchildLeftToLaunchdDoesNotBlankTheSurvivorsTick`, which
     /// waits on the grandchild's counter for the same reason.
+    ///
+    /// **And the zombie window itself was the last fixed interval, measured in
+    /// the wrong clock.** The parent used to hold the corpse for 3 s and then
+    /// reap it, which is only a window if a pass falls inside it — and a pass is
+    /// a second of sleep plus a whole sweep of the process table, so how many
+    /// passes fit in three seconds belongs to the machine's load and not to this
+    /// test. Overrun, the fixture does not fail loudly: the disappearance and
+    /// the reap land in the same gap, which is the *ordinary* case and the one
+    /// arrangement in which deducting on disappearance is right, so the run
+    /// quietly stops testing the thing it is named for and goes red on
+    /// `zombieSeen`. The parent now waits for a third file instead, which this
+    /// loop creates once a pass has actually seen the zombie **and swept**. The
+    /// window is then exactly as long as it needs to be, which also keeps it far
+    /// inside `debtLifetimeSeconds` — a debt that aged out before its reap would
+    /// spike by the whole amount written off.
+    ///
+    /// **Shown rather than argued, and without loading anything**: what decides
+    /// the old shape is the ratio between the window and the pass, so the window
+    /// was shrunk instead of the machine being slowed. Cut to 0.05 s with the
+    /// passes left at a second, the fixed-window shape went red on `zombieSeen`
+    /// in 3 runs of 3 (27.08.2026), on the very assertion the flake was reported
+    /// on; the handshake is green in 3 of 3, at 4.1 s a run — that being the
+    /// 1.5-core-second child of the hour, whose four-pass shape re-measured
+    /// the same day at 4.166–4.182 s, and the run costs a pass more now for
+    /// the reason sized at the top.
     ///
     /// A flake here is worse than it looks: this suite is the only thing between
     /// the ledger and a silent regression, and a test that cries wolf under load
@@ -5029,26 +5147,31 @@ final class SessionProcessSyscallTests: XCTestCase {
         try requireInterpreter()
         let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
         let exited = scratch.appendingPathComponent("vscode-switcher-zombie-exited-\(getpid())")
+        let reap = scratch.appendingPathComponent("vscode-switcher-zombie-reap-\(getpid())")
         let reaped = scratch.appendingPathComponent("vscode-switcher-zombie-reaped-\(getpid())")
-        for url in [exited, reaped] { try? FileManager.default.removeItem(at: url) }
-        defer { for url in [exited, reaped] { try? FileManager.default.removeItem(at: url) } }
+        let scratchFiles = [exited, reap, reaped]
+        for url in scratchFiles { try? FileManager.default.removeItem(at: url) }
+        defer { for url in scratchFiles { try? FileManager.default.removeItem(at: url) } }
         // The child burns core-seconds, not wall seconds, and says so by
         // touching a file the instant before it exits — the parent cannot ask
         // whether it has exited without reaping it, and reaping it is the one
-        // thing that must wait. The result goes through a rename so a pass
-        // never reads it half-written.
+        // thing that must wait. It waits on a file of its own rather than on a
+        // clock: only the sampling loop below knows whether the zombie has been
+        // observed yet. The result goes through a rename so a pass never reads
+        // it half-written.
         let script = """
             import os, time
             exited = "\(exited.path)"
+            reap = "\(reap.path)"
             reaped = "\(reaped.path)"
             pid = os.fork()
             if pid == 0:
                 base = time.process_time()
-                while time.process_time() - base < 1.5: pass
+                while time.process_time() - base < 3.0: pass
                 open(exited, "w").close()
                 os._exit(0)
             while not os.path.exists(exited): time.sleep(0.05)
-            time.sleep(3.0)
+            while not os.path.exists(reap): time.sleep(0.05)
             usage = os.wait4(pid, 0)[2]
             with open(reaped + ".tmp", "w") as handle:
                 handle.write(repr(usage.ru_utime + usage.ru_stime))
@@ -5071,6 +5194,7 @@ final class SessionProcessSyscallTests: XCTestCase {
         // fails rather than hangs.
         let deadline = Date().addingTimeInterval(180)
         var passesSinceReap = 0
+        var released = false
         while passesSinceReap < 2, Date() < deadline {
             Thread.sleep(forTimeInterval: 1)
             // The zombie window is what makes this fixture the case under test,
@@ -5081,12 +5205,22 @@ final class SessionProcessSyscallTests: XCTestCase {
             peak = max(peak, percent)
             coreSeconds += percent / 100 * Double(now - last) / 1e9
             last = now
+            // Let the parent reap, now that a pass has both seen the zombie and
+            // swept past it — that sweep is the one that writes the debt down.
+            // Released any earlier and the reap could land in the same gap as
+            // the disappearance, which is the ordinary case and not this one.
+            if zombieSeen, !released {
+                FileManager.default.createFile(atPath: reap.path, contents: nil)
+                released = true
+            }
             if FileManager.default.fileExists(atPath: reaped.path) { passesSinceReap += 1 }
         }
 
-        XCTAssertEqual(passesSinceReap, 2, "the fixture never got as far as the reap")
         XCTAssertTrue(zombieSeen,
-                      "the child was never caught between exit and wait: this run tested nothing")
+                      "the child was never caught between exit and wait within the deadline: "
+                          + "this run tested nothing")
+        XCTAssertEqual(passesSinceReap, 2,
+                       "the fixture never got as far as the reap within the deadline")
         XCTAssertLessThan(peak, 150,
                           "one core was burned and one pass claimed more than one core")
 

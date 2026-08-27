@@ -604,7 +604,7 @@ struct SwitcherRowView: View {
         .help(tooltip)
     }
 
-    /// The chat topic on the left, the row's token spend on the right.
+    /// The chat topic on the left, the rate the row is spending at on the right.
     ///
     /// Two things that have nothing to do with each other, on one line because
     /// there is only one line to spare: the title line above already carries
@@ -613,15 +613,16 @@ struct SwitcherRowView: View {
     /// fourth element up there would have to be paid for by one of them.
     ///
     /// Neither is compulsory, and the line itself is not either: a row with no
-    /// chat and no spend — most of the "projects" section — draws exactly what
-    /// it drew before, with no empty second line under the name.
+    /// chat and nothing being spent — most of the "projects" section — draws
+    /// exactly what it drew before, with no empty second line under the name.
     ///
     /// When the two compete, the topic gives way. The number is `fixedSize`, so
     /// the shortfall lands on the topic's ellipsis: a truncated topic is still a
-    /// topic, while a truncated number is a lie about how much was spent — the
-    /// same objection §4 makes to a truncated `(agents: N)`.
+    /// topic, while a truncated rate is a lie about how fast the row is spending —
+    /// the same objection §4 makes to a truncated `(agents: N)`, and the same one
+    /// it made to a truncated total before the figure became a rate.
     @ViewBuilder private var secondLine: some View {
-        let usage = Self.usageLabel(for: row)
+        let usage = Self.rateLabel(for: row)
         if subtitle != nil || usage != nil {
             HStack(spacing: 6) {
                 if let subtitle {
@@ -903,6 +904,42 @@ struct SwitcherRowView: View {
         return (row.usageIsLowerBound ? "≥" : "") + compactTokens(value)
     }
 
+    /// What the row has spent over the last sliding hour, as the second line
+    /// writes it: `12.40M/h`, or `nil` when there is nothing to write.
+    ///
+    /// This is what the second line draws — the week's total moved to the tooltip
+    /// (§2.9). It reads as a rate because it is one: the gateway's aggregates are
+    /// windowed, so the tokens it reports over a window one hour long are already
+    /// tokens per hour and nothing divides anything. `/h` is the whole of the
+    /// arithmetic and therefore the whole of what says which number this is.
+    ///
+    /// A trailing sum, though, and not a reading taken now — the difference is
+    /// visible on the panel and is not a defect (§3.1). A project that burned 12M
+    /// and stopped fifty-five minutes ago still prints `12.40M/h` beside an
+    /// `asleep` moon, and the figure goes away an hour after the last token rather
+    /// than when the work stopped.
+    ///
+    /// The two silences and the `≥` are `usageLabel`'s, over the hour's window:
+    /// `nil` for both holes `SwitcherRow.hourlyInputEquivalent` folds together,
+    /// and the mark whenever the figure is real but a counter behind it was never
+    /// named.
+    ///
+    /// `nonisolated` for the reason `usageLabel` and `countLabel` are: the dump
+    /// runs outside the main actor.
+    ///
+    /// There is a second `rateLabel` — `UsagePopover.rateLabel`, which writes
+    /// `23.8M/h` — and the two are deliberately not one function. That one states
+    /// the **fleet's** rate as a headline read at a glance, so one decimal is
+    /// enough and the letter has to step up to `B`; this one states a **project's**
+    /// rate, printed in `compactTokens` because the row and `--dump` compare it
+    /// against the same project's week written by the same ladder, and a rate
+    /// rounded differently from the total beside it is two numbers that cannot be
+    /// read against each other.
+    nonisolated static func rateLabel(for row: SwitcherRow) -> String? {
+        guard let value = row.hourlyInputEquivalent else { return nil }
+        return (row.hourlyIsLowerBound ? "≥" : "") + compactTokens(value) + "/h"
+    }
+
     /// `21.30M`, `914k`, `512`: the coarsest unit that still tells two numbers
     /// apart at a glance. Shared with `--dump` so the panel and the dump cannot
     /// come to describe the same row differently, and `nonisolated` for the same
@@ -968,7 +1005,7 @@ struct SwitcherRowView: View {
     }
 
     /// The spend behind the row's one number, broken back out into the four
-    /// counters it was folded from.
+    /// counters it was folded from, with the week's total as one line under it.
     ///
     /// The row shows one figure because there is room for one, and that figure
     /// is *input-equivalent*: the four counters are billed at different rates —
@@ -978,15 +1015,33 @@ struct SwitcherRowView: View {
     /// why the four raw numbers belong in the tooltip: they are what the gateway
     /// actually said.
     ///
+    /// **The breakdown belongs to the figure the row prints**, which is the hour's
+    /// (§2.9) — that is the whole of the argument above, and it names the number
+    /// the reader is looking at rather than a different one. The week is still
+    /// worth saying, so it stays, as a summary line and no more.
+    ///
+    /// The two blocks are independent because their absences are: a week without
+    /// an hour is an ordinary quiet project, and an hour without a week happens
+    /// too — the two `/gw/sessions` calls fail apart (`UsageStore.poll`), and the
+    /// gateway's cap on the week would strand an hour the same way if it were
+    /// firing (`SwitcherSnapshot.ambiguousHourlyUsage`). With neither, this is `[]`
+    /// and the tooltip is exactly what it was before.
+    ///
     /// A counter the gateway never named prints as `?` rather than as 0, and the
     /// total then carries `≥`. Same rule, same symbols and the same rounding as
     /// the row itself and as `--dump`.
     static func usageLines(for row: SwitcherRow) -> [String] {
-        guard let total = usageLabel(for: row), let usage = row.usage else { return [] }
-        let counters = [("in", usage.input), ("out", usage.output),
-                        ("cache write", usage.cacheCreation), ("cache read", usage.cacheRead)]
-        return ["", "Tokens (input-equivalent): \(total)"]
-            + counters.map { "• \($0.0) \($0.1.map { compactTokens(Double($0)) } ?? "?")" }
+        var lines: [String] = []
+        if let value = row.hourlyInputEquivalent, let hourly = row.hourlyUsage {
+            let counters = [("in", hourly.input), ("out", hourly.output),
+                            ("cache write", hourly.cacheCreation), ("cache read", hourly.cacheRead)]
+            lines.append("Tokens over the last hour (input-equivalent): "
+                + (row.hourlyIsLowerBound ? "≥" : "") + compactTokens(value))
+            lines.append(contentsOf:
+                counters.map { "• \($0.0) \($0.1.map { compactTokens(Double($0)) } ?? "?")" })
+        }
+        if let week = usageLabel(for: row) { lines.append("Over 7 days: \(week)") }
+        return lines.isEmpty ? [] : [""] + lines
     }
 
     /// What the row's processes are doing, spelled out.

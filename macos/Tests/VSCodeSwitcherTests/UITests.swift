@@ -1173,6 +1173,7 @@ final class RowLayoutTests: XCTestCase {
                          name: String = "проект с длинным именем, которое не влезает",
                          topic: String? = "тема чата, тоже подлиннее строки",
                          usage: TokenCounts? = nil,
+                         hourly: TokenCounts? = nil,
                          cpu: Double? = nil,
                          orphans: Int = 0) -> SwitcherRow {
         let state: AgentState = switch status {
@@ -1204,7 +1205,8 @@ final class RowLayoutTests: XCTestCase {
                               lastActivity: nil,
                               usage: usage,
                               cpuPercent: cpu,
-                              orphanCount: orphans)
+                              orphanCount: orphans,
+                              hourlyUsage: hourly)
         XCTAssertEqual(row.status, status, "the fixture does not fold to \(status)")
         XCTAssertEqual(row.activeCount, count)
         return row
@@ -1215,11 +1217,12 @@ final class RowLayoutTests: XCTestCase {
                            name: String = "проект с длинным именем, которое не влезает",
                            topic: String? = "тема чата, тоже подлиннее строки",
                            usage: TokenCounts? = nil,
+                           hourly: TokenCounts? = nil,
                            cpu: Double? = nil,
                            orphans: Int = 0,
                            width: Double) throws -> Rendered {
         let row = makeRow(status: status, count: count, name: name, topic: topic,
-                          usage: usage, cpu: cpu, orphans: orphans)
+                          usage: usage, hourly: hourly, cpu: cpu, orphans: orphans)
         return try measure(SwitcherRowView(row: row, isFrontmost: false, panelVisible: false)
             .padding(.horizontal, 6)
             .frame(width: width))
@@ -1619,15 +1622,25 @@ final class RowLayoutTests: XCTestCase {
                      "a nameless row drew something between the bar and the slot")
     }
 
-    // MARK: - Spend on the second line
+    // MARK: - The rate on the second line
 
-    /// The spend the tests are run against: complete, and 3.40M
+    /// The hour's spend the tests are run against: complete, and 3.40M
     /// input-equivalent — 1M in, 200k out at five times, 400k of cache writes at
-    /// 1.25 and 9M of cache reads at a tenth.
-    private static let spend = TokenCounts(input: 1_000_000,
-                                           output: 200_000,
-                                           cacheCreation: 400_000,
-                                           cacheRead: 9_000_000)
+    /// 1.25 and 9M of cache reads at a tenth. The line draws it as `3.40M/h`.
+    private static let hourSpend = TokenCounts(input: 1_000_000,
+                                               output: 200_000,
+                                               cacheCreation: 400_000,
+                                               cacheRead: 9_000_000)
+
+    /// The same figure a decimal order of magnitude up, so that the two labels
+    /// differ in *width*: `34.00M/h` against `3.40M/h`. What it is for is asking
+    /// "is the rate on the line at all" without comparing a row against a row that
+    /// has no rate to draw — the predicate §4 spells out, which a "with it and
+    /// without it" comparison cannot answer.
+    private static let widerHourSpend = TokenCounts(input: 10_000_000,
+                                                    output: 2_000_000,
+                                                    cacheCreation: 4_000_000,
+                                                    cacheRead: 90_000_000)
 
     /// A row whose title line draws nothing, so that every column of ink between
     /// the colour bar and the indicator belongs to the second line.
@@ -1637,14 +1650,14 @@ final class RowLayoutTests: XCTestCase {
     /// which is the same reason `testNothingButTheNameLivesBetweenTheBarAndTheSlot`
     /// renders a nameless row.
     private func renderSecondLine(topic: String?,
-                                  usage: TokenCounts?,
+                                  hourly: TokenCounts?,
                                   width: Double) throws -> Rendered {
-        try renderRow(status: .blocked, count: 0, name: "", topic: topic, usage: usage, width: width)
+        try renderRow(status: .blocked, count: 0, name: "", topic: topic, hourly: hourly, width: width)
     }
 
     /// The number's own ink, rendered alone in the font the second line draws it
     /// in.
-    private func inkWidthOfSpend(_ label: String) throws -> Double {
+    private func inkWidthOfLabel(_ label: String) throws -> Double {
         let alone = try measure(Text(label)
             .font(.system(size: 11))
             .monospacedDigit()
@@ -1654,19 +1667,19 @@ final class RowLayoutTests: XCTestCase {
         return ink.upperBound - ink.lowerBound
     }
 
-    /// The spend is at the right-hand end of the second line, not wherever the
+    /// The rate is at the right-hand end of the second line, not wherever the
     /// topic happens to stop. Measured against a topic short enough that the two
     /// cannot be confused: if the number simply followed the topic it would be
     /// tens of points to the left of where it is.
-    func testTheSpendStandsAtTheRightEndOfTheSecondLine() throws {
+    func testTheRateStandsAtTheRightEndOfTheSecondLine() throws {
         let width = Config.default.panelWidth
-        let label = try XCTUnwrap(SwitcherRowView.usageLabel(for: makeRow(status: .blocked,
+        let label = try XCTUnwrap(SwitcherRowView.rateLabel(for: makeRow(status: .blocked,
                                                                          count: 0,
-                                                                         usage: Self.spend)))
-        XCTAssertEqual(label, "3.40M")
-        let labelWidth = try inkWidthOfSpend(label)
+                                                                         hourly: Self.hourSpend)))
+        XCTAssertEqual(label, "3.40M/h")
+        let labelWidth = try inkWidthOfLabel(label)
 
-        let rendered = try renderSecondLine(topic: "тема", usage: Self.spend, width: width)
+        let rendered = try renderSecondLine(topic: "тема", hourly: Self.hourSpend, width: width)
         let slot = badgeSlot(inRowOfWidth: width)
         let line = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
                                                to: slot.lowerBound - 3),
@@ -1697,19 +1710,24 @@ final class RowLayoutTests: XCTestCase {
     /// and at the default there is room for both.
     ///
     /// Held by measurement rather than by belief: the number's ink is compared
-    /// against the same string rendered on its own, so a truncated `3.4…` fails
-    /// even though it is still "drawn". Proved by removing the modifier — the
-    /// number came out 12.75 pt narrower at 150 pt, and this fails.
-    func testTheSpendIsNeverCutWhileTheTopicIs() throws {
-        let label = try XCTUnwrap(SwitcherRowView.usageLabel(for: makeRow(status: .blocked,
+    /// against the same string rendered on its own, so a truncated `3.40M/…`
+    /// fails even though it is still "drawn". Proved by removing the modifier and
+    /// re-measured 2026-08-27, now that the label is a rate: `3.40M/h` inks 42.00
+    /// pt whole and 24.25 pt clipped at 150 pt — 17.75 pt of it gone — and this
+    /// fails there. **Only there.** At 240 pt, and at the 380 pt default, the two
+    /// extra characters still fit and nothing fails, so 150 is the whole of what
+    /// holds this modifier down; a claim that it also broke at 240 was in this
+    /// comment until the mutation was actually run.
+    func testTheRateIsNeverCutWhileTheTopicIs() throws {
+        let label = try XCTUnwrap(SwitcherRowView.rateLabel(for: makeRow(status: .blocked,
                                                                          count: 0,
-                                                                         usage: Self.spend)))
-        let labelWidth = try inkWidthOfSpend(label)
+                                                                         hourly: Self.hourSpend)))
+        let labelWidth = try inkWidthOfLabel(label)
         var topicWidths: [Double] = []
 
         for width in [Config.default.panelWidth, 240.0, 150.0] {
             let rendered = try renderSecondLine(topic: "тема чата, тоже подлиннее строки",
-                                                usage: Self.spend,
+                                                hourly: Self.hourSpend,
                                                 width: width)
             let slot = badgeSlot(inRowOfWidth: width)
             let line = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
@@ -1732,14 +1750,14 @@ final class RowLayoutTests: XCTestCase {
         XCTAssertGreaterThan(topicWidths[1], topicWidths[2])
     }
 
-    /// A row with spend and no chat is the number alone, still on the right.
-    func testARowWithSpendAndNoTopicIsJustTheNumber() throws {
+    /// A row with a rate and no chat is the number alone, still on the right.
+    func testARowWithARateAndNoTopicIsJustTheNumber() throws {
         let width = Config.default.panelWidth
-        let label = try XCTUnwrap(SwitcherRowView.usageLabel(for: makeRow(status: .blocked,
+        let label = try XCTUnwrap(SwitcherRowView.rateLabel(for: makeRow(status: .blocked,
                                                                          count: 0,
-                                                                         usage: Self.spend)))
-        let labelWidth = try inkWidthOfSpend(label)
-        let rendered = try renderSecondLine(topic: nil, usage: Self.spend, width: width)
+                                                                         hourly: Self.hourSpend)))
+        let labelWidth = try inkWidthOfLabel(label)
+        let rendered = try renderSecondLine(topic: nil, hourly: Self.hourSpend, width: width)
         let slot = badgeSlot(inRowOfWidth: width)
         let line = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
                                                to: slot.lowerBound - 3),
@@ -1752,20 +1770,161 @@ final class RowLayoutTests: XCTestCase {
     /// And a row with neither grows no second line at all — the row keeps the
     /// single-line height it has always had, which is what "looks exactly like
     /// today" means for the ninety-odd rows of the projects section.
-    func testARowWithNeitherTopicNorSpendGrowsNoSecondLine() throws {
+    ///
+    /// The week's figure is one of the variants, and it is there to fail: it is
+    /// the tooltip's now, and a row that has only a week has nothing to draw on
+    /// this line.
+    func testARowWithNeitherTopicNorRateGrowsNoSecondLine() throws {
         let width = Config.default.panelWidth
         let bare = try renderRow(status: .blocked, count: 0, name: "имя",
                                  topic: nil, usage: nil, width: width)
         XCTAssertEqual(bare.size.height, 38, accuracy: 0.01,
                        "a row with nothing to say is not the minimum height any more")
-        let variants: [(topic: String?, usage: TokenCounts?)] = [
-            ("тема", nil), (nil, Self.spend), ("тема", Self.spend)
+        let variants: [(topic: String?, hourly: TokenCounts?)] = [
+            ("тема", nil), (nil, Self.hourSpend), ("тема", Self.hourSpend)
         ]
         for second in variants {
             let rendered = try renderRow(status: .blocked, count: 0, name: "имя",
-                                         topic: second.topic, usage: second.usage, width: width)
+                                         topic: second.topic, hourly: second.hourly, width: width)
             XCTAssertGreaterThan(rendered.size.height, bare.size.height,
                                  "no second line for topic=\(second.topic as Any)")
+        }
+        let weekOnly = try renderRow(status: .blocked, count: 0, name: "имя",
+                                     topic: nil, usage: Self.hourSpend, hourly: nil, width: width)
+        XCTAssertEqual(weekOnly.size.height, bare.size.height, accuracy: 0.01,
+                       "the week's total is the tooltip's; the line must not grow for it")
+    }
+
+    /// **Is the rate drawn at all** — asked with two rates of different width
+    /// rather than with a rate against no rate.
+    ///
+    /// Two rates differ in **the label's width and nothing else**, so nothing but
+    /// the label can make the two renders differ. That is the whole argument, and
+    /// it does not depend on guessing how the label might one day stop being
+    /// drawn.
+    ///
+    /// A rate against no rate is two different compositions of the line, not one
+    /// composition with an element missing: `secondLine` hands the topic whatever
+    /// the number does not take (`Spacer(minLength: 0)`, the topic truncating to a
+    /// tail), so "these differ" is a fact about the line rather than about the
+    /// number. Measured 2026-08-27 — the topic's own ink with the rate against
+    /// without it: 12.75 pt against 64.50 at 150 pt, 104.25 against 150.50 at 240,
+    /// and 189.50 either way at the 380 pt default, where the topic fits whole. So
+    /// the naive form is contaminated exactly at the narrow widths, which are the
+    /// widths the label is at risk in.
+    ///
+    /// §4 keeps this trap under the bracket and the percentage, where the
+    /// mechanism is a rung of `titleLine`'s `ViewThatFits` ladder. That is a
+    /// *different* case, not this one: `secondLine` has no `ViewThatFits` at all,
+    /// and `renderSecondLine` draws the title line empty anyway. Same trap, other
+    /// machinery.
+    func testPROBEnaiveVerdict() throws {
+        let topic = "тема чата, тоже подлиннее строки"
+        for width in [150.0, 240.0, Config.default.panelWidth] {
+            let withRate = try renderSecondLine(topic: topic, hourly: Self.hourSpend, width: width)
+            let without = try renderSecondLine(topic: topic, hourly: nil, width: width)
+            print("PROBE naive width=\(width) identical=\(withRate.ink == without.ink)"
+                + " cols=\(withRate.ink.count)/\(without.ink.count)")
+        }
+    }
+
+    func testPROBEwindowBreakdown() throws {
+        let topic = "тема чата, тоже подлиннее строки"
+        let width = 150.0
+        for counts in [Self.hourSpend, Self.widerHourSpend] {
+            let label = try XCTUnwrap(SwitcherRowView.rateLabel(for: makeRow(status: .blocked,
+                                                                             count: 0,
+                                                                             hourly: counts)))
+            let width0 = try inkWidthOfLabel(label)
+            let rendered = try renderSecondLine(topic: topic, hourly: counts, width: width)
+            let slot = badgeSlot(inRowOfWidth: width)
+            let line = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
+                                                   to: slot.lowerBound - 3))
+            let start = line.upperBound - width0 - 0.5
+            let inside = rendered.ink.filter { $0 >= start && $0 <= line.upperBound }.sorted()
+            var gaps: [(Double, Double)] = []
+            for i in 1..<inside.count { gaps.append((inside[i] - inside[i - 1], inside[i - 1])) }
+            gaps.sort { $0.0 > $1.0 }
+            let cut = gaps.first ?? (0, 0)
+            let number = inside.filter { $0 > cut.1 }
+            let topicInk = inside.filter { $0 <= cut.1 }
+            print("PROBE brk label=\(label) alone=\(width0)"
+                + " window=\((inside.last ?? 0) - (inside.first ?? 0))"
+                + " gaps=\(gaps.prefix(3).map { $0.0 })"
+                + " gap=\(cut.0)"
+                + " number=\((number.last ?? 0) - (number.first ?? 0))"
+                + " topic=\((topicInk.last ?? 0) - (topicInk.first ?? 0))")
+        }
+    }
+
+    private func rateIsDrawn(width: Double, topic: String?) throws -> Bool {
+        let narrow = try renderSecondLine(topic: topic, hourly: Self.hourSpend, width: width)
+        let wide = try renderSecondLine(topic: topic, hourly: Self.widerHourSpend, width: width)
+        return narrow.ink != wide.ink
+    }
+
+    /// The rate is two characters wider than the total it replaced, and §4's
+    /// floors were measured on the narrower string. Re-measured here: the rate is
+    /// whole at the default width **and** at 150 pt, the narrow end of the
+    /// `panelWidth` setting — the end where a modifier that "changes nothing" is
+    /// the one that breaks (`AGENTS.md`).
+    ///
+    /// Clipping is caught by comparing the number's ink against the same string
+    /// rendered on its own. That comparison is a **span** — `min…max` of the
+    /// inked columns — and nothing about it is bitmap against bitmap; saying it
+    /// was is what hid the defect below for a review round.
+    ///
+    /// Which is why the 6 pt gap in front of the number is asserted blank, exactly
+    /// as `testTheRateIsNeverCutWhileTheTopicIs` asserts it. The measuring window
+    /// is taken leftwards from the end of the line by the label's *whole* width,
+    /// so a clipped number leaves that window hanging over the gap and into the
+    /// topic, and `span` hands back the union of the two. Measured with
+    /// `fixedSize` removed at 150 pt, before the guard was carried over: the wide
+    /// label's window came out **49.50 pt** against **49.00 pt** of ink rendered
+    /// alone — inside the 0.5 tolerance, so the wide label's own assertion did not
+    /// see the break at all, though only 24.25 pt of that was number and the other
+    /// 25.25 was topic. The test went red on the narrow label, and a regression
+    /// that clipped just the long one — `≥123.45M/h`, ten characters, the one a
+    /// narrow panel reaches first — would have left it green.
+    func testTheRateIsWholeAtBothEndsOfThePanelWidthRange() throws {
+        let topic = "тема чата, тоже подлиннее строки"
+        for width in [Config.default.panelWidth, 150.0] {
+            XCTAssertTrue(try rateIsDrawn(width: width, topic: topic), "no rate at \(width) pt")
+
+            var drawn: [Double] = []
+            var alone: [Double] = []
+            for (counts, expected) in [(Self.hourSpend, "3.40M/h"),
+                                       (Self.widerHourSpend, "34.00M/h")] {
+                let label = try XCTUnwrap(SwitcherRowView.rateLabel(for: makeRow(status: .blocked,
+                                                                                 count: 0,
+                                                                                 hourly: counts)))
+                XCTAssertEqual(label, expected)
+                let width0 = try inkWidthOfLabel(label)
+                let rendered = try renderSecondLine(topic: topic, hourly: counts, width: width)
+                let slot = badgeSlot(inRowOfWidth: width)
+                let line = try XCTUnwrap(rendered.span(from: Self.colourBar.upperBound + 0.25,
+                                                       to: slot.lowerBound - 3),
+                                         "nothing drawn at \(width) pt")
+                let start = line.upperBound - width0 - 0.5
+                XCTAssertTrue(rendered.isBlank(from: start - 3.5, to: start - 1), """
+                    \(label) was cut at \(width) pt: the window that measures it reached past \
+                    the gap and into the topic, so the span below would be the two together
+                    """)
+                let number = try XCTUnwrap(rendered.span(from: start, to: line.upperBound),
+                                           "no number at \(width) pt for \(label)")
+                drawn.append(number.upperBound - number.lowerBound)
+                alone.append(width0)
+                XCTAssertEqual(drawn.last!, width0, accuracy: 0.5, "\(label) was cut at \(width) pt")
+            }
+            // Both widths having been checked against their own render, this adds
+            // one thing and it is small: half a point of tolerance on the pair
+            // instead of the full point the two assertions above can accumulate
+            // between them. It is not what catches a clipped label — the blank gap
+            // is — and it is kept because the property it states is the one the
+            // reader wants: the wider label is wider by exactly its extra glyph.
+            XCTAssertEqual(drawn[1] - drawn[0], alone[1] - alone[0], accuracy: 0.5,
+                           "the wider rate lost a glyph at \(width) pt")
+            XCTAssertGreaterThan(drawn[1], drawn[0])
         }
     }
 
@@ -1830,7 +1989,7 @@ final class RowLayoutTests: XCTestCase {
                                                to: slot.lowerBound - 3),
                                   "the title line drew nothing")
 
-        let onSecondLine = try renderSecondLine(topic: nil, usage: Self.spend, width: width)
+        let onSecondLine = try renderSecondLine(topic: nil, hourly: Self.hourSpend, width: width)
         let second = try XCTUnwrap(onSecondLine.span(from: Self.colourBar.upperBound + 0.25,
                                                      to: slot.lowerBound - 3),
                                    "the second line drew nothing")
@@ -3367,12 +3526,19 @@ final class ActivationDebtTests: XCTestCase {
     }
 }
 
-/// The row's second number: what it says, and what it says when it does not
-/// know. The layout of it is `RowLayoutTests`; this is the text.
+/// The **week's** total: what it says, and what it says when it does not know.
+///
+/// It is no longer the row's second number — that is the rate, and `RowRateTests`
+/// asks about it (§2.9). The week is drawn in two places now, the tooltip's
+/// `Over 7 days` summary and the spend column of `--dump`, and this class covers
+/// both plus the tooltip's hour-against-week arrangement. The layout of the row
+/// itself is `RowLayoutTests`.
 @MainActor
 final class RowSpendTests: XCTestCase {
 
-    private func row(_ usage: TokenCounts?, topic: String? = "тема") -> SwitcherRow {
+    private func row(_ usage: TokenCounts?,
+                     hourly: TokenCounts? = nil,
+                     topic: String? = "тема") -> SwitcherRow {
         SwitcherRow(id: "project:/tmp/p",
                     kind: .project,
                     displayName: "vscode-switcher",
@@ -3388,12 +3554,13 @@ final class RowSpendTests: XCTestCase {
                     contextUsedTokens: nil,
                     contextLimitTokens: nil,
                     lastActivity: nil,
-                    usage: usage)
+                    usage: usage,
+                    hourlyUsage: hourly)
     }
 
-    /// The same figure the dump prints, rounded the same way — one formatter,
-    /// because a dump that rounds differently describes a row the panel does not
-    /// draw.
+    /// The tooltip's week and the dump's week are the same figure, rounded the
+    /// same way — one formatter, because two roundings would be two answers about
+    /// one project's week on two surfaces read against each other.
     func testTheNumberIsTheOneTheDumpPrints() {
         let complete = TokenCounts(input: 1_000_000, output: 200_000,
                                    cacheCreation: 400_000, cacheRead: 9_000_000)
@@ -3404,8 +3571,9 @@ final class RowSpendTests: XCTestCase {
                                                                       cacheRead: 0))), "900")
     }
 
-    /// A number with an unnamed counter behind it is a lower bound, and the row
-    /// has to say so — `≥` here, `>=` in the dump, the same fact either way.
+    /// A week with an unnamed counter behind it is a lower bound, and both places
+    /// that print it have to say so — `≥` in the tooltip, `>=` in the dump's
+    /// column, the same fact either way.
     func testALowerBoundWearsItsMark() {
         let partial = TokenCounts(input: 1_000_000, output: nil, cacheCreation: nil, cacheRead: nil)
         XCTAssertEqual(SwitcherRowView.usageLabel(for: row(partial)), "≥1.00M")
@@ -3415,10 +3583,11 @@ final class RowSpendTests: XCTestCase {
         XCTAssertEqual(SwitcherRowView.usageLabel(for: row(complete)), "1.00M")
     }
 
-    /// No figure at all, and a figure in which the gateway named nothing, both
-    /// draw nothing. The second is the one worth a test: `weighted()` folds an
-    /// unnamed counter in as zero, so such a row would otherwise show a
-    /// confident `0` where the honest answer is "no idea" (§2.4).
+    /// No week at all, and a week in which the gateway named nothing, both write
+    /// nothing — no summary line in the tooltip and a dash in the dump. The second
+    /// is the one worth a test: `weighted()` folds an unnamed counter in as zero,
+    /// so such a week would otherwise be printed as a confident `0` where the
+    /// honest answer is "no idea" (§2.4).
     func testNothingKnownDrawsNothingRatherThanAZero() {
         XCTAssertNil(SwitcherRowView.usageLabel(for: row(nil)))
         let blank = TokenCounts(input: nil, output: nil, cacheCreation: nil, cacheRead: nil)
@@ -3426,42 +3595,319 @@ final class RowSpendTests: XCTestCase {
         XCTAssertEqual(SwitcherRowView.usageLabel(for: row(.zero)), nil)
     }
 
-    /// The one number in the row is input-equivalent — four counters folded at
-    /// four different prices — so the tooltip carries the four the gateway
-    /// actually named. An unnamed one is `?`, never 0.
-    func testTheTooltipBreaksTheNumberIntoTheFourCounters() {
-        let text = SwitcherRowView.tooltipText(for: row(TokenCounts(input: 1_000_000,
-                                                                   output: 200_000,
-                                                                   cacheCreation: 400_000,
-                                                                   cacheRead: 9_000_000)))
-        XCTAssertTrue(text.contains("Tokens (input-equivalent): 3.40M"), text)
+    /// The figure the row prints is the hour's, so it is the hour that the
+    /// tooltip breaks into the four counters the gateway named — the breakdown
+    /// belongs to the number the reader is looking at. An unnamed counter is `?`,
+    /// never 0.
+    ///
+    /// The week's figure is deliberately a *different* number from the hour's
+    /// here: with the two equal, a breakdown taken from the wrong window would
+    /// read correctly.
+    func testTheTooltipBreaksTheHoursNumberIntoTheFourCounters() {
+        let text = SwitcherRowView.tooltipText(for: row(TokenCounts(input: 7_000_000, output: 0,
+                                                                    cacheCreation: 0, cacheRead: 0),
+                                                        hourly: TokenCounts(input: 1_000_000,
+                                                                            output: 200_000,
+                                                                            cacheCreation: 400_000,
+                                                                            cacheRead: 9_000_000)))
+        XCTAssertTrue(text.contains("Tokens over the last hour (input-equivalent): 3.40M"), text)
         XCTAssertTrue(text.contains("• in 1.00M"), text)
         XCTAssertTrue(text.contains("• out 200k"), text)
         XCTAssertTrue(text.contains("• cache write 400k"), text)
         XCTAssertTrue(text.contains("• cache read 9.00M"), text)
+        XCTAssertTrue(text.contains("Over 7 days: 7.00M"), text)
 
-        let partial = SwitcherRowView.tooltipText(for: row(TokenCounts(input: 50, output: nil,
-                                                                      cacheCreation: nil,
-                                                                      cacheRead: 5_401_028)))
+        let partial = SwitcherRowView.tooltipText(for: row(nil,
+                                                           hourly: TokenCounts(input: 50, output: nil,
+                                                                               cacheCreation: nil,
+                                                                               cacheRead: 5_401_028)))
         XCTAssertTrue(partial.contains("• out ?"), partial)
         XCTAssertTrue(partial.contains("• cache write ?"), partial)
-        XCTAssertTrue(partial.contains("Tokens (input-equivalent): ≥540k"), partial)
+        XCTAssertTrue(partial.contains("Tokens over the last hour (input-equivalent): ≥540k"), partial)
     }
 
-    /// And a row with no spend says nothing about spend, rather than saying zero.
+    /// A week with no hour under it — an ordinary project nobody has touched in
+    /// the last 3600 s — says the week and nothing else. The row's right-hand side
+    /// is blank there, and the week is still worth saying.
+    ///
+    /// The summary line wears `≥` on the same terms the breakdown's total does,
+    /// and it is asked here because nowhere else asks it: every other fixture in
+    /// this file hands the week all four counters, so the week's `≥` could have
+    /// been dropped in the move to the tooltip without a single test noticing.
+    /// The mark says a counter was never named, and the four are billed at
+    /// different rates — a floor printed as an exact figure is the one thing the
+    /// week's line cannot do.
+    func testAWeekWithoutAnHourIsOneSummaryLineAndNoBreakdown() {
+        let text = SwitcherRowView.tooltipText(for: row(TokenCounts(input: 1_000_000, output: 200_000,
+                                                                    cacheCreation: 400_000,
+                                                                    cacheRead: 9_000_000)))
+        XCTAssertTrue(text.contains("Over 7 days: 3.40M"), text)
+        XCTAssertFalse(text.contains("last hour"), text)
+        XCTAssertFalse(text.contains("• in "), text)
+
+        let floor = SwitcherRowView.tooltipText(for: row(TokenCounts(input: 1_000_000, output: nil,
+                                                                     cacheCreation: nil,
+                                                                     cacheRead: nil)))
+        XCTAssertTrue(floor.contains("Over 7 days: ≥1.00M"), floor)
+    }
+
+    /// And the other way round, which is not a hypothetical: the two
+    /// `/gw/sessions` calls fail apart, so a week that timed out leaves the hour's
+    /// figures standing on their own (§2.9). The gateway's 200-consumer cap would
+    /// do the same to a project spending right now after a quiet week, and is not
+    /// firing today. The breakdown stands on its own either way, with no
+    /// `Over 7 days` line under it.
+    func testAnHourWithoutAWeekIsTheBreakdownAlone() {
+        let text = SwitcherRowView.tooltipText(for: row(nil, hourly: TokenCounts(input: 1_000_000,
+                                                                                 output: 200_000,
+                                                                                 cacheCreation: 400_000,
+                                                                                 cacheRead: 9_000_000)))
+        XCTAssertTrue(text.contains("Tokens over the last hour (input-equivalent): 3.40M"), text)
+        XCTAssertTrue(text.contains("• cache read 9.00M"), text)
+        XCTAssertFalse(text.contains("Over 7 days"), text)
+    }
+
+    /// And a row with neither says nothing about spend, rather than saying zero —
+    /// no blank line either, so its tooltip is exactly what it was before.
     func testTheTooltipSaysNothingWhenThereIsNothingToSay() {
+        XCTAssertEqual(SwitcherRowView.usageLines(for: row(nil)), [])
         XCTAssertFalse(SwitcherRowView.tooltipText(for: row(nil)).contains("Tokens"))
         let blank = TokenCounts(input: nil, output: nil, cacheCreation: nil, cacheRead: nil)
-        XCTAssertFalse(SwitcherRowView.tooltipText(for: row(blank)).contains("Tokens"))
+        XCTAssertEqual(SwitcherRowView.usageLines(for: row(blank, hourly: blank)), [])
+        XCTAssertFalse(SwitcherRowView.tooltipText(for: row(blank, hourly: blank)).contains("Tokens"))
+    }
+
+    /// The two spend columns of `--dump`'s `Projects` table, held to the widest
+    /// cell each of them claims to fit.
+    ///
+    /// Both columns in one test because the two widths are one decision: they are
+    /// set to the same magnitude — four digits of millions with the `>=` a lower
+    /// bound wears — and the rate's two extra characters buy `/h` rather than a
+    /// digit (`ConsoleDump.spendColumnWidth` carries the measurement and the
+    /// reasoning).
+    ///
+    /// The second half is the one worth having: one digit more does **not** fit,
+    /// and `column` pads rather than cuts, so the cell that overflows is not
+    /// truncated — every column to its right shifts on that row alone. Without it
+    /// the first half is green for any width at or above the cell.
+    func testTheSpendColumnsAreAsWideAsTheWidestCellTheyClaimToFit() {
+        let ceiling = TokenCounts(input: 9_999_990_000, output: nil,
+                                  cacheCreation: nil, cacheRead: nil)
+        XCTAssertEqual(ConsoleDump.usageCell(for: row(ceiling)), ">=9999.99M")
+        XCTAssertEqual(ConsoleDump.usageCell(for: row(ceiling)).count,
+                       ConsoleDump.spendColumnWidth)
+        XCTAssertEqual(ConsoleDump.rateCell(for: row(nil, hourly: ceiling)), ">=9999.99M/h")
+        XCTAssertEqual(ConsoleDump.rateCell(for: row(nil, hourly: ceiling)).count,
+                       ConsoleDump.rateColumnWidth)
+
+        let over = TokenCounts(input: 12_345_670_000, output: nil,
+                               cacheCreation: nil, cacheRead: nil)
+        XCTAssertEqual(ConsoleDump.usageCell(for: row(over)), ">=12345.67M",
+                       "no `B` step, so millions keep growing digits")
+        XCTAssertGreaterThan(ConsoleDump.usageCell(for: row(over)).count,
+                             ConsoleDump.spendColumnWidth)
+        XCTAssertGreaterThan(ConsoleDump.rateCell(for: row(nil, hourly: over)).count,
+                             ConsoleDump.rateColumnWidth)
+    }
+
+    /// And the table is held to those widths, which the test above does not do.
+    ///
+    /// It pins the constant to the cell; nothing pinned the composed line to the
+    /// constant. Writing `8` at the call site instead of `spendColumnWidth` — the
+    /// width the second review found too narrow for the reachable `>=123.45M` —
+    /// left every test green while shifting every column right of the spend cell
+    /// on the one row that fills it.
+    ///
+    /// So the property the widths exist for is what is asked: two rows whose spend
+    /// cells differ in width put everything after the column at the **same
+    /// offset**. Everything after it, rather than the next cell alone, because a
+    /// column that gives way takes the whole rest of the line with it.
+    ///
+    /// The second half is what stops a *wider* literal from passing. A cell one
+    /// character over the declared width shifts the rest by exactly one — `column`
+    /// pads rather than cuts, which is the edge the test above names — so a column
+    /// written wider than its constant is caught by the overflowing cell no longer
+    /// overflowing.
+    ///
+    /// **The two spend columns, and only those, which is why the name says so.**
+    /// The offsets are compared against a row whose spend cells are both `-`, so
+    /// what this catches is a column whose width differs between the rows compared;
+    /// widening `nameCell(for:width:)`, the indicator, the workspace word or the CPU
+    /// cell uniformly moves the baseline with everything else and both halves stay
+    /// green. Two columns here can overflow non-uniformly, and only one of them
+    /// is guarded. The name is the guarded one: its cell is held to exactly 34
+    /// by `testTheDumpCellKeepsTheCountWholeInsideItsColumn`. The CPU cell is
+    /// the other, and nothing holds it at all — `cpuLabel` writes
+    /// `"≥" + "%.0f%%"`, so a row reading `≥1000%` is six characters in a
+    /// column declared 5, and `column` pads rather than cuts. Reaching it takes
+    /// ten cores attributed to one session, which is why it is written down
+    /// here rather than fixed in passing: the width and the fixture that would
+    /// pin it are a change of their own.
+    func testTheSpendColumnsHoldTheTableToTheWidthTheyDeclare() throws {
+        // Everything after both spend columns. `row` carries no project, so the
+        // activity cell is the same fixed sentence on every line here, which is
+        // what makes it a landmark rather than a second variable.
+        let tail = "outside the scan roots"
+        func offsetOfTail(week: TokenCounts?, hour: TokenCounts?) throws -> Int {
+            let line = ConsoleDump.projectRow(for: row(week, hourly: hour), config: .default)
+            let found = try XCTUnwrap(line.range(of: tail), line)
+            return line.distance(from: line.startIndex, to: found.lowerBound)
+        }
+
+        let ceiling = TokenCounts(input: 9_999_990_000, output: nil,
+                                  cacheCreation: nil, cacheRead: nil)
+        let over = TokenCounts(input: 12_345_670_000, output: nil,
+                               cacheCreation: nil, cacheRead: nil)
+        // A row with neither figure: both cells are a bare `-`, the narrowest
+        // either column ever holds.
+        let dashes = try offsetOfTail(week: nil, hour: nil)
+
+        XCTAssertEqual(try offsetOfTail(week: ceiling, hour: nil), dashes,
+                       "the spend column does not hold \(ConsoleDump.spendColumnWidth) characters:"
+                           + " the widest cell it claims to fit moves the rest of the row")
+        XCTAssertEqual(try offsetOfTail(week: nil, hour: ceiling), dashes,
+                       "the rate column does not hold \(ConsoleDump.rateColumnWidth) characters:"
+                           + " the widest cell it claims to fit moves the rest of the row")
+
+        XCTAssertEqual(try offsetOfTail(week: over, hour: nil), dashes + 1,
+                       "the spend column is wider than \(ConsoleDump.spendColumnWidth):"
+                           + " a cell one character over it did not move the rest of the row")
+        XCTAssertEqual(try offsetOfTail(week: nil, hour: over), dashes + 1,
+                       "the rate column is wider than \(ConsoleDump.rateColumnWidth):"
+                           + " a cell one character over it did not move the rest of the row")
     }
 
     /// The path stays the last line of a project row (§4) — the counters go in
     /// front of it, not after.
     func testThePathIsStillTheLastLine() {
-        var built = row(TokenCounts(input: 10, output: 10, cacheCreation: 10, cacheRead: 10))
+        var built = row(TokenCounts(input: 10, output: 10, cacheCreation: 10, cacheRead: 10),
+                        hourly: TokenCounts(input: 1, output: 1, cacheCreation: 1, cacheRead: 1))
         built.project = TestFixtures.project(path: "/tmp/home-network", rootName: "home-network")
         let lines = SwitcherRowView.tooltipText(for: built).split(separator: "\n")
         XCTAssertEqual(lines.last, "/tmp/home-network")
+    }
+}
+
+/// The rate on the row's second line: `12.40M/h`, and what it says when it does
+/// not know. The layout of it is `RowLayoutTests`; this is the text.
+///
+/// Sibling of `RowSpendTests` rather than an edit of it: the week's label is still
+/// drawn, in the tooltip and in `--dump`, and the two labels have to be asked
+/// separately or a row wired to the wrong window answers both.
+@MainActor
+final class RowRateTests: XCTestCase {
+
+    private func row(hourly: TokenCounts?, week: TokenCounts? = nil) -> SwitcherRow {
+        SwitcherRow(id: "project:/tmp/p",
+                    kind: .project,
+                    displayName: "vscode-switcher",
+                    colorHex: "#000000",
+                    project: nil,
+                    window: nil,
+                    sessions: [],
+                    state: nil,
+                    activeSubagents: 0,
+                    subagentDescriptions: [],
+                    chatTopic: "тема",
+                    model: nil,
+                    contextUsedTokens: nil,
+                    contextLimitTokens: nil,
+                    lastActivity: nil,
+                    usage: week,
+                    hourlyUsage: hourly)
+    }
+
+    /// The figure carries its unit. Without the `/h` the second line would print a
+    /// total and a rate identically, and the two differ by a factor of the week.
+    func testTheRateSaysItIsPerHour() {
+        let spent = TokenCounts(input: 4_000_000, output: 1_000_000,
+                                cacheCreation: 800_000, cacheRead: 24_000_000)
+        XCTAssertEqual(SwitcherRowView.rateLabel(for: row(hourly: spent)), "12.40M/h")
+        XCTAssertEqual(ConsoleDump.rateCell(for: row(hourly: spent)), "12.40M/h")
+        // The same rounding ladder the total uses, unit and all.
+        XCTAssertEqual(SwitcherRowView.rateLabel(for: row(hourly: TokenCounts(input: 12_000, output: 0,
+                                                                              cacheCreation: 0,
+                                                                              cacheRead: 0))),
+                       "12k/h")
+        XCTAssertEqual(SwitcherRowView.rateLabel(for: row(hourly: TokenCounts(input: 900, output: 0,
+                                                                              cacheCreation: 0,
+                                                                              cacheRead: 0))),
+                       "900/h")
+    }
+
+    /// **The wording is the only thing that names the window, so it is pinned to
+    /// the constant here.**
+    ///
+    /// Nothing divides anything (§2.9): the figure is whatever the gateway
+    /// reported over `UsageStore.hourWindowSeconds`, and `/h` is the whole of the
+    /// arithmetic. Move the constant to two hours and every surface prints twice
+    /// the rate under the old label, with no arithmetic anywhere to go red —
+    /// `testTheHourlyFigureIsAskedOverExactlyOneSlidingHour` holds the *request*,
+    /// and the four label literals are invisible to it.
+    ///
+    /// What is new here is the pairing, not either half: the panel's suffix and
+    /// the dump's are asserted by `testTheRateSaysItIsPerHour`, and the tooltip's
+    /// sentence by `testTheTooltipBreaksTheHoursNumberIntoTheFourCounters`. This
+    /// test is where the value and the wording are one statement, so that moving
+    /// the constant produces a failure that names the strings to move with it.
+    ///
+    /// Three of the four are reachable and asserted below. The fourth is the
+    /// `usage 1h:` label inside `ConsoleDump.printText`, which is private and
+    /// prints a whole snapshot of the machine it runs on; it is named in the
+    /// message instead.
+    func testTheLabelsNameTheWindowTheFigureIsMeasuredOver() {
+        XCTAssertEqual(UsageStore.hourWindowSeconds, 3600, """
+            the window stopped being an hour and four labels still say it is: "/h" in \
+            SwitcherRowView.rateLabel, "Tokens over the last hour" in \
+            SwitcherRowView.usageLines, "/h" in ConsoleDump.rateCell and "usage 1h:" in \
+            ConsoleDump.printText. Nothing divides, so moving this constant relabels \
+            every one of them instead of rescaling anything (§2.9)
+            """)
+        let built = row(hourly: TokenCounts(input: 1_000_000, output: 0,
+                                            cacheCreation: 0, cacheRead: 0))
+        XCTAssertEqual(SwitcherRowView.rateLabel(for: built)?.hasSuffix("/h"), true)
+        XCTAssertEqual(ConsoleDump.rateCell(for: built).hasSuffix("/h"), true)
+        XCTAssertTrue(SwitcherRowView.tooltipText(for: built).contains("over the last hour"),
+                      SwitcherRowView.tooltipText(for: built))
+    }
+
+    /// The rate is the *hour's* figure and not the week's. Asked with both
+    /// present and different, because with one of them missing a row wired to
+    /// either window still answers something.
+    func testTheRateIsTheHoursFigureAndTheTotalIsTheWeeks() {
+        let built = row(hourly: TokenCounts(input: 1_000, output: 0, cacheCreation: 0, cacheRead: 0),
+                        week: TokenCounts(input: 5_000_000, output: 0, cacheCreation: 0, cacheRead: 0))
+        XCTAssertEqual(SwitcherRowView.rateLabel(for: built), "1k/h")
+        XCTAssertEqual(SwitcherRowView.usageLabel(for: built), "5.00M",
+                       "the week's label did not follow the row's line to the hour")
+    }
+
+    /// An unnamed counter makes the rate a floor, and it says so — `≥` on the
+    /// panel, `>=` in the dump, the same fact either way.
+    func testARateThatIsOnlyAFloorWearsItsMark() {
+        let partial = TokenCounts(input: 1_000_000, output: nil, cacheCreation: nil, cacheRead: nil)
+        XCTAssertEqual(SwitcherRowView.rateLabel(for: row(hourly: partial)), "≥1.00M/h")
+        XCTAssertEqual(ConsoleDump.rateCell(for: row(hourly: partial)), ">=1.00M/h")
+        let complete = TokenCounts(input: 1_000_000, output: 0, cacheCreation: 0, cacheRead: 0)
+        XCTAssertEqual(SwitcherRowView.rateLabel(for: row(hourly: complete)), "1.00M/h",
+                       "a complete figure does not wear the mark")
+    }
+
+    /// No figure at all, and a figure in which the gateway named nothing, both
+    /// draw nothing. The second is the one worth a test: `weighted()` folds an
+    /// unnamed counter in as zero, so such a row would otherwise show a confident
+    /// `0/h` — a project reading as idle because nothing was reported about it.
+    func testNothingKnownDrawsNoRateRatherThanAZeroPerHour() {
+        XCTAssertNil(SwitcherRowView.rateLabel(for: row(hourly: nil)))
+        let blank = TokenCounts(input: nil, output: nil, cacheCreation: nil, cacheRead: nil)
+        XCTAssertNil(SwitcherRowView.rateLabel(for: row(hourly: blank)))
+        XCTAssertNil(SwitcherRowView.rateLabel(for: row(hourly: .zero)))
+        XCTAssertEqual(ConsoleDump.rateCell(for: row(hourly: blank)), "-")
+        // And a measured zero is a reading, which stays one.
+        XCTAssertEqual(SwitcherRowView.rateLabel(for: row(hourly: TokenCounts(input: 0, output: 0,
+                                                                              cacheCreation: 0,
+                                                                              cacheRead: 0))),
+                       "0/h")
     }
 }
 

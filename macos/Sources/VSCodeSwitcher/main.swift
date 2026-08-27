@@ -104,7 +104,13 @@ enum ConsoleDump {
             print("      model:     \(row.model ?? "-")   context: \(formatContext(row))   subagents: \(row.activeSubagents)")
             print("      cpu:       \(cpuCell(for: row))   orphan processes: \(row.orphanCount)")
             if let usage = row.usage {
-                print("      usage:     \(formatTokens(usage))")
+                print("      usage 7d:  \(formatTokens(usage))")
+            }
+            // The window the panel actually draws, on the same terms as the week
+            // above it: both sets of four counters, so either can be checked
+            // against the gateway by hand.
+            if let hourly = row.hourlyUsage {
+                print("      usage 1h:  \(formatTokens(hourly))")
             }
             if !row.subagentDescriptions.isEmpty {
                 print("      running:   \(row.subagentDescriptions.map { shorten($0, 50) }.joined(separator: "; "))")
@@ -140,20 +146,39 @@ enum ConsoleDump {
         // In the order the panel shows them, which is what the ranking is for.
         print("Projects section: \(snapshot.projects.count) (showing 15, most recently worked in first)")
         for row in snapshot.projects.prefix(15) {
-            let workspace = row.project?.workspaceFile == nil ? "git" : "workspace"
-            // The indicator is printed here too, because this is where the rule
-            // "no chat, no subagent, no icon" is worth seeing: most of this
-            // section is projects nobody has run an agent in.
-            print("  - \(nameCell(for: row, width: 34)) \(row.colorHex)"
-                + "  \(column(indicator(row), 12))"
-                + "  \(column(workspace, 9))"
-                + "  \(column(usageCell(for: row), 8))"
-                // The orphan count is not a column of its own: it is inside the
-                // brackets `nameCell` already prints, exactly as the panel
-                // prints it.
-                + "  \(column(cpuCell(for: row), 5))"
-                + "  \(activity(row, config: config))")
+            print(projectRow(for: row, config: config))
         }
+    }
+
+    /// One row of the "Projects" table, composed rather than printed.
+    ///
+    /// A function so that a test can hold the assembled line to the widths it is
+    /// built from. `spendColumnWidth` and `rateColumnWidth` were pinned to the
+    /// widest cell they claim to fit, and nothing pinned the *table* to them.
+    /// Writing a literal here instead of the constant — an 8, which is what the
+    /// column was before anybody measured it and is too narrow for the reachable
+    /// `>=123.45M` — shifted every column to the right of it on the rows that fill
+    /// the cell, and the whole suite stayed green, all 627 tests of it as it stood
+    /// while this line had no test at all. What the width exists for is that the
+    /// columns line up, so that is what
+    /// `testTheSpendColumnsHoldTheTableToTheWidthTheyDeclare` asks, of this string.
+    static func projectRow(for row: SwitcherRow, config: Config) -> String {
+        let workspace = row.project?.workspaceFile == nil ? "git" : "workspace"
+        // The indicator is printed here too, because this is where the rule
+        // "no chat, no subagent, no icon" is worth seeing: most of this
+        // section is projects nobody has run an agent in.
+        return "  - \(nameCell(for: row, width: 34)) \(row.colorHex)"
+            + "  \(column(indicator(row), 12))"
+            + "  \(column(workspace, 9))"
+            + "  \(column(usageCell(for: row), spendColumnWidth))"
+            // The rate the panel's own second line draws, beside the week it
+            // replaced there.
+            + "  \(column(rateCell(for: row), rateColumnWidth))"
+            // The orphan count is not a column of its own: it is inside the
+            // brackets `nameCell` already prints, exactly as the panel
+            // prints it.
+            + "  \(column(cpuCell(for: row), 5))"
+            + "  \(activity(row, config: config))"
     }
 
     /// What the gateway said, before it was spread over the rows.
@@ -186,9 +211,19 @@ enum ConsoleDump {
         }
         print("  accounts:         \(accounts.isEmpty ? "-" : accounts.joined(separator: "   "))")
         print("  total:            \(formatTokens(usage.total))")
-        print("  start dirs:       \(usage.tokensBySlug.count)")
+        // Both windows, because both are spread over the rows: the week feeds the
+        // tooltip and the projects column, the hour feeds the line the panel draws.
+        print("  start dirs:       \(usage.tokensBySlug.count) over 7d,"
+            + " \(usage.hourlyTokensBySlug.count) in the last hour")
         print("  no local session: \(usage.unmatchedSessions) sessions, \(formatTokens(usage.unmatched))")
-        print("  \(ambiguousLine(sessions: snapshot.ambiguousUsageSessions, tokens: snapshot.ambiguousUsage))")
+        let week = ambiguousLine(window: "7d",
+                                 sessions: snapshot.ambiguousUsageSessions,
+                                 tokens: snapshot.ambiguousUsage)
+        let hour = ambiguousLine(window: "1h",
+                                 sessions: snapshot.ambiguousHourlySessions,
+                                 tokens: snapshot.ambiguousHourlyUsage)
+        print("  " + week)
+        print("  " + hour)
         print("")
     }
 
@@ -197,15 +232,27 @@ enum ConsoleDump {
     ///
     /// Printed whether or not there are any, exactly like `no local session`
     /// above it. A bucket that appears only when it is non-empty teaches nobody
-    /// it exists, and this one is empty most weeks — the duplicated identifiers
-    /// on this machine are all older than the gateway's window — while the
-    /// misattribution it replaced was invisible by construction.
+    /// it exists, and the misattribution this one replaced was invisible by
+    /// construction. It is no longer the empty bucket it was when it was written,
+    /// either: on 2026-08-27 this machine printed 16 sessions and 637.15M
+    /// input-equivalent over the week, so the premise that the duplicated
+    /// identifiers here are all older than the gateway's window no longer holds.
+    /// §2.7 keeps the figure, its drift over the day, and the fact that why the
+    /// bucket grew is not established.
     ///
     /// Internal so a test can hold the text: `printUsage` prints whatever the
     /// gateway said about the machine the dump runs on, and a machine with a
     /// contested session is not a state a test run can arrange for itself.
-    static func ambiguousLine(sessions: Int, tokens: TokenCounts) -> String {
-        "ambiguous:        \(sessions) sessions, \(formatTokens(tokens))"
+    ///
+    /// One line per window, and both are printed, because the two buckets can hold
+    /// different sets of sessions: the two `/gw/sessions` calls fail apart, so an
+    /// hour's contested session need not appear in the week's bucket at all. The
+    /// gateway's 200-consumer cap on the week would do the same and is not doing
+    /// it today — both readings are on `SwitcherSnapshot.ambiguousHourlyUsage`.
+    /// Two short lines rather than one long one for the same reason every other
+    /// line here is short — the label column is what makes the section readable.
+    static func ambiguousLine(window: String, sessions: Int, tokens: TokenCounts) -> String {
+        "\(column("ambiguous \(window):", 18))\(sessions) sessions, \(formatTokens(tokens))"
     }
 
     private static func percent(_ value: Double?) -> String {
@@ -279,6 +326,42 @@ enum ConsoleDump {
             + " (\(parts.joined(separator: ", ")))"
     }
 
+    /// The width of the "Projects" table's two spend columns.
+    ///
+    /// **What today's machine reaches is far short of them, and that is measured
+    /// rather than assumed** (live `--dump`, 2026-08-27): over all 103 rows of the
+    /// section the widest week cell was `46.62M`, six characters, and the rate
+    /// column printed `-` on every one of them — every project that had spent in
+    /// the last hour had a window open, and a row with a window is not in this
+    /// table. The same two formatters on the nine window rows above reached
+    /// `252.57M` and `4.84M/h`, seven characters each. The previous width, 8, was
+    /// justified the other way round — by a worst case nobody had measured — and
+    /// was already too narrow for `>=123.45M`.
+    ///
+    /// **What the widths are set to is the widest cell each column can hold**, and
+    /// it is the same magnitude for both: `>=9999.99M` is exactly ten characters,
+    /// `>=9999.99M/h` exactly twelve, so the two extra characters here pay for
+    /// `/h` and buy no extra digits. Four digits of millions with the `>=` a lower
+    /// bound wears, in other words. One digit more overflows — `>=12345.67M`,
+    /// eleven characters — and `column` pads rather than cuts, so an overflowing
+    /// cell shifts every column to its right instead of being truncated. That edge
+    /// is real rather than decorative because `compactTokens` has no `B` step:
+    /// millions simply keep growing digits. Reaching it takes one project spending
+    /// 10^10 input-equivalent tokens inside the window, against 2015.86M for the
+    /// whole fleet's week on the day of the measurement.
+    ///
+    /// Named rather than written at the call site so that
+    /// `testTheSpendColumnsAreAsWideAsTheWidestCellTheyClaimToFit` can hold them to
+    /// exactly that: a width with its justification in a comment and nothing asking
+    /// about it is a width nobody is guarding. That test pins the constant to the
+    /// cell and nothing more, though, so a literal written at the call site put the
+    /// too-narrow column back with the whole suite green — what pins the table to
+    /// the constants is `testTheSpendColumnsHoldTheTableToTheWidthTheyDeclare`, which
+    /// asks `projectRow` whether its columns line up.
+    static let spendColumnWidth = 10
+    /// The rate column beside it — see `spendColumnWidth` for both.
+    static let rateColumnWidth = 12
+
     /// The spend column of the "Projects" section: one input-equivalent number,
     /// or a dash when the row has none.
     ///
@@ -292,6 +375,21 @@ enum ConsoleDump {
     static func usageCell(for row: SwitcherRow) -> String {
         guard let value = row.usageInputEquivalent else { return "-" }
         return (row.usageIsLowerBound ? ">=" : "") + compact(value)
+    }
+
+    /// The rate column beside it: what the row spent over the last sliding hour,
+    /// which is what the panel's second line now draws (§2.9).
+    ///
+    /// Same shape as `usageCell` and the same `>=` — the panel's `≥` spelled for a
+    /// terminal — with the `/h` the panel writes, because a rate printed without
+    /// its unit next to a total is two numbers that cannot be told apart.
+    ///
+    /// Internal for the same reason as `usageCell`: which rows carry an hour's
+    /// spend at all depends on what the gateway says about the machine the dump
+    /// runs on.
+    static func rateCell(for row: SwitcherRow) -> String {
+        guard let value = row.hourlyInputEquivalent else { return "-" }
+        return (row.hourlyIsLowerBound ? ">=" : "") + compact(value) + "/h"
     }
 
     /// The snapshot the dump reports: the second one, a tick after the first.
