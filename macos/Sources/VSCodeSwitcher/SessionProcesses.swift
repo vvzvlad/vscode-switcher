@@ -1083,10 +1083,16 @@ final class ProcessSampler: @unchecked Sendable {
         /// processes that have left the table and has not arrived anywhere yet
         /// (SPEC §2.8).
         var openDebts: Int
-        /// Debts this pass gave up on — aged out, or the heir they were charged
-        /// to left the table with no survivor left to re-address them to
-        /// (`SessionProcesses.Rates.expired`, which spells out why a *debtor*
-        /// leaving is not one of the two).
+        /// Debts this pass gave up on, and there are **three** ways rather than
+        /// two. Two of them are `SessionProcesses.Rates.expired`: aged out, or
+        /// the heir they were charged to left the table with no survivor left
+        /// to re-address them to (that comment also spells out why a *debtor*
+        /// leaving is neither). The third is this pass having no measurement to
+        /// make at all — the first pass, or a gap longer than
+        /// `staleSampleSeconds` — where `sample` drops the **whole** ledger
+        /// along with the baseline, whatever any single entry's age. A gap
+        /// *shorter* than `minimumSampleSeconds` is not that case: it is a
+        /// hold, the block is skipped entirely, and nothing expires.
         ///
         /// This is the counter that makes the class of bug visible. A debt that
         /// is never settled is CPU reported for a process whose counter went
