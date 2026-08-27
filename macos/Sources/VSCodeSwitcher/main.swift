@@ -146,23 +146,39 @@ enum ConsoleDump {
         // In the order the panel shows them, which is what the ranking is for.
         print("Projects section: \(snapshot.projects.count) (showing 15, most recently worked in first)")
         for row in snapshot.projects.prefix(15) {
-            let workspace = row.project?.workspaceFile == nil ? "git" : "workspace"
-            // The indicator is printed here too, because this is where the rule
-            // "no chat, no subagent, no icon" is worth seeing: most of this
-            // section is projects nobody has run an agent in.
-            print("  - \(nameCell(for: row, width: 34)) \(row.colorHex)"
-                + "  \(column(indicator(row), 12))"
-                + "  \(column(workspace, 9))"
-                + "  \(column(usageCell(for: row), spendColumnWidth))"
-                // The rate the panel's own second line draws, beside the week it
-                // replaced there.
-                + "  \(column(rateCell(for: row), rateColumnWidth))"
-                // The orphan count is not a column of its own: it is inside the
-                // brackets `nameCell` already prints, exactly as the panel
-                // prints it.
-                + "  \(column(cpuCell(for: row), 5))"
-                + "  \(activity(row, config: config))")
+            print(projectRow(for: row, config: config))
         }
+    }
+
+    /// One row of the "Projects" table, composed rather than printed.
+    ///
+    /// A function so that a test can hold the assembled line to the widths it is
+    /// built from. `spendColumnWidth` and `rateColumnWidth` were pinned to the
+    /// widest cell they claim to fit, and nothing pinned the *table* to them.
+    /// Writing a literal here instead of the constant — an 8, which is what the
+    /// column was before anybody measured it and is too narrow for the reachable
+    /// `>=123.45M` — shifted every column to the right of it on the rows that fill
+    /// the cell, and the whole suite stayed green, all 627 tests of it as it stood
+    /// while this line had no test at all. What the width exists for is that the
+    /// columns line up, so that is what
+    /// `testTheSpendColumnsHoldTheTableToTheWidthTheyDeclare` asks, of this string.
+    static func projectRow(for row: SwitcherRow, config: Config) -> String {
+        let workspace = row.project?.workspaceFile == nil ? "git" : "workspace"
+        // The indicator is printed here too, because this is where the rule
+        // "no chat, no subagent, no icon" is worth seeing: most of this
+        // section is projects nobody has run an agent in.
+        return "  - \(nameCell(for: row, width: 34)) \(row.colorHex)"
+            + "  \(column(indicator(row), 12))"
+            + "  \(column(workspace, 9))"
+            + "  \(column(usageCell(for: row), spendColumnWidth))"
+            // The rate the panel's own second line draws, beside the week it
+            // replaced there.
+            + "  \(column(rateCell(for: row), rateColumnWidth))"
+            // The orphan count is not a column of its own: it is inside the
+            // brackets `nameCell` already prints, exactly as the panel
+            // prints it.
+            + "  \(column(cpuCell(for: row), 5))"
+            + "  \(activity(row, config: config))"
     }
 
     /// What the gateway said, before it was spread over the rows.
@@ -337,7 +353,11 @@ enum ConsoleDump {
     /// Named rather than written at the call site so that
     /// `testTheSpendColumnsAreAsWideAsTheWidestCellTheyClaimToFit` can hold them to
     /// exactly that: a width with its justification in a comment and nothing asking
-    /// about it is a width nobody is guarding.
+    /// about it is a width nobody is guarding. That test pins the constant to the
+    /// cell and nothing more, though, so a literal written at the call site put the
+    /// too-narrow column back with the whole suite green — what pins the table to
+    /// the constants is `testTheSpendColumnsHoldTheTableToTheWidthTheyDeclare`, which
+    /// asks `projectRow` whether its columns line up.
     static let spendColumnWidth = 10
     /// The rate column beside it — see `spendColumnWidth` for both.
     static let rateColumnWidth = 12

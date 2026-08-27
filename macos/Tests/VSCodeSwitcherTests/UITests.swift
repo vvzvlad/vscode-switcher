@@ -3710,6 +3710,73 @@ final class RowSpendTests: XCTestCase {
                              ConsoleDump.rateColumnWidth)
     }
 
+    /// And the table is held to those widths, which the test above does not do.
+    ///
+    /// It pins the constant to the cell; nothing pinned the composed line to the
+    /// constant. Writing `8` at the call site instead of `spendColumnWidth` — the
+    /// width the second review found too narrow for the reachable `>=123.45M` —
+    /// left every test green while shifting every column right of the spend cell
+    /// on the one row that fills it.
+    ///
+    /// So the property the widths exist for is what is asked: two rows whose spend
+    /// cells differ in width put everything after the column at the **same
+    /// offset**. Everything after it, rather than the next cell alone, because a
+    /// column that gives way takes the whole rest of the line with it.
+    ///
+    /// The second half is what stops a *wider* literal from passing. A cell one
+    /// character over the declared width shifts the rest by exactly one — `column`
+    /// pads rather than cuts, which is the edge the test above names — so a column
+    /// written wider than its constant is caught by the overflowing cell no longer
+    /// overflowing.
+    ///
+    /// **The two spend columns, and only those, which is why the name says so.**
+    /// The offsets are compared against a row whose spend cells are both `-`, so
+    /// what this catches is a column whose width differs between the rows compared;
+    /// widening `nameCell(for:width:)`, the indicator, the workspace word or the CPU
+    /// cell uniformly moves the baseline with everything else and both halves stay
+    /// green. Two columns here can overflow non-uniformly, and only one of them
+    /// is guarded. The name is the guarded one: its cell is held to exactly 34
+    /// by `testTheDumpCellKeepsTheCountWholeInsideItsColumn`. The CPU cell is
+    /// the other, and nothing holds it at all — `cpuLabel` writes
+    /// `"≥" + "%.0f%%"`, so a row reading `≥1000%` is six characters in a
+    /// column declared 5, and `column` pads rather than cuts. Reaching it takes
+    /// ten cores attributed to one session, which is why it is written down
+    /// here rather than fixed in passing: the width and the fixture that would
+    /// pin it are a change of their own.
+    func testTheSpendColumnsHoldTheTableToTheWidthTheyDeclare() throws {
+        // Everything after both spend columns. `row` carries no project, so the
+        // activity cell is the same fixed sentence on every line here, which is
+        // what makes it a landmark rather than a second variable.
+        let tail = "outside the scan roots"
+        func offsetOfTail(week: TokenCounts?, hour: TokenCounts?) throws -> Int {
+            let line = ConsoleDump.projectRow(for: row(week, hourly: hour), config: .default)
+            let found = try XCTUnwrap(line.range(of: tail), line)
+            return line.distance(from: line.startIndex, to: found.lowerBound)
+        }
+
+        let ceiling = TokenCounts(input: 9_999_990_000, output: nil,
+                                  cacheCreation: nil, cacheRead: nil)
+        let over = TokenCounts(input: 12_345_670_000, output: nil,
+                               cacheCreation: nil, cacheRead: nil)
+        // A row with neither figure: both cells are a bare `-`, the narrowest
+        // either column ever holds.
+        let dashes = try offsetOfTail(week: nil, hour: nil)
+
+        XCTAssertEqual(try offsetOfTail(week: ceiling, hour: nil), dashes,
+                       "the spend column does not hold \(ConsoleDump.spendColumnWidth) characters:"
+                           + " the widest cell it claims to fit moves the rest of the row")
+        XCTAssertEqual(try offsetOfTail(week: nil, hour: ceiling), dashes,
+                       "the rate column does not hold \(ConsoleDump.rateColumnWidth) characters:"
+                           + " the widest cell it claims to fit moves the rest of the row")
+
+        XCTAssertEqual(try offsetOfTail(week: over, hour: nil), dashes + 1,
+                       "the spend column is wider than \(ConsoleDump.spendColumnWidth):"
+                           + " a cell one character over it did not move the rest of the row")
+        XCTAssertEqual(try offsetOfTail(week: nil, hour: over), dashes + 1,
+                       "the rate column is wider than \(ConsoleDump.rateColumnWidth):"
+                           + " a cell one character over it did not move the rest of the row")
+    }
+
     /// The path stays the last line of a project row (§4) — the counters go in
     /// front of it, not after.
     func testThePathIsStillTheLastLine() {
