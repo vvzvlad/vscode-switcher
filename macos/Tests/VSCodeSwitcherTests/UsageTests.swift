@@ -757,6 +757,10 @@ final class UsageAttributionTests: XCTestCase {
 
     /// The line `--dump` prints about the bucket. Silence would be the same
     /// silent loss the split exists to stop, one level up.
+    ///
+    /// One line per window, and the window is in the label: the two buckets hold
+    /// two different sets of sessions, so a line that did not say which window it
+    /// counted would be two facts wearing one name.
     func testTheDumpNamesTheAmbiguousBucketAndCountsIt() throws {
         let first = try makeProject("switcher")
         let second = try makeProject("home-network")
@@ -764,12 +768,87 @@ final class UsageAttributionTests: XCTestCase {
         try file("s1", startedIn: second.path)
 
         let result = attribute([try session("s1", input: 12)], projects: [first, second])
-        XCTAssertEqual(ConsoleDump.ambiguousLine(sessions: result.snapshot.ambiguousUsageSessions,
+        XCTAssertEqual(ConsoleDump.ambiguousLine(window: "7d",
+                                                 sessions: result.snapshot.ambiguousUsageSessions,
                                                  tokens: result.snapshot.ambiguousUsage),
-                       "ambiguous:        1 sessions, 12 ie (in 12, out 0, cw 0, cr 0)")
-        XCTAssertEqual(ConsoleDump.ambiguousLine(sessions: 0, tokens: .zero),
-                       "ambiguous:        0 sessions, -",
-                       "and it is printed when the bucket is empty, which is most weeks")
+                       "ambiguous 7d:     1 sessions, 12 ie (in 12, out 0, cw 0, cr 0)")
+        XCTAssertEqual(ConsoleDump.ambiguousLine(window: "1h", sessions: 0, tokens: .zero),
+                       "ambiguous 1h:     0 sessions, -",
+                       "and it is printed when the bucket is empty: a line that appears only "
+                       + "when it is non-empty teaches nobody the bucket exists")
+    }
+
+    /// The hour has a bucket of its own, and it is filled by the hour's own
+    /// contested sessions rather than by the week's.
+    ///
+    /// The fixture is the case the split exists for: one session contested over
+    /// the hour and **absent from the week's report altogether**. Today that state
+    /// is reached by failure — the two `/gw/sessions` calls fail apart, and a week
+    /// that timed out leaves no week's report at all (§2.9); the gateway's
+    /// 200-consumer cap would reach it too, but is not firing on this machine
+    /// (`SwitcherSnapshot.ambiguousHourlyUsage`). Sharing one bucket would report
+    /// this spend under `7d` — where nothing else about that session appears — or
+    /// not at all.
+    func testTheHourHasItsOwnAmbiguousBucket() throws {
+        let first = try makeProject("switcher")
+        let second = try makeProject("home-network")
+        try file("s1", startedIn: first.path)
+        try file("s1", startedIn: second.path)
+
+        let hourly = UsageIndex.fold(sessions: [try session("s1", input: 12)],
+                                     slugsBySessionId: UsageIndex.slugsBySessionId(
+                                        for: ["s1"], projectsDirectory: transcripts))
+        XCTAssertEqual(hourly.contested.count, 1, "the fixture has to be contested to be about this")
+        let snapshot = DataSource.assemble(projects: [first, second],
+                                           windows: [],
+                                           sessions: [],
+                                           tokensBySlug: [:],
+                                           contested: [],
+                                           hourlyTokensBySlug: hourly.tokensBySlug,
+                                           hourlyContested: hourly.contested,
+                                           worktrees: DataSource.worktrees(of: [first, second]),
+                                           accessibilityTrusted: true)
+
+        XCTAssertEqual(snapshot.ambiguousHourlySessions, 1)
+        XCTAssertEqual(snapshot.ambiguousHourlyUsage.input, 12, "counted, and named as nobody's")
+        XCTAssertEqual(snapshot.ambiguousUsageSessions, 0,
+                       "the week's bucket did not inherit the hour's session")
+        XCTAssertEqual(snapshot.ambiguousUsage, .zero)
+        // The row is unwrapped first, on purpose: `first {…}?.hourlyUsage` is `nil`
+        // when there is no such row at all, so the assertion would pass without
+        // ever having asked about the spend.
+        for path in [first.path, second.path] {
+            let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == path },
+                                    "no row for \(path) to refuse the spend")
+            XCTAssertNil(row.hourlyUsage, "contested spend landed on a row anyway")
+        }
+    }
+
+    /// And the control half: the same session, both copies inside one project, is
+    /// not a contest at all — its hourly figure lands on the row.
+    ///
+    /// Without it the test above passes for any rule that refuses everything.
+    func testAnHourlySessionWhoseSlugsAgreeLandsOnTheRow() throws {
+        let project = try makeProject("switcher", worktrees: ["usage-ui"])
+        try file("s1", startedIn: project.path)
+        try file("s1", startedIn: worktreePath(of: project.path, "usage-ui").path)
+
+        let hourly = UsageIndex.fold(sessions: [try session("s1", input: 12)],
+                                     slugsBySessionId: UsageIndex.slugsBySessionId(
+                                        for: ["s1"], projectsDirectory: transcripts))
+        XCTAssertEqual(hourly.contested.count, 1, "still contested at the fold; the project settles it")
+        let snapshot = DataSource.assemble(projects: [project],
+                                           windows: [],
+                                           sessions: [],
+                                           hourlyTokensBySlug: hourly.tokensBySlug,
+                                           hourlyContested: hourly.contested,
+                                           worktrees: DataSource.worktrees(of: [project]),
+                                           accessibilityTrusted: true)
+
+        let row = snapshot.projects.first { $0.project?.path == project.path }
+        XCTAssertEqual(row?.hourlyUsage?.input, 12, "one session, one aggregate, once")
+        XCTAssertEqual(snapshot.ambiguousHourlySessions, 0,
+                       "two directories of one project are not a disagreement")
     }
 
     /// The worktree listing is the one piece of disk `assemble` cannot do for
@@ -852,6 +931,7 @@ final class UsageJoinTests: XCTestCase {
     /// number lands on; that the slug of a directory on disk is the one the app
     /// computes is held by `UsageAttributionTests`, over real directories.
     private func assemble(spend: [String: TokenCounts],
+                          hourly: [String: TokenCounts] = [:],
                           sessions: [ClaudeSessionInfo] = [],
                           windows: [VSCodeWindowInfo] = [],
                           worktrees: [String] = []) -> SwitcherSnapshot {
@@ -859,6 +939,9 @@ final class UsageJoinTests: XCTestCase {
                             windows: windows,
                             sessions: sessions,
                             tokensBySlug: Dictionary(uniqueKeysWithValues: spend.map {
+                                (ClaudeSessions.slug(forPath: $0.key), $0.value)
+                            }),
+                            hourlyTokensBySlug: Dictionary(uniqueKeysWithValues: hourly.map {
                                 (ClaudeSessions.slug(forPath: $0.key), $0.value)
                             }),
                             worktrees: worktrees.isEmpty ? [:] : [projectPath: worktrees],
@@ -956,6 +1039,96 @@ final class UsageJoinTests: XCTestCase {
         XCTAssertEqual(snapshot.openWindows.map { $0.usage?.input }, [10, 10],
                        "the project's spend, whole, on each of its windows")
         XCTAssertEqual(snapshot.openWindows.compactMap(\.usageInputEquivalent), [10, 10])
+    }
+
+    // MARK: - The sliding hour, on the same rows
+
+    /// The hour is spread over the projects by the very same rule as the week —
+    /// the same slug map, the same function — so it lands on the same row, and a
+    /// worktree's slug folds onto its project here too.
+    ///
+    /// Asked with *different* numbers in the two windows, because equal ones would
+    /// pass with the row wired to either: what this holds is that the row carries
+    /// both and does not confuse them.
+    func testTheHourLandsOnTheSameRowTheWeekDoes() throws {
+        let worktree = projectPath + "/.claude/worktrees/one"
+        let snapshot = assemble(spend: [projectPath: tokens(10)],
+                                hourly: [projectPath: tokens(3), worktree: tokens(4)],
+                                worktrees: [worktree])
+        let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == projectPath })
+
+        XCTAssertEqual(row.usage?.input, 10, "the week is where it was")
+        XCTAssertEqual(row.hourlyUsage?.input, 7, "the project's hour, plus its worktree's")
+        XCTAssertEqual(row.hourlyInputEquivalent, 7)
+    }
+
+    /// A window row carries its project's hour, exactly as it carries its week.
+    func testAWindowRowCarriesItsProjectsHour() throws {
+        let window = TestFixtures.window(index: 0, title: "topic \u{2014} switcher (Workspace)")
+        let snapshot = assemble(spend: [projectPath: tokens(10)],
+                                hourly: [projectPath: tokens(3)],
+                                windows: [window])
+        let row = try XCTUnwrap(snapshot.openWindows.first)
+        XCTAssertEqual(row.usage?.input, 10)
+        XCTAssertEqual(row.hourlyUsage?.input, 3)
+    }
+
+    /// And so does an orphan `cwd:` row, keyed by its own directory's slug. This
+    /// is where a live agent outside the scan roots shows up, so it is the last
+    /// row that may be left without the figure that says it is working (§2.2.1).
+    func testAnOrphanRowKeepsItsOwnHour() throws {
+        let snapshot = assemble(spend: ["/tmp/scratch": tokens(9)],
+                                hourly: ["/tmp/scratch": tokens(4)],
+                                sessions: [TestFixtures.session(id: "s1", cwd: "/tmp/scratch",
+                                                                state: .working)])
+        let orphan = try XCTUnwrap(snapshot.projects.first { $0.id == "cwd:/tmp/scratch" })
+        XCTAssertEqual(orphan.usage?.input, 9)
+        XCTAssertEqual(orphan.hourlyUsage?.input, 4)
+    }
+
+    /// **The capped week.** The gateway keeps its 200 largest consumers over the
+    /// week and drops the rest, so a session spending right now after a quiet week
+    /// is in the hour's report and absent from the week's (§2.9). Its row still
+    /// has to show the rate: that session is the very one the rate exists for.
+    ///
+    /// The fixture genuinely has no week figure for this project — the week's
+    /// table is about another directory entirely — because a fixture that happened
+    /// to carry one would prove nothing about the case.
+    func testARowAbsentFromTheWeeksReportStillShowsItsHour() throws {
+        let snapshot = assemble(spend: ["/tmp/somebody-else": tokens(500)],
+                                hourly: [projectPath: tokens(6)])
+        let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == projectPath })
+
+        XCTAssertNil(row.usage, "the week's report does not mention this project at all")
+        XCTAssertNil(row.usageInputEquivalent)
+        XCTAssertEqual(row.hourlyUsage?.input, 6, "and the hour still reaches its row")
+        XCTAssertEqual(SwitcherRowView.rateLabel(for: row), "6/h")
+    }
+
+    /// The mirror of `testARowWithNoSpendCarriesNoNumberRatherThanZero`: nothing
+    /// reported for the hour is no figure, not a figure of zero.
+    func testARowWithNoHourCarriesNoRateRatherThanZero() throws {
+        let snapshot = assemble(spend: [projectPath: tokens(10)])
+        let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == projectPath })
+        XCTAssertNil(row.hourlyUsage)
+        XCTAssertNil(row.hourlyInputEquivalent, "no figure at all is not a figure of zero")
+        XCTAssertNil(SwitcherRowView.rateLabel(for: row))
+        XCTAssertEqual(ConsoleDump.rateCell(for: row), "-")
+    }
+
+    /// The hour's lower bound is marked on both surfaces, on the same terms as the
+    /// week's — and the week beside it stays exact, so neither mark can be the
+    /// other's leaking through.
+    func testAPartlyKnownHourIsMarkedAsALowerBound() throws {
+        let partial = TokenCounts(input: 1000, output: nil, cacheCreation: nil, cacheRead: nil)
+        let snapshot = assemble(spend: [projectPath: tokens(2000)], hourly: [projectPath: partial])
+        let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == projectPath })
+
+        XCTAssertTrue(row.hourlyIsLowerBound)
+        XCTAssertEqual(SwitcherRowView.rateLabel(for: row), "≥1k/h")
+        XCTAssertEqual(ConsoleDump.rateCell(for: row), ">=1k/h")
+        XCTAssertFalse(row.usageIsLowerBound, "the week knows all four and says so")
+        XCTAssertEqual(ConsoleDump.usageCell(for: row), "2k")
     }
 
     // MARK: - What is known, and what is only a lower bound

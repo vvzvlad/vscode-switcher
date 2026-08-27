@@ -122,6 +122,12 @@ final class DataSource: @unchecked Sendable {
                              // waits for a network.
                              tokensBySlug: usageSnapshot.tokensBySlug,
                              contested: usageSnapshot.contested,
+                             // The same two, over the sliding hour — off the very
+                             // same read, for the reason the read is a local at
+                             // all: four values from two passes would be one
+                             // session counted twice or not at all.
+                             hourlyTokensBySlug: usageSnapshot.hourlyTokensBySlug,
+                             hourlyContested: usageSnapshot.hourlyContested,
                              worktrees: Self.worktrees(of: projects),
                              cpuBySessionPID: load.cpuPercentBySessionPID,
                              orphansBySessionPID: load.orphansBySessionPID,
@@ -186,6 +192,8 @@ final class DataSource: @unchecked Sendable {
                          activity: [String: ProjectActivity] = [:],
                          tokensBySlug: [String: TokenCounts] = [:],
                          contested: [ContestedSpend] = [],
+                         hourlyTokensBySlug: [String: TokenCounts] = [:],
+                         hourlyContested: [ContestedSpend] = [],
                          worktrees: [String: [String]] = [:],
                          cpuBySessionPID: [Int32: Double] = [:],
                          orphansBySessionPID: [Int32: Int] = [:],
@@ -207,22 +215,23 @@ final class DataSource: @unchecked Sendable {
         // gateway hands back one aggregate per session with nothing to split it
         // by (`UsageIndex`).
         let projectPathsBySlug = Self.projectPathsBySlug(projects: projects, worktrees: worktrees)
-        var usageByProjectPath: [String: TokenCounts] = [:]
-        var usageBySlugOutsideProjects: [String: TokenCounts] = [:]
-        for (slug, tokens) in tokensBySlug {
-            guard let path = projectPathsBySlug[slug] else {
-                usageBySlugOutsideProjects[slug] = tokens
-                continue
-            }
-            usageByProjectPath[path] = (usageByProjectPath[path] ?? .zero) + tokens
-        }
-
-        // The sessions filed under more than one slug. Settled here and nowhere
-        // earlier, because settling them needs the project list.
-        let settled = Self.settle(contested: contested, projectPathsBySlug: projectPathsBySlug)
-        for (path, tokens) in settled.tokensByProjectPath {
-            usageByProjectPath[path] = (usageByProjectPath[path] ?? .zero) + tokens
-        }
+        // The very same map for both windows, and the very same function over it:
+        // the week's answer and the hour's are two answers to one question, and
+        // "whose spend is this" may have only one policy in one snapshot. The
+        // collection half already refused to keep two (`UsageStore.poll` folds
+        // both reports through one `UsageIndex.fold` against one slug map, §2.9),
+        // and a second copy of this loop here would put the split back one layer
+        // down.
+        let week = Self.spread(tokensBySlug: tokensBySlug,
+                               contested: contested,
+                               projectPathsBySlug: projectPathsBySlug)
+        let hour = Self.spread(tokensBySlug: hourlyTokensBySlug,
+                               contested: hourlyContested,
+                               projectPathsBySlug: projectPathsBySlug)
+        let usageByProjectPath = week.byProjectPath
+        let usageBySlugOutsideProjects = week.bySlugOutsideProjects
+        let hourlyUsageByProjectPath = hour.byProjectPath
+        let hourlyUsageBySlugOutsideProjects = hour.bySlugOutsideProjects
 
         var sessionsByProjectPath: [String: [ClaudeSessionInfo]] = [:]
         for session in sessions {
@@ -284,6 +293,7 @@ final class DataSource: @unchecked Sendable {
                                                   project: project,
                                                   sessions: sessionsByWindow[window.id] ?? [],
                                                   usage: project.flatMap { usageByProjectPath[$0.path] },
+                                                  hourlyUsage: project.flatMap { hourlyUsageByProjectPath[$0.path] },
                                                   cpu: cpuBySessionPID,
                                                   orphans: orphansBySessionPID))
         }
@@ -301,6 +311,7 @@ final class DataSource: @unchecked Sendable {
             projectRows.append(Self.makeProjectRow(project: project,
                                                    sessions: pool,
                                                    usage: usageByProjectPath[project.path],
+                                                   hourlyUsage: hourlyUsageByProjectPath[project.path],
                                                    cpu: cpuBySessionPID,
                                                    orphans: orphansBySessionPID))
         }
@@ -318,6 +329,7 @@ final class DataSource: @unchecked Sendable {
             let name = (cwd as NSString).lastPathComponent
             let active = group.first
             let aggregate = Self.aggregate(group, cpu: cpuBySessionPID, orphans: orphansBySessionPID)
+            let slug = ClaudeSessions.slug(forPath: cwd)
             orphanRows.append(SwitcherRow(id: "cwd:\(cwd)",
                                           kind: .project,
                                           displayName: name,
@@ -341,10 +353,17 @@ final class DataSource: @unchecked Sendable {
                                           // the gateway knows about would be a
                                           // row of its own if an agent were
                                           // running there.
-                                          usage: usageBySlugOutsideProjects[ClaudeSessions.slug(forPath: cwd)],
+                                          usage: usageBySlugOutsideProjects[slug],
                                           cpuPercent: aggregate.cpuPercent,
                                           cpuIsLowerBound: aggregate.cpuIsLowerBound,
-                                          orphanCount: aggregate.orphanCount))
+                                          orphanCount: aggregate.orphanCount,
+                                          // The hour's figure by the same key. An
+                                          // orphan row is where a live agent
+                                          // outside the scan roots shows up, so it
+                                          // is the last row that may be left
+                                          // without the number that says it is
+                                          // working (§2.2.1).
+                                          hourlyUsage: hourlyUsageBySlugOutsideProjects[slug]))
         }
 
         return SwitcherSnapshot(openWindows: Self.rankedWindows(openWindows),
@@ -352,8 +371,50 @@ final class DataSource: @unchecked Sendable {
                                     + Self.ranked(projectRows, activity: activity),
                                 accessibilityTrusted: accessibilityTrusted,
                                 generatedAt: generatedAt,
-                                ambiguousUsage: settled.ambiguous,
-                                ambiguousUsageSessions: settled.ambiguousSessions)
+                                ambiguousUsage: week.ambiguous,
+                                ambiguousUsageSessions: week.ambiguousSessions,
+                                ambiguousHourlyUsage: hour.ambiguous,
+                                ambiguousHourlySessions: hour.ambiguousSessions)
+    }
+
+    /// One window's spend, spread over the projects: the slug table folded onto
+    /// project paths, whatever it could not place kept under its own slug, and the
+    /// contested sessions settled against the same map.
+    ///
+    /// **One function called twice, rather than the same loop written twice.**
+    /// The week and the hour are two answers to one question — whose spend is
+    /// this — and two copies of the rule would be two policies for it living in
+    /// one snapshot, free to drift apart at the next edit. The collection half
+    /// refused the same split for the same reason and folds both reports through
+    /// one `UsageIndex.fold` against one slug map (`UsageStore.poll`, SPEC §2.9).
+    ///
+    /// `projectPathsBySlug` is passed in rather than built here precisely so that
+    /// both calls are against the same map: built inside, it would be built twice
+    /// per snapshot for an answer that cannot differ.
+    private static func spread(tokensBySlug: [String: TokenCounts],
+                               contested: [ContestedSpend],
+                               projectPathsBySlug: [String: String])
+        -> (byProjectPath: [String: TokenCounts],
+            bySlugOutsideProjects: [String: TokenCounts],
+            ambiguous: TokenCounts,
+            ambiguousSessions: Int) {
+        var byProjectPath: [String: TokenCounts] = [:]
+        var bySlugOutsideProjects: [String: TokenCounts] = [:]
+        for (slug, tokens) in tokensBySlug {
+            guard let path = projectPathsBySlug[slug] else {
+                bySlugOutsideProjects[slug] = tokens
+                continue
+            }
+            byProjectPath[path] = (byProjectPath[path] ?? .zero) + tokens
+        }
+
+        // The sessions filed under more than one slug. Settled here and nowhere
+        // earlier, because settling them needs the project list.
+        let settled = Self.settle(contested: contested, projectPathsBySlug: projectPathsBySlug)
+        for (path, tokens) in settled.tokensByProjectPath {
+            byProjectPath[path] = (byProjectPath[path] ?? .zero) + tokens
+        }
+        return (byProjectPath, bySlugOutsideProjects, settled.ambiguous, settled.ambiguousSessions)
     }
 
     /// `slug → project path`, for every project and every worktree of one.
@@ -436,6 +497,7 @@ final class DataSource: @unchecked Sendable {
                                       project: ProjectInfo?,
                                       sessions: [ClaudeSessionInfo],
                                       usage: TokenCounts?,
+                                      hourlyUsage: TokenCounts?,
                                       cpu: [Int32: Double],
                                       orphans: [Int32: Int]) -> SwitcherRow {
         let name = project?.displayName ?? window.rootName ?? window.title
@@ -461,7 +523,8 @@ final class DataSource: @unchecked Sendable {
                            usage: usage,
                            cpuPercent: aggregate.cpuPercent,
                            cpuIsLowerBound: aggregate.cpuIsLowerBound,
-                           orphanCount: aggregate.orphanCount)
+                           orphanCount: aggregate.orphanCount,
+                           hourlyUsage: hourlyUsage)
     }
 
     /// A project with no window of its own. It still carries whatever sessions
@@ -469,6 +532,7 @@ final class DataSource: @unchecked Sendable {
     private static func makeProjectRow(project: ProjectInfo,
                                        sessions: [ClaudeSessionInfo],
                                        usage: TokenCounts?,
+                                       hourlyUsage: TokenCounts?,
                                        cpu: [Int32: Double],
                                        orphans: [Int32: Int]) -> SwitcherRow {
         // `sessions` keeps the pool's order, which is most recently active first.
@@ -493,7 +557,8 @@ final class DataSource: @unchecked Sendable {
                            usage: usage,
                            cpuPercent: aggregate.cpuPercent,
                            cpuIsLowerBound: aggregate.cpuIsLowerBound,
-                           orphanCount: aggregate.orphanCount)
+                           orphanCount: aggregate.orphanCount,
+                           hourlyUsage: hourlyUsage)
     }
 
     /// What a row shows for a group of sessions: the highest state among them,

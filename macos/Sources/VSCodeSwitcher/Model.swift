@@ -268,6 +268,23 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     /// answer is usually zero.
     var orphanCount: Int = 0
 
+    /// The same claim as `usage` — the spend of the sessions *started* in this
+    /// row's project — counted over the last sliding hour instead of the week
+    /// (`UsageStore.hourWindowSeconds`, SPEC §2.9).
+    ///
+    /// Which makes it a **rate**, and one that needs no dividing: the gateway's
+    /// per-session aggregates are windowed, so the tokens it reports for a window
+    /// one hour long are already tokens per hour. `SwitcherRowView.rateLabel` is
+    /// what puts the `/h` on it.
+    ///
+    /// Everything else about it — whose spend this is, and why "started in" is not
+    /// "spent in" — is `usage`'s doc above, and it is not restated here because
+    /// there is only one such policy: both windows are spread over the projects by
+    /// the same function in `DataSource.assemble`.
+    ///
+    /// Appended at the very end, for the reason `usage` and `cpuPercent` were.
+    var hourlyUsage: TokenCounts? = nil
+
     var contextFraction: Double? {
         guard let used = contextUsedTokens, let limit = contextLimitTokens, limit > 0 else { return nil }
         return Double(used) / Double(limit)
@@ -297,6 +314,25 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     var usageIsLowerBound: Bool {
         guard let usage, !usage.knowsNothing else { return false }
         return !usage.isComplete
+    }
+
+    /// The row's spend over the last hour as one number, in input-equivalent
+    /// tokens — which is the row's *rate*, since the window is an hour long.
+    ///
+    /// Identical in every other respect to `usageInputEquivalent`, including the
+    /// `knowsNothing` → `nil` rule and why it has to be there; the difference is
+    /// the window and nothing else.
+    var hourlyInputEquivalent: Double? {
+        guard let hourlyUsage, !hourlyUsage.knowsNothing else { return nil }
+        return hourlyUsage.weighted()
+    }
+
+    /// True when `hourlyInputEquivalent` is a number *and* that number is only a
+    /// lower bound. Same rule and same mark as `usageIsLowerBound`, over the
+    /// hour's window.
+    var hourlyIsLowerBound: Bool {
+        guard let hourlyUsage, !hourlyUsage.knowsNothing else { return false }
+        return !hourlyUsage.isComplete
     }
 
     /// The one indicator the row draws, or `nil` when the row has nothing to
@@ -376,6 +412,29 @@ struct SwitcherSnapshot: Sendable, Codable {
     /// callable unchanged from everywhere that has nothing to say about spend.
     var ambiguousUsage: TokenCounts = .zero
     var ambiguousUsageSessions: Int = 0
+
+    /// The same bucket for the hour's window, and it is **not** a second copy of
+    /// the one above for tidiness.
+    ///
+    /// The two windows can report different sessions, and the way into that state
+    /// that is reachable today is **failure**: the two `/gw/sessions` calls go out
+    /// in parallel and are awaited apart, so a week that timed out leaves the
+    /// week's figures untouched while the hour's arrive (`UsageStore.poll`). A
+    /// contested session in that hour is refused by `settle`, and the week's line
+    /// above has nothing to say about it at all. One bucket for both would then be
+    /// spend that no line reports, which is exactly the silent loss the split
+    /// exists to prevent.
+    ///
+    /// The gateway's cap on the week — its 200 largest consumers, the rest dropped
+    /// with `truncated` set (SPEC §2.7) — produces the same state, and it is **not
+    /// firing on this machine**: measured 2026-08-27, the week's report came back
+    /// with 116 sessions and `truncated: false`, and `--dump`'s `window:` line
+    /// carried no truncation suffix. So today the hour's sessions are a subset of
+    /// the week's, and the reason the two buckets are separate is the one above.
+    /// Two buckets are right under either reason; a claim that the two sets differ
+    /// today would not be.
+    var ambiguousHourlyUsage: TokenCounts = .zero
+    var ambiguousHourlySessions: Int = 0
 
     var rows: [SwitcherRow] { openWindows + projects }
 }
