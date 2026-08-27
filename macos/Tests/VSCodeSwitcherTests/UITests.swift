@@ -175,6 +175,123 @@ final class RowLabelTests: XCTestCase {
         // Eight digits in the middle are part of the name, not a release stamp.
         XCTAssertEqual(SwitcherRowView.shortModelName("claude-20241022-x"), "20241022-x")
     }
+
+    // MARK: - The bracket after the name, and the percentage at the end
+
+    /// One row, built by hand, with only the two figures the bracket and the
+    /// percentage read.
+    private func row(agents: Int = 0, orphans: Int = 0, cpu: Double? = nil,
+                     cpuIsLowerBound: Bool = false) -> SwitcherRow {
+        var session = TestFixtures.session(id: "s", cwd: "/p", state: .working)
+        session.activeSubagents = max(0, agents - 1)
+        return SwitcherRow(id: "r",
+                           kind: .window,
+                           displayName: "vscode-switcher",
+                           colorHex: "#1857a4",
+                           project: nil,
+                           window: nil,
+                           sessions: agents > 0 ? [session] : [],
+                           state: agents > 0 ? .working : nil,
+                           activeSubagents: max(0, agents - 1),
+                           subagentDescriptions: [],
+                           chatTopic: nil,
+                           model: nil,
+                           contextUsedTokens: nil,
+                           contextLimitTokens: nil,
+                           lastActivity: nil,
+                           usage: nil,
+                           cpuPercent: cpu,
+                           cpuIsLowerBound: cpuIsLowerBound,
+                           orphanCount: orphans)
+    }
+
+    /// The bracket is what it always was when there are no orphans. This is the
+    /// half of the requirement that is about *not* changing: `orphans: 0` on
+    /// every row of the panel would be a column of noughts saying that nothing
+    /// has happened.
+    func testTheBracketIsUnchangedWithoutOrphans() {
+        XCTAssertEqual(SwitcherRowView.countLabel(for: row(agents: 1)), "(agents: 1)")
+        XCTAssertEqual(SwitcherRowView.countLabel(for: row(agents: 5)), "(agents: 5)")
+        XCTAssertNil(SwitcherRowView.countLabel(for: row()))
+    }
+
+    /// And the orphans join it inside the same brackets, after the agents.
+    func testOrphansJoinTheBracketAfterTheAgents() {
+        XCTAssertEqual(SwitcherRowView.countLabel(for: row(agents: 1, orphans: 3)),
+                       "(agents: 1, orphans: 3)")
+    }
+
+    /// A row can be all orphans and no agents, and that is the state worth
+    /// having: an orphan is a process whose parent has exited, so three of them
+    /// under a chat that has gone quiet is a thing nothing else on the row
+    /// reports. The brackets appear for it alone.
+    func testOrphansAloneStillGetTheBracket() {
+        XCTAssertEqual(SwitcherRowView.countLabel(for: row(orphans: 2)), "(orphans: 2)")
+    }
+
+    /// A whole percent and no decimal: the number is re-read once a second, and
+    /// a tenth of a core is noise given somewhere to jitter.
+    func testTheCPUIsWrittenAsAWholePercent() {
+        XCTAssertEqual(SwitcherRowView.cpuLabel(for: row(cpu: 38.4)), "38%")
+        XCTAssertEqual(SwitcherRowView.cpuLabel(for: row(cpu: 38.6)), "39%")
+        // Above one core is legitimate and is not clamped: that is several cores.
+        XCTAssertEqual(SwitcherRowView.cpuLabel(for: row(cpu: 412.0)), "412%")
+    }
+
+    /// A sum the sweep could not take over every chat of the row wears `≥`, the
+    /// mark the token figure already uses for the same hole (§3.1). It goes on
+    /// the label rather than turning the number into `nil`, because `nil` is
+    /// drawn as a dash — the quiet row — and would understate by the whole
+    /// figure instead of by one chat's share.
+    ///
+    /// Below the one-percent threshold there is no label to mark, and the mark
+    /// must not resurrect one: `≥` on nothing would be a row claiming a floor it
+    /// does not print a number for.
+    func testAPartialSumWearsTheSameMarkTheTokenFigureDoes() {
+        XCTAssertEqual(SwitcherRowView.cpuLabel(for: row(cpu: 38.4, cpuIsLowerBound: true)), "≥38%")
+        XCTAssertEqual(SwitcherRowView.cpuLabel(for: row(cpu: 38.4)), "38%")
+        XCTAssertNil(SwitcherRowView.cpuLabel(for: row(cpu: 0.4, cpuIsLowerBound: true)))
+    }
+
+    /// Two silences, and both of them deliberate. `nil` is "there has been one
+    /// sweep so far"; below one percent is "measured, and idle" — without which
+    /// every quiet row on the machine would carry a permanent `0%`.
+    func testAnIdleOrUnmeasuredRowSaysNothingAboutCPU() {
+        XCTAssertNil(SwitcherRowView.cpuLabel(for: row(cpu: nil)))
+        XCTAssertNil(SwitcherRowView.cpuLabel(for: row(cpu: 0)))
+        XCTAssertNil(SwitcherRowView.cpuLabel(for: row(cpu: 0.999)))
+        XCTAssertEqual(SwitcherRowView.cpuLabel(for: row(cpu: 1.0)), "1%")
+    }
+
+    /// The tooltip is where there is room to say what the two numbers count: a
+    /// share of *one* core, which is what makes 412% read as four cores, and the
+    /// second number as **detached processes** rather than as orphaned ones.
+    ///
+    /// The wording matters because the count is not a tally of dead parents: a
+    /// detached process brings everything running underneath it into the number
+    /// (SPEC §2.8), so the live claim that was a `python` with a `docker` and
+    /// two `ssh` under it counts 4 with one parent gone. `4 orphaned processes`
+    /// said four parents had exited.
+    func testTheTooltipSpellsOutWhatTheFiguresCount() {
+        XCTAssertEqual(SwitcherRowView.processLines(for: row(orphans: 2, cpu: 38.4)),
+                       ["", "CPU 38% of one core · 2 processes detached from the parent chain"])
+        XCTAssertEqual(SwitcherRowView.processLines(for: row(orphans: 1)),
+                       ["", "1 process detached from the parent chain"])
+        XCTAssertEqual(SwitcherRowView.processLines(for: row(cpu: 0.2)), [])
+    }
+
+    /// `--dump` prints the panel's own label, so the two cannot come to describe
+    /// the same row differently — including on the rows the panel is silent
+    /// about, which print a dash rather than a figure of their own.
+    func testTheDumpPrintsThePanelsFigure() {
+        XCTAssertEqual(ConsoleDump.cpuCell(for: row(cpu: 38.4)), "38%")
+        XCTAssertEqual(ConsoleDump.cpuCell(for: row(cpu: 0.2)), "-")
+        XCTAssertEqual(ConsoleDump.cpuCell(for: row(cpu: nil)), "-")
+        // And the orphans reach the dump through the same bracket the panel
+        // draws, by way of `nameCell`.
+        XCTAssertTrue(ConsoleDump.nameCell(for: row(agents: 1, orphans: 3), width: 40)
+            .contains("(agents: 1, orphans: 3)"))
+    }
 }
 
 /// The "projects" section lists every project, in the order the data layer
@@ -884,7 +1001,7 @@ final class RowTitleTests: XCTestCase {
             TestFixtures.session(id: "s\($0)", cwd: "/tmp/p", state: working > 0 ? .working : .idle)
         }
         sessions[0].activeSubagents = subagents
-        let aggregate = DataSource.aggregate(sessions)
+        let aggregate = DataSource.aggregate(sessions, cpu: [:], orphans: [:])
         return SwitcherRow(id: "project:/tmp/p",
                            kind: .project,
                            displayName: name,
@@ -1055,7 +1172,9 @@ final class RowLayoutTests: XCTestCase {
                          count: Int,
                          name: String = "проект с длинным именем, которое не влезает",
                          topic: String? = "тема чата, тоже подлиннее строки",
-                         usage: TokenCounts? = nil) -> SwitcherRow {
+                         usage: TokenCounts? = nil,
+                         cpu: Double? = nil,
+                         orphans: Int = 0) -> SwitcherRow {
         let state: AgentState = switch status {
         case .blocked: .question
         case .done: .waiting
@@ -1067,7 +1186,7 @@ final class RowLayoutTests: XCTestCase {
         }
         var session = TestFixtures.session(id: "s", cwd: "/tmp/p", state: state)
         session.activeSubagents = count
-        let aggregate = DataSource.aggregate([session])
+        let aggregate = DataSource.aggregate([session], cpu: [:], orphans: [:])
         let row = SwitcherRow(id: "window:1:w1",
                               kind: .window,
                               displayName: name,
@@ -1083,7 +1202,9 @@ final class RowLayoutTests: XCTestCase {
                               contextUsedTokens: nil,
                               contextLimitTokens: nil,
                               lastActivity: nil,
-                              usage: usage)
+                              usage: usage,
+                              cpuPercent: cpu,
+                              orphanCount: orphans)
         XCTAssertEqual(row.status, status, "the fixture does not fold to \(status)")
         XCTAssertEqual(row.activeCount, count)
         return row
@@ -1094,8 +1215,11 @@ final class RowLayoutTests: XCTestCase {
                            name: String = "проект с длинным именем, которое не влезает",
                            topic: String? = "тема чата, тоже подлиннее строки",
                            usage: TokenCounts? = nil,
+                           cpu: Double? = nil,
+                           orphans: Int = 0,
                            width: Double) throws -> Rendered {
-        let row = makeRow(status: status, count: count, name: name, topic: topic, usage: usage)
+        let row = makeRow(status: status, count: count, name: name, topic: topic,
+                          usage: usage, cpu: cpu, orphans: orphans)
         return try measure(SwitcherRowView(row: row, isFrontmost: false, panelVisible: false)
             .padding(.horizontal, 6)
             .frame(width: width))
@@ -1110,7 +1234,7 @@ final class RowLayoutTests: XCTestCase {
     /// passed on a row that had no name at all.
     private static let colourBar: ClosedRange<Double> = 13.0...16.75
 
-    /// The longest real project name on this machine, 36 characters and no
+    /// The longest real project name on this machine, 38 characters and no
     /// spaces in it — the row where the name and the count fight for the line.
     private static let longestName = "wirenboard/node-red-contrib-wirenboard"
 
@@ -1645,6 +1769,202 @@ final class RowLayoutTests: XCTestCase {
         }
     }
 
+    // MARK: - CPU on the title line
+
+    /// The CPU figure the layout round is run against: `38%`, three characters,
+    /// the ordinary shape of the number.
+    private static let cpu: Double = 38.4
+
+    /// A percentage of the same shape but wider: `412%` against `38%`.
+    private static let widerCPU: Double = 412
+
+    /// Is the percentage on the line at this width?
+    ///
+    /// Decided against a **wider percentage**, not against no percentage at all.
+    /// The obvious comparison — the row with one against the row without —
+    /// answers "these two rows differ", which is not the same question: below
+    /// the percentage's floor the row that carries one falls a rung further than
+    /// the row that carries none, so the two differ while neither of them draws
+    /// a percentage. Two figures that differ only in width cannot do that: when
+    /// the label is dropped both rows draw the same thing, and when it is drawn
+    /// the wider one takes more room. The predicate is about the narrow figure —
+    /// the wide one is allowed to have been dropped already.
+    private func cpuIsDrawn(width: Double, count: Int, name: String) throws -> Bool {
+        let narrow = try renderRow(status: .blocked, count: count, name: name,
+                                   topic: nil, cpu: Self.cpu, width: width)
+        let wide = try renderRow(status: .blocked, count: count, name: name,
+                                 topic: nil, cpu: Self.widerCPU, width: width)
+        return narrow.ink != wide.ink
+    }
+
+    /// And is the count on the line? Asked the same way and for the same reason:
+    /// a count of one more digit is wider while everything else about the row
+    /// stays put. `beside` is the percentage the row carries, `nil` for a row
+    /// that has none — the same question put to both ladders.
+    private func countIsDrawn(width: Double, count: Int, name: String,
+                              beside cpu: Double?) throws -> Bool {
+        let narrow = try renderRow(status: .blocked, count: count, name: name,
+                                   topic: nil, cpu: cpu, width: width)
+        let wide = try renderRow(status: .blocked, count: count * 10 + 1, name: name,
+                                 topic: nil, cpu: cpu, width: width)
+        return narrow.ink != wide.ink
+    }
+
+    /// The percentage stands at the right-hand end of the title line, in the
+    /// same column as the spend on the line below it — which is the whole of
+    /// what "opposite the title, above the token figure" means.
+    ///
+    /// Asserted by measuring the two apart and comparing where each of them
+    /// ends, because a render collapses its columns over the height of the row
+    /// and the two labels would otherwise be one span. Each row is drawn with
+    /// nothing else on its line — no topic under the percentage, no name beside
+    /// the spend — so the ink at the right-hand end is the label and nothing
+    /// else.
+    func testTheCPUStandsInTheSameColumnAsTheSpendBelowIt() throws {
+        let width = Config.default.panelWidth
+        let slot = badgeSlot(inRowOfWidth: width)
+
+        let onTitle = try renderRow(status: .blocked, count: 0, name: "p",
+                                    topic: nil, cpu: Self.cpu, width: width)
+        let title = try XCTUnwrap(onTitle.span(from: Self.colourBar.upperBound + 0.25,
+                                               to: slot.lowerBound - 3),
+                                  "the title line drew nothing")
+
+        let onSecondLine = try renderSecondLine(topic: nil, usage: Self.spend, width: width)
+        let second = try XCTUnwrap(onSecondLine.span(from: Self.colourBar.upperBound + 0.25,
+                                                     to: slot.lowerBound - 3),
+                                   "the second line drew nothing")
+
+        // Half a point: the two labels are different strings, so their last
+        // glyph has a right side bearing of its own.
+        XCTAssertEqual(title.upperBound, second.upperBound, accuracy: 0.5,
+                       "the percentage is not above the spend")
+        // And it really is at the end of the line rather than trailing the name:
+        // `p` is one character, so a percentage that simply followed it would be
+        // two hundred points to the left.
+        XCTAssertGreaterThan(title.upperBound - title.lowerBound, 200)
+    }
+
+    /// Both figures are drawn at the default width, and the percentage is whole
+    /// beside a count of any size.
+    func testTheTitleCarriesBothFiguresAtPanelWidth() throws {
+        for count in [1, 123] {
+            XCTAssertTrue(try cpuIsDrawn(width: Config.default.panelWidth,
+                                         count: count,
+                                         name: Self.longestName),
+                          "no percentage at the default width — count=\(count)")
+            XCTAssertTrue(try countIsDrawn(width: Config.default.panelWidth,
+                                           count: count,
+                                           name: Self.longestName,
+                                           beside: Self.cpu),
+                          "the count went away at the default width — count=\(count)")
+        }
+    }
+
+    /// The degradation order, which is the decision the ladder encodes: as the
+    /// panel narrows the **percentage** is what goes first, then the count, and
+    /// the name outlives both.
+    ///
+    /// Swept rather than asserted at two chosen widths, because what is being
+    /// claimed is an order and an order needs both of its boundaries. Measured
+    /// a point at a time (27.08.2026): against the longest real name on this
+    /// machine the percentage is drawn down to 224 pt and the count down to 186,
+    /// and against a one-character name 192 and 154 — 38 pt of panel in either
+    /// case where the row reads `name (agents: 1)` with no percentage, which is
+    /// the state rungs 3 and 4 exist to produce.
+    ///
+    /// **Both names, because the short one is the only place rung 3 shows.** The
+    /// longest name stopped fitting whole above 380 pt, so it never stands on
+    /// rung 3 at all and reaches the same 186 through rung 4; deleting rung 3
+    /// costs it nothing and this test would not notice. A one-character name
+    /// climbs 1 → 3 → 5, and with rung 3 taken out it loses its bracket at 186
+    /// instead of 154 (measured by deletion) — 32 pt of panel, and the failure
+    /// order of §4 broken, the count and the percentage going within 6 pt of
+    /// each other.
+    ///
+    /// The third floor is what pins that down as a property rather than a pair
+    /// of widths: the count's floor is the same on a row that carries a
+    /// percentage as on one that does not, because the percentage is always the
+    /// first thing dropped and so can never cost the count a point of panel.
+    ///
+    /// The assertions are that order, that equality, and the fact that each rung
+    /// is reached inside the sweep — not the exact widths, which move with the
+    /// font metrics of an OS update. Swapping rungs 2 and 3 — dropping the count
+    /// before the percentage — reverses the inequality and fails here. The step
+    /// is 5 pt because the widths themselves are not what is asserted, and the
+    /// sweep renders six rows at each of them.
+    func testThePercentageGivesWayBeforeTheCountDoes() throws {
+        for name in [Self.longestName, "p"] {
+            var lastWidthWithCPU: Double?
+            var lastWidthWithCount: Double?
+            var lastWidthWithCountAlone: Double?
+            var width = Config.default.panelWidth
+            while width >= 150 {
+                if try cpuIsDrawn(width: width, count: 1, name: name) {
+                    lastWidthWithCPU = width
+                }
+                if try countIsDrawn(width: width, count: 1, name: name, beside: Self.cpu) {
+                    lastWidthWithCount = width
+                }
+                if try countIsDrawn(width: width, count: 1, name: name, beside: nil) {
+                    lastWidthWithCountAlone = width
+                }
+                width -= 5
+            }
+            let cpuFloor = try XCTUnwrap(lastWidthWithCPU,
+                                         "the percentage was never drawn at all — \(name)")
+            let countFloor = try XCTUnwrap(lastWidthWithCount,
+                                           "the count was never drawn at all — \(name)")
+            XCTAssertGreaterThan(cpuFloor, countFloor,
+                                 "the count gave way before the percentage did — \(name)")
+            // And both rungs are actually visited inside the swept range, so the
+            // inequality is not two constants that both sit outside it.
+            XCTAssertLessThan(cpuFloor, Config.default.panelWidth, name)
+            XCTAssertGreaterThan(countFloor, 150, name)
+
+            let alone = try XCTUnwrap(lastWidthWithCountAlone,
+                                      "the count was never drawn without a percentage — \(name)")
+            XCTAssertEqual(countFloor, alone,
+                           "the percentage cost the count \(countFloor - alone) pt of panel — \(name)")
+        }
+    }
+
+    /// Below all of it the name still wins: at 150 pt the row draws what it drew
+    /// before either figure existed.
+    ///
+    /// The same rule §2.2.1 states for the count — a row that identifies no
+    /// project is no better than one parked at the bottom of a 93-row list —
+    /// and the percentage has even less claim on the line than the count does.
+    func testANarrowPanelKeepsOnlyTheName() throws {
+        let width = 150.0
+        let bare = try renderRow(status: .blocked, count: 0, name: Self.longestName,
+                                 topic: nil, cpu: nil, width: width)
+        let loaded = try renderRow(status: .blocked, count: 5, name: Self.longestName,
+                                   topic: nil, cpu: Self.cpu, orphans: 3, width: width)
+        XCTAssertEqual(loaded.ink, bare.ink, "something other than the name survived 150 pt")
+    }
+
+    /// The percentage never moves the indicator, whatever it says — the badge
+    /// holds the same column on every row (§4), and a figure that grew from two
+    /// digits to four must not push it.
+    func testTheCPUNeverMovesTheIndicator() throws {
+        let width = Config.default.panelWidth
+        let slot = badgeSlot(inRowOfWidth: width)
+        var seen: ClosedRange<Double>?
+        for cpu in [nil, 1.0, 38.4, 250.0, 1600.0] as [Double?] {
+            let rendered = try renderRow(status: .blocked, count: 1, name: "p",
+                                         topic: nil, cpu: cpu, width: width)
+            let badge = try XCTUnwrap(rendered.span(rightOf: slot.lowerBound - 3),
+                                      "no indicator drawn for cpu=\(cpu as Any)")
+            if let seen {
+                XCTAssertEqual(badge.lowerBound, seen.lowerBound, accuracy: 0.01, "cpu=\(cpu as Any)")
+                XCTAssertEqual(badge.upperBound, seen.upperBound, accuracy: 0.01, "cpu=\(cpu as Any)")
+            } else {
+                seen = badge
+            }
+        }
+    }
+
     /// The count's own ink, rendered on its own in the font the row draws it in.
     private func inkWidthOfLabel(count: Int) throws -> Double {
         let label = try XCTUnwrap(SwitcherRowView.countLabel(for: makeRow(status: .blocked, count: count)))
@@ -1688,7 +2008,7 @@ final class RowTooltipTests: XCTestCase {
     private func row(_ sessions: [ClaudeSessionInfo],
                      kind: SwitcherRowKind = .window,
                      subagents: [String] = []) -> SwitcherRow {
-        let aggregate = DataSource.aggregate(sessions)
+        let aggregate = DataSource.aggregate(sessions, cpu: [:], orphans: [:])
         return SwitcherRow(id: "window:1:w1",
                            kind: kind,
                            displayName: "home-network",

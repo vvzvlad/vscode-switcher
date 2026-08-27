@@ -607,9 +607,10 @@ struct SwitcherRowView: View {
     /// The chat topic on the left, the row's token spend on the right.
     ///
     /// Two things that have nothing to do with each other, on one line because
-    /// there is only one line to spare: the title line above is a ladder of
-    /// three measured rungs (§4) and adding a fourth element to it would have to
-    /// be paid for by one of them.
+    /// there is only one line to spare: the title line above already carries
+    /// three labels and needs a ladder of five measured rungs to seat them (§4)
+    /// — three only on a row where one of the two figures is missing — so a
+    /// fourth element up there would have to be paid for by one of them.
     ///
     /// Neither is compulsory, and the line itself is not either: a row with no
     /// chat and no spend — most of the "projects" section — draws exactly what
@@ -645,21 +646,66 @@ struct SwitcherRowView: View {
 
     private var subtitle: String? { Self.rowSubtitle(row) }
 
-    /// The name, and the count after it when something is running.
+    /// The name, the count after it when something is running, and the CPU the
+    /// row is burning out at the right-hand end.
     ///
-    /// Three candidates, most generous first; `ViewThatFits` takes the first
+    /// Five candidates, most generous first; `ViewThatFits` takes the first
     /// whose ideal width fits the line it is offered:
     ///
-    /// 1. both whole — what the 380 pt default draws unless the name is long;
-    /// 2. the count whole, the name squeezed down to `nameFloorWidth` at worst.
-    ///    The name is what gives way, because on the row where the number is
+    /// 1. all three whole — what the 380 pt default draws unless the name is
+    ///    long;
+    /// 2. the same, with the name squeezed down to `nameFloorWidth` at worst.
+    ///    The name is what gives way, because on the row where the numbers are
     ///    worth reading it is the name that is long;
-    /// 3. the name alone. A panel too narrow for both drops the *count*: a row
-    ///    reading `(agents: 124)` and nothing else names no project, and a row
-    ///    that identifies nothing is no better than the one parked at the bottom
-    ///    of a 93-row list (§2.2.1).
+    /// 3. **the CPU figure goes first**, and the name keeps its own width. Of the
+    ///    three labels it is the one that keeps least: the count says how much
+    ///    work is *outstanding* in this window and the CPU says what one instant
+    ///    of it looks like, so the reading survives losing the instant. It is
+    ///    also the figure whose column the second line repeats — the spend sits
+    ///    directly under it — so its side of the row does not go blank;
+    /// 4. the same without the percentage, name back at its floor;
+    /// 5. the name alone. A panel too narrow for name and count drops the
+    ///    *count*: a row reading `(agents: 124)` and nothing else names no
+    ///    project, and a row that identifies nothing is no better than the one
+    ///    parked at the bottom of a 93-row list (§2.2.1).
     ///
-    /// The middle candidate is what makes the floor a floor: `frame(idealWidth:)`
+    /// **Rungs 3 and 4 are the same rung for a long name and two different rungs
+    /// for a short one**, and leaving 3 out is what this ladder did until it was
+    /// measured. With only "name at the floor, no percentage" below rung 2, a
+    /// short name lost its bracket the moment rung 2 gave out — because rung 2
+    /// asks for 40 pt of name that a one-character name does not want, and the
+    /// rung under it asked for the same 40. Measured 27.08.2026 at 1 pt a step:
+    /// `p (agents: 1)` keeps its bracket to 154 pt on a row with no percentage,
+    /// and without rung 3 it lost it at **186** on a row with one — six points
+    /// below where the percentage itself went (192), while §4's failure order
+    /// promises the percentage gives way *first*. With rung 3 the bracket is
+    /// back to the same 154 the percentage-less row has, which is the property
+    /// the test asserts: the percentage costs the count nothing, because it is
+    /// always dropped first. `panelWidth` is a setting, so that end of its range
+    /// is where this class of claim has to be checked.
+    ///
+    /// A rung is only reachable while it is narrower than every rung above it,
+    /// and neither 2 nor 3 always is — the floor is a floor both ways. A name
+    /// shorter than 40 pt makes rung 2 wider than rung 1, and a name longer than
+    /// 40 pt makes rung 3 wider than rung 2; in each case the wider one is simply
+    /// never chosen, because the rung above draws the same thing and is reached
+    /// first. So a long name climbs 1 → 2 → 4 → 5 and a short one 1 → 3 → 5,
+    /// which is why §4 measures the boundaries on both.
+    ///
+    /// It is also why the five-rung ladder is only for the row that has *both*
+    /// figures. Rungs 3 and 4 exist to keep the count and drop the percentage, so
+    /// on a row carrying one figure and not the other they are the name — at its
+    /// own width and at its floor — with the count beside it, which is rungs 1
+    /// and 2 again. Identical output, so the ladder would stop there and rung 5
+    /// could never be reached. Those rows climb three rungs: whole, name at the
+    /// floor, name alone.
+    ///
+    /// The conditional has to be on the ladder and not inside it. A candidate
+    /// wrapped in an `if` collapses to `EmptyView` when the condition is false,
+    /// `EmptyView` fits any width at all, and the ladder would stop there and
+    /// draw nothing.
+    ///
+    /// The middle candidates are what make the floor a floor: `frame(idealWidth:)`
     /// answers the fit question with 40 pt instead of the name's full width, and
     /// passes the real proposal through afterwards, so the name still takes
     /// whatever the line actually has.
@@ -678,20 +724,48 @@ struct SwitcherRowView: View {
     /// fitted the longest name since 380 — while lowering the floor changes
     /// nothing at any of them and is caught only in the sweep.
     @ViewBuilder private var titleLine: some View {
-        if let countLabel = Self.countLabel(for: row) {
+        let count = Self.countLabel(for: row)
+        let cpu = Self.cpuLabel(for: row)
+        if count != nil, cpu != nil {
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 4) {
-                    nameText
-                    countText(countLabel)
-                }
-                HStack(spacing: 4) {
-                    nameText.frame(idealWidth: Self.nameFloorWidth, alignment: .leading)
-                    countText(countLabel)
-                }
+                titleRow(nameAtFloor: false, count: count, cpu: cpu)
+                titleRow(nameAtFloor: true, count: count, cpu: cpu)
+                titleRow(nameAtFloor: false, count: count, cpu: nil)
+                titleRow(nameAtFloor: true, count: count, cpu: nil)
+                nameText
+            }
+        } else if count != nil || cpu != nil {
+            ViewThatFits(in: .horizontal) {
+                titleRow(nameAtFloor: false, count: count, cpu: cpu)
+                titleRow(nameAtFloor: true, count: count, cpu: cpu)
                 nameText
             }
         } else {
+            // Most of the "projects" section: a name and nothing else, and no
+            // ladder to climb.
             nameText
+        }
+    }
+
+    /// One rung of the ladder above. The `Spacer` is what puts the percentage at
+    /// the right-hand end of the line, directly above the second line's spend,
+    /// and its `minLength` is the gap the two halves may never close.
+    ///
+    /// A `Spacer` is infinitely flexible, so it contributes exactly its
+    /// `minLength` to the ideal width `ViewThatFits` measures the rung by, and
+    /// takes the slack only once a rung has been chosen.
+    @ViewBuilder private func titleRow(nameAtFloor: Bool, count: String?, cpu: String?) -> some View {
+        HStack(spacing: 4) {
+            if nameAtFloor {
+                nameText.frame(idealWidth: Self.nameFloorWidth, alignment: .leading)
+            } else {
+                nameText
+            }
+            if let count { countText(count) }
+            if let cpu {
+                Spacer(minLength: 6)
+                cpuText(cpu)
+            }
         }
     }
 
@@ -721,6 +795,26 @@ struct SwitcherRowView: View {
             .fixedSize(horizontal: true, vertical: false)
     }
 
+    /// The CPU figure, styled as the second line's spend rather than as the
+    /// count beside it: the two of them stack into one right-hand column, and a
+    /// column reads as a column only if both its numbers look alike. 11 pt
+    /// `.secondary` `monospacedDigit` is that figure's styling exactly.
+    ///
+    /// `monospacedDigit` is not cosmetic here. This number is re-read once a
+    /// second, and proportional digits change the label's width with it, which
+    /// walks the name's ellipsis back and forth under a stationary pointer.
+    ///
+    /// `fixedSize` for the same reason the count has it: a truncated percentage
+    /// is a lie about the machine, and a rung of the ladder is where this label
+    /// is allowed to lose — whole, never cut.
+    private func cpuText(_ label: String) -> some View {
+        Text(label)
+            .font(.system(size: 11))
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
     /// The narrowest the name may be squeezed to while the count is still drawn.
     /// Measured, not guessed: in the row's own font a 40 pt frame renders four
     /// characters and the ellipsis — `wire…`, 37.00 pt of ink in all: 25.75 of
@@ -736,17 +830,59 @@ struct SwitcherRowView: View {
     /// so a number measured there does not carry over to here.
     static let nameFloorWidth: CGFloat = 40
 
-    /// The count as the title line carries it, or `nil` when there is nothing
-    /// running: at zero the brackets go away entirely and the row is just its
-    /// name.
+    /// The bracket the title line carries after the name — `(agents: 5)`,
+    /// `(agents: 5, orphans: 3)` — or `nil` when there is nothing to put in it.
+    ///
+    /// Two counts, and each appears only when it is not zero. `orphans: 0` is
+    /// the ordinary state of every row on the machine and would be a column of
+    /// noughts across the whole panel; `agents: 0` was already left out for the
+    /// same reason before orphans existed.
+    ///
+    /// Which means a row can read `(orphans: 3)` with no agents in front of it,
+    /// and that is the case worth having: an orphan is a process the parent
+    /// chain no longer reaches — the one that lost its parent, and everything
+    /// still running underneath it (SPEC §2.8) — so three of them under a chat
+    /// that has gone quiet is exactly the state nothing else on the row would
+    /// report. Three is not three dead parents; the tooltip is where there is
+    /// room to say so (`processLines`).
     ///
     /// The wording and the brackets are the user's, verbatim. Shared with
     /// `--dump`, so the two cannot drift — and `nonisolated` for exactly that
     /// reason: `View` infers `@MainActor` for the whole type, and the dump runs
     /// outside it. A pure function of a `Sendable` value needs no actor.
     nonisolated static func countLabel(for row: SwitcherRow) -> String? {
-        let count = row.activeCount
-        return count > 0 ? "(agents: \(count))" : nil
+        var parts: [String] = []
+        if row.activeCount > 0 { parts.append("agents: \(row.activeCount)") }
+        if row.orphanCount > 0 { parts.append("orphans: \(row.orphanCount)") }
+        return parts.isEmpty ? nil : "(" + parts.joined(separator: ", ") + ")"
+    }
+
+    /// What the row's sessions are burning, as the title line writes it, or
+    /// `nil` when there is nothing worth writing.
+    ///
+    /// Two different silences, and both are right to be silent. `nil` on the row
+    /// is "not measured": a rate needs two sweeps, and the pass right after
+    /// launch has one. Below one percent is "measured, and idle" — every row on
+    /// a quiet machine would otherwise carry a permanent `0%`, which is four
+    /// characters of furniture per row saying that nothing is happening.
+    ///
+    /// Whole percent and no decimal: the figure is re-read once a second, and a
+    /// tenth of a core is noise given a place to jitter in.
+    ///
+    /// `String(format:)` rather than rounding into an `Int`, which traps on a
+    /// value that is not finite. Nothing upstream can produce one — the rate
+    /// divides by an interval that is guarded above zero — but the trap would be
+    /// a crash in the panel, and the formatter costs nothing to prefer.
+    ///
+    /// `≥` when some of the row's chats went unmeasured this pass, exactly as the
+    /// spend below it marks a sum missing one of its counters: the figure is real
+    /// and it is a floor (`SwitcherRow.cpuIsLowerBound`). The mark is not applied
+    /// below one percent, because there is no reading of "≥0%" that says
+    /// anything — a row whose measured part rounds to nothing is silent either
+    /// way.
+    nonisolated static func cpuLabel(for row: SwitcherRow) -> String? {
+        guard let percent = row.cpuPercent, percent >= 1 else { return nil }
+        return (row.cpuIsLowerBound ? "≥" : "") + String(format: "%.0f%%", percent)
     }
 
     /// The row's token spend as the second line writes it, or `nil` when there
@@ -821,6 +957,7 @@ struct SwitcherRowView: View {
         }
 
         lines.append(contentsOf: usageLines(for: row))
+        lines.append(contentsOf: processLines(for: row))
         // An orphan row has no indexed project, only the sessions' working
         // directory — and that is the one thing worth showing about it.
         if row.kind == .project, let path = row.project?.path ?? row.sessions.first?.cwd {
@@ -850,6 +987,32 @@ struct SwitcherRowView: View {
                         ("cache write", usage.cacheCreation), ("cache read", usage.cacheRead)]
         return ["", "Tokens (input-equivalent): \(total)"]
             + counters.map { "• \($0.0) \($0.1.map { compactTokens(Double($0)) } ?? "?")" }
+    }
+
+    /// What the row's processes are doing, spelled out.
+    ///
+    /// The title line has room for a percentage and a number in brackets and no
+    /// room to say what either of them counts. Here there is room: the CPU is
+    /// named as a share of *one core*, which is what makes a figure above 100
+    /// read as several cores rather than as a broken percentage.
+    ///
+    /// The second number is named for what it counts, which is **not** a tally
+    /// of exited parents. It counts every process the chain no longer reaches —
+    /// the one that lost its parent and everything still running underneath it,
+    /// because a descendant of a detached process is detached too (SPEC §2.8).
+    /// One of the six live claims on this machine was a detached `python` with
+    /// a `docker` and two `ssh` under it: four processes, one dead parent, and
+    /// `4 orphaned processes` would have read as four of them.
+    ///
+    /// Silent when both are, so a quiet row's tooltip is what it was before.
+    static func processLines(for row: SwitcherRow) -> [String] {
+        var parts: [String] = []
+        if let cpu = cpuLabel(for: row) { parts.append("CPU \(cpu) of one core") }
+        if row.orphanCount > 0 {
+            let plural = row.orphanCount == 1 ? "process" : "processes"
+            parts.append("\(row.orphanCount) \(plural) detached from the parent chain")
+        }
+        return parts.isEmpty ? [] : ["", parts.joined(separator: " · ")]
     }
 
     /// A chat's state in words. The tooltip is the only place the five states
