@@ -67,6 +67,49 @@ final class UsageStore: ObservableObject {
     /// `UsageTests.testPollDoesNotNeedTheMainThread` holds it.
     nonisolated static let windowSeconds: TimeInterval = 7 * 86_400
 
+    /// The sliding window the per-row *rate* is counted over.
+    ///
+    /// **An hour, and the length is the whole mechanism rather than a taste.**
+    /// The gateway's aggregates are windowed — a session's block covers the spend
+    /// inside the window and nothing before it (measured; §2.9) — so the tokens it
+    /// reports for the last 3600 s are already tokens per hour. Nothing divides
+    /// anything. Change this number and the figure quietly stops being a rate
+    /// while keeping its label: over two hours it would report twice the spend and
+    /// call it an hourly rate, and there is no arithmetic anywhere downstream to
+    /// notice.
+    ///
+    /// A second window rather than a slice of the week's, because the week's
+    /// answer cannot be sliced: the gateway hands back one aggregate per session
+    /// with nothing to split it by, so the only way to ask about an hour is to ask
+    /// about an hour. The cost of asking is small and was measured rather than
+    /// assumed — 6.7 KiB against 107.8 KiB for the week's body (2026-08-27, live
+    /// gateway, 8 sessions in the hour against 115 in the week), so the pass grows
+    /// by about 6%: 0.39 MB/h at the once-a-minute cadence, against the 6.3 MB/h
+    /// the week's body already costs.
+    ///
+    /// `nonisolated`, and this is the third line in the file that must not lose
+    /// the keyword — but **what guards it is both of the things that guard the
+    /// other two, which is true of neither of them**, and that was measured by
+    /// taking the keyword off (2026-08-27) rather than reasoned from the
+    /// neighbours.
+    ///
+    /// The compiler objects, the way it does for `allowanceIntervalSeconds`: most
+    /// of the reads here sit inside the `async let` autoclosures, which are
+    /// `@Sendable` and nonisolated, so there is nowhere to put an implicit hop and
+    /// the build stops being clean under `-strict-concurrency=complete` — five
+    /// warnings, "main actor-isolated static property … cannot be accessed from
+    /// outside of the actor".
+    ///
+    /// And the pass deadlocks anyway, the way it does for `windowSeconds`: the
+    /// read in `sessionsBlame`'s argument is an ordinary one in the function body,
+    /// it hops, and everything after it — both session calls and the walk over the
+    /// transcript directories — runs on the main thread.
+    /// `UsageTests.testPollDoesNotNeedTheMainThread` fails on its timeout at
+    /// 5.117 s, and `testTheAllowancePassDoesNotNeedTheMainThread` at 5.006 s.
+    /// The timeout is what makes those failures rather than runs that never come
+    /// back.
+    nonisolated static let hourWindowSeconds: TimeInterval = 3600
+
     /// How often the accounts' histories are fetched, which is not how often the
     /// gateway is polled.
     ///
@@ -189,9 +232,18 @@ final class UsageStore: ObservableObject {
     /// behind the allowance are asked for once every
     /// `allowanceIntervalSeconds`, and every other pass steps over them with the
     /// previous figure untouched.
+    ///
+    /// `projectsDirectory` is a test seam and nothing else — the same defaulted
+    /// argument `UsageIndex.slugsBySessionId` and `ClaudeSessions.sessionTimes`
+    /// already carry, and for the same reason: the fold onto slugs is only
+    /// exercisable against a transcript tree that can be built, and the union the
+    /// two reports resolve through is a rule that would otherwise be held by
+    /// nothing.
     nonisolated static func poll(client: UsageClient,
                                  previous: UsageSnapshot,
-                                 now: Date = Date()) async -> UsageSnapshot {
+                                 now: Date = Date(),
+                                 projectsDirectory: URL = ClaudeSessions.projectsDirectory)
+        async -> UsageSnapshot {
         var result = previous
 
         do {
@@ -274,21 +326,75 @@ final class UsageStore: ObservableObject {
             }
         }
 
-        do {
-            let report = try await client.sessions(since: now.addingTimeInterval(-windowSeconds))
-            let identifiers = Set(report.sessions.map(\.sessionId))
+        // The sessions half, which is now two questions to one endpoint: the week
+        // a row's total spend is counted over, and the sliding hour beside it that
+        // makes the same question's answer a rate.
+        //
+        // Started together rather than one after the other, for the reason the
+        // allowance half's pair is: the half costs one round of
+        // `UsageClient.timeoutSeconds` instead of two. Awaited separately so each
+        // can be blamed on its own — both go to `/gw/sessions`, so the path alone
+        // does not say which failed, and the blame names the window (§4).
+        async let weekAttempt = attempt {
+            try await client.sessions(since: now.addingTimeInterval(-windowSeconds))
+        }
+        async let hourAttempt = attempt {
+            try await client.sessions(since: now.addingTimeInterval(-hourWindowSeconds))
+        }
+        let week = await weekAttempt
+        let hour = await hourAttempt
+
+        // **One resolution for both reports.** `slugsBySessionId` walks every slug
+        // directory under `~/.claude/projects` and is the expensive part of this
+        // pass (§6); resolving each report on its own would walk the same
+        // directories twice a minute for an answer the first walk already holds.
+        // The union rather than the week's identifiers alone, and that is not
+        // belt-and-braces: the week's list is capped at the gateway's 200 largest
+        // consumers, so a session that spent little over the week but is running
+        // right now can be in the hour's report and absent from the week's. Folding
+        // the hour against a map built from the week's ids would file exactly that
+        // session — the live one — as spend with no owner.
+        var identifiers = Set<String>()
+        if case .answered(let report) = week { identifiers.formUnion(report.sessions.map(\.sessionId)) }
+        if case .answered(let report) = hour { identifiers.formUnion(report.sessions.map(\.sessionId)) }
+        let slugsBySessionId = UsageIndex.slugsBySessionId(for: identifiers,
+                                                          projectsDirectory: projectsDirectory)
+
+        // Each report updates its own figures, and one failing does not discard
+        // the other's. This is deliberately *not* the allowance half's rule, where
+        // one lost request takes both figures with it: there the two requests are
+        // two halves of one ratio and a ratio of one half is nothing, while here
+        // they are two independent answers to the same question over two windows.
+        // A week's spend thrown away because the hour timed out would be a figure
+        // deleted for no reason.
+        var blame: [String] = []
+        switch week {
+        case .answered(let report):
             let folded = UsageIndex.fold(sessions: report.sessions,
-                                         slugsBySessionId: UsageIndex.slugsBySessionId(for: identifiers))
+                                         slugsBySessionId: slugsBySessionId)
             result.since = report.since
             result.truncated = report.truncated
             result.tokensBySlug = folded.tokensBySlug
             result.contested = folded.contested
             result.unmatched = folded.unmatched
             result.unmatchedSessions = folded.unmatchedSessions
-            result.sessionsFailure = nil
-        } catch {
-            result.sessionsFailure = "/gw/sessions: \(error)"
+        case .failed(let reason):
+            blame.append(sessionsBlame(window: windowSeconds, reason: reason))
         }
+        switch hour {
+        case .answered(let report):
+            // Folded exactly as the week is, against the same map and by the same
+            // function: the contested and unmatched policies are `fold`'s, and a
+            // second policy for the same question would be two answers to "whose
+            // spend is this" living in one snapshot.
+            let folded = UsageIndex.fold(sessions: report.sessions,
+                                         slugsBySessionId: slugsBySessionId)
+            result.hourlyTokensBySlug = folded.tokensBySlug
+            result.hourlyContested = folded.contested
+        case .failed(let reason):
+            blame.append(sessionsBlame(window: hourWindowSeconds, reason: reason))
+        }
+        result.sessionsFailure = blame.isEmpty ? nil : blame.joined(separator: "; ")
 
         return result
     }
@@ -329,6 +435,22 @@ final class UsageStore: ObservableObject {
     private nonisolated static func attempt<Answer: Sendable>(
         _ work: @Sendable () async throws -> Answer) async -> Attempt<Answer> {
         do { return .answered(try await work()) } catch { return .failed("\(error)") }
+    }
+
+    /// The blame one of the two session calls leaves, naming the window it asked
+    /// for as well as the path.
+    ///
+    /// Both calls go to `/gw/sessions`, so the path alone names neither — and a
+    /// half that fails without saying which request is a half nobody can debug
+    /// (§4). The window is rendered from the constant rather than written out, so
+    /// moving either constant moves its own label instead of leaving a blame that
+    /// names a window nothing asks for.
+    /// Named `window` rather than `windowSeconds` on purpose: the latter would
+    /// shadow the week's constant inside this body, so a line added here later and
+    /// meaning the constant would silently get the argument instead.
+    private nonisolated static func sessionsBlame(window: TimeInterval,
+                                                  reason: String) -> String {
+        "/gw/sessions?since=-\(Int(window / 3600))h: \(reason)"
     }
 
     /// One history per account, in parallel, keyed by the label that was

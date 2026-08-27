@@ -1172,8 +1172,18 @@ final class UsageStoreTests: XCTestCase {
     /// history`) begins with the quota endpoint's and would otherwise be served
     /// the quota body — which decodes into nothing and would look like a
     /// malformed gateway rather than a test that misrouted itself.
+    /// - Parameters:
+    ///   - sessionsBySince: a body for one particular `/gw/sessions` window,
+    ///     keyed by the `since` it asks for. The pass makes up to three calls to
+    ///     that one path — the allowance half's, the week's and the sliding
+    ///     hour's — so a test that needs to tell them apart has to answer them
+    ///     apart; anything not named here falls back to `sessions`.
+    ///   - unreachableSince: the windows that fail instead of answering, same key.
+    ///     Failing *one* window is the only way to ask whether the blame names it.
     private func transport(usage: String? = UsageFixtures.usage,
                            sessions: String? = "{\"since\": 1786761516, \"sessions\": []}",
+                           sessionsBySince: [Int: String] = [:],
+                           unreachableSince: Set<Int> = [],
                            history: String? = UsageStoreTests.risingHistory,
                            historyByLabel: [String: String] = [:],
                            status: Int = 200,
@@ -1189,7 +1199,14 @@ final class UsageStoreTests: XCTestCase {
                 let label = request.url?.pathComponents.dropLast().last ?? ""
                 body = historyByLabel[label] ?? history
             } else if path.hasSuffix("/sessions") {
-                body = sessions
+                let since = request.url.flatMap {
+                    URLComponents(url: $0, resolvingAgainstBaseURL: false)?
+                        .queryItems?.first { $0.name == "since" }?.value
+                }.flatMap(Int.init)
+                if let since, unreachableSince.contains(since) {
+                    throw UsageError.unreachable("nothing listening")
+                }
+                body = since.flatMap { sessionsBySince[$0] } ?? sessions
             } else {
                 body = usage
             }
@@ -1253,16 +1270,20 @@ final class UsageStoreTests: XCTestCase {
         let histories = log.windows(of: "/history")
         let sessions = log.windows(of: "/sessions")
         XCTAssertEqual(histories.count, 1)
-        XCTAssertEqual(sessions.count, 2,
-                       "the allowance half asks a question of its own, and it asks it once")
+        XCTAssertEqual(sessions.count, 3, """
+            the allowance half asks a question of its own and asks it once, and the panel's \
+            own figures are asked over two windows beside it — the week and the sliding hour
+            """)
+        // The allowance half runs before the other two and is the only one of the
+        // three recorded in a fixed position; the week's and the hour's calls are
+        // started together, so which of them the log sees first is a race and
+        // asking about their order would be asking about the scheduler.
         XCTAssertEqual(sessions.first, histories.first, """
             the points and the tokens were counted over two different windows, which makes their \
             ratio the price of nothing
             """)
-        XCTAssertEqual(sessions.last ?? 0,
-                       (now.timeIntervalSince1970 - UsageStore.windowSeconds).rounded(.down),
-                       accuracy: 1,
-                       "the week the panel's own figures are counted over moved with it")
+        XCTAssertTrue(sessions.contains(now.timeIntervalSince1970 - UsageStore.windowSeconds),
+                      "the week the panel's own figures are counted over moved: got \(sessions)")
     }
 
     /// A good pass produces both rates, and the arithmetic behind the second one
@@ -1420,10 +1441,15 @@ final class UsageStoreTests: XCTestCase {
 
         let failure = try XCTUnwrap(snapshot.failureText)
         XCTAssertTrue(failure.contains("/gw/usage: unreachable"), "got \(failure)")
-        XCTAssertTrue(failure.contains("/gw/sessions: unreachable"), "got \(failure)")
+        // Both session windows, each named: with a gateway that is not there they
+        // fail together, and a line naming only one of them would read as though
+        // the other had answered.
+        XCTAssertTrue(failure.contains("/gw/sessions?since=-168h: unreachable"), "got \(failure)")
+        XCTAssertTrue(failure.contains("/gw/sessions?since=-1h: unreachable"), "got \(failure)")
         XCTAssertLessThan(elapsed, 5,
                           "a refused connection is immediate; this waited like a pass that hung")
         XCTAssertTrue(snapshot.tokensBySlug.isEmpty)
+        XCTAssertTrue(snapshot.hourlyTokensBySlug.isEmpty)
         XCTAssertNil(snapshot.fleetSevenDayMean)
     }
 
@@ -1445,6 +1471,194 @@ final class UsageStoreTests: XCTestCase {
         }
         XCTAssertEqual(semaphore.wait(timeout: .now() + 5), .success,
                        "the pass waited for a main thread that is standing right here")
+    }
+
+    // MARK: - The sliding hour
+
+    private func makeProjectsDirectory() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("usage-hour-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return root
+    }
+
+    /// A transcript filed under the slug of `directory`, where Claude Code files
+    /// one. Never opened — the slug of the directory is the whole signal.
+    private func file(_ sessionId: String, under directory: String, in root: URL) throws {
+        let slug = root.appendingPathComponent(ClaudeSessions.slug(forPath: directory))
+        try FileManager.default.createDirectory(at: slug, withIntermediateDirectories: true)
+        try Data("not json at all".utf8).write(to: slug.appendingPathComponent("\(sessionId).jsonl"))
+    }
+
+    /// A `/gw/sessions` body naming the given sessions, each with `input` input
+    /// tokens and nothing else — so a figure that arrives is traceable to the
+    /// window that carried it.
+    private static func sessionsBody(_ sessionIds: [String], input: Int) -> String {
+        let items = sessionIds.map {
+            "{\"session_id\": \"\($0)\", \"input_tokens\": \(input), \"output_tokens\": 0, "
+                + "\"cache_creation_input_tokens\": 0, \"cache_read_input_tokens\": 0}"
+        }
+        return "{\"since\": 1786761516, \"sessions\": [\(items.joined(separator: ","))]}"
+    }
+
+    /// **The hour is asked for as an hour, and that length is the figure's entire
+    /// claim to being a rate.**
+    ///
+    /// The gateway's aggregates are windowed — measured, §2.9 — so the spend it
+    /// reports for the last 3600 s already *is* tokens per hour, and no code
+    /// anywhere divides it by anything. Which is exactly why the constant needs
+    /// holding: at two hours the row would print twice the rate under the same
+    /// label, and every test of the arithmetic would stay green, there being no
+    /// arithmetic to fail. So the value is asserted with the reasoning beside it —
+    /// the pattern `historyWindowSeconds` already uses for a bound no fixture can
+    /// be walked to.
+    ///
+    /// Two halves that *are* walkable stand next to it. The request must actually
+    /// go out over this window, and the hour and the week must stay two different
+    /// questions: collapse them and the pass pays twice for one body while the
+    /// "rate" silently becomes the week's total.
+    func testTheHourlyFigureIsAskedOverExactlyOneSlidingHour() async {
+        let log = RequestLog()
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        _ = await UsageStore.poll(client: client(transport(log: log)), previous: .empty, now: now)
+
+        let windows = log.windows(of: "/sessions")
+        XCTAssertTrue(windows.contains(now.timeIntervalSince1970 - UsageStore.hourWindowSeconds),
+                      "no call asked for the sliding hour; the pass asked for \(windows)")
+        XCTAssertEqual(Set(windows).count, 3, """
+            the pass asks /gw/sessions over three windows — the allowance's, the week's and \
+            the hour's — and two of them collapsed into one, so some figure is now counted \
+            over a window that is not its own: got \(windows)
+            """)
+        XCTAssertEqual(UsageStore.hourWindowSeconds, 3600, """
+            one hour exactly. The row prints the spend inside this window as tokens per hour \
+            with no division anywhere, so any other value relabels the figure rather than \
+            rescaling it. Move it and the docblock above says what else has to move
+            """)
+        XCTAssertLessThan(UsageStore.hourWindowSeconds, UsageStore.windowSeconds,
+                          "the rate and the total became one question over one window")
+    }
+
+    /// **Both reports resolve their slugs through one union of identifiers.**
+    ///
+    /// `slugsBySessionId` walks every slug directory under `~/.claude/projects`
+    /// and is the expensive part of the pass (§6), so it runs once — and once
+    /// means the identifiers of *both* reports have to go into it.
+    ///
+    /// The week's list alone will not do, and the reason is not caution: the
+    /// gateway keeps the 200 largest consumers and drops the rest, so a session
+    /// that has spent little across the week but is burning right now can be in
+    /// the hour's report and missing from the week's. Fold the hour against a map
+    /// built from the week's identifiers and that session — the live one, the only
+    /// kind this figure exists to show — is filed as spend with no owner.
+    ///
+    /// The fixture puts each window's session in a different project, so the two
+    /// folds cannot borrow each other's answer: the mutation "resolve the week's
+    /// identifiers only" empties the hourly map outright.
+    func testBothWindowsFoldTheirSlugsThroughOneUnionOfIdentifiers() async throws {
+        let root = try makeProjectsDirectory()
+        try file("s-week", under: "/Users/x/slow", in: root)
+        try file("s-hour", under: "/Users/x/busy", in: root)
+
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        let weekSince = Int(now.timeIntervalSince1970 - UsageStore.windowSeconds)
+        let hourSince = Int(now.timeIntervalSince1970 - UsageStore.hourWindowSeconds)
+
+        let snapshot = await UsageStore.poll(
+            client: client(transport(sessionsBySince: [
+                weekSince: Self.sessionsBody(["s-week"], input: 11),
+                hourSince: Self.sessionsBody(["s-hour"], input: 7)])),
+            previous: .empty, now: now, projectsDirectory: root)
+
+        XCTAssertEqual(snapshot.tokensBySlug["-Users-x-slow"]?.input, 11,
+                       "the week's own fold stopped working")
+        XCTAssertEqual(snapshot.hourlyTokensBySlug["-Users-x-busy"]?.input, 7, """
+            the hour's session resolved to no slug at all, which is what a map built from the \
+            week's identifiers alone does to a session the week's 200-session cap left out
+            """)
+        XCTAssertEqual(snapshot.unmatchedSessions, 0,
+                       "a session with a transcript right here was called ownerless")
+    }
+
+    /// One window failing leaves the other's figure standing, and the blame names
+    /// which window was lost.
+    ///
+    /// **Deliberately not the allowance half's rule.** There, one lost request
+    /// takes both figures with it, because the two are halves of one ratio and a
+    /// ratio of one half is nothing. Here they are two independent answers to the
+    /// same question over two windows: throwing away a week's spend because the
+    /// hour timed out would delete a figure for no reason at all.
+    ///
+    /// And both calls go to `/gw/sessions`, so the path names neither — a half
+    /// that fails without saying which request is a half nobody can debug (§4).
+    /// Each direction is checked for the blame it should carry *and* for the blame
+    /// it should not: naming the window that answered sends the reader to the
+    /// wrong request, which is the whole failure this guards.
+    func testOneWindowFailingLeavesTheOtherStandingAndIsBlamedByName() async throws {
+        let root = try makeProjectsDirectory()
+        try file("s-week", under: "/Users/x/slow", in: root)
+        try file("s-hour", under: "/Users/x/busy", in: root)
+
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        let weekSince = Int(now.timeIntervalSince1970 - UsageStore.windowSeconds)
+        let hourSince = Int(now.timeIntervalSince1970 - UsageStore.hourWindowSeconds)
+        let bodies = [weekSince: Self.sessionsBody(["s-week"], input: 11),
+                      hourSince: Self.sessionsBody(["s-hour"], input: 7)]
+
+        let lostHour = await UsageStore.poll(
+            client: client(transport(sessionsBySince: bodies, unreachableSince: [hourSince])),
+            previous: .empty, now: now, projectsDirectory: root)
+        XCTAssertEqual(lostHour.tokensBySlug["-Users-x-slow"]?.input, 11,
+                       "the week answered and was discarded along with the hour")
+        XCTAssertTrue(lostHour.hourlyTokensBySlug.isEmpty,
+                      "a window that never answered left a figure behind")
+        XCTAssertEqual(lostHour.sessionsFailure?.contains("since=-1h"), true,
+                       "got \(lostHour.sessionsFailure ?? "no blame at all")")
+        XCTAssertEqual(lostHour.sessionsFailure?.contains("-168h"), false,
+                       "the week answered; naming it sends the reader to the wrong request")
+
+        let lostWeek = await UsageStore.poll(
+            client: client(transport(sessionsBySince: bodies, unreachableSince: [weekSince])),
+            previous: .empty, now: now, projectsDirectory: root)
+        XCTAssertEqual(lostWeek.hourlyTokensBySlug["-Users-x-busy"]?.input, 7,
+                       "the hour answered and was discarded along with the week")
+        XCTAssertTrue(lostWeek.tokensBySlug.isEmpty,
+                      "a window that never answered left a figure behind")
+        XCTAssertEqual(lostWeek.sessionsFailure?.contains("-168h"), true,
+                       "got \(lostWeek.sessionsFailure ?? "no blame at all")")
+        XCTAssertEqual(lostWeek.sessionsFailure?.contains("since=-1h"), false,
+                       "the hour answered; naming it sends the reader to the wrong request")
+    }
+
+    /// The hour is folded by the same `fold` as the week, so a session resumed in
+    /// another directory is set aside in both and counted in neither.
+    ///
+    /// A second policy for "whose spend is this" would put two answers to one
+    /// question in one snapshot. The cost of having no policy at all is worse than
+    /// it looks: dropping the hour's contested sessions would leave a project
+    /// being worked in *right now* reading as idle, for the single reason that its
+    /// chat was once resumed somewhere else.
+    func testTheHourSetsAsideAContestedSessionExactlyAsTheWeekDoes() async throws {
+        let root = try makeProjectsDirectory()
+        try file("s-both", under: "/Users/x/one", in: root)
+        try file("s-both", under: "/Users/x/two", in: root)
+
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        let hourSince = Int(now.timeIntervalSince1970 - UsageStore.hourWindowSeconds)
+        let snapshot = await UsageStore.poll(
+            client: client(transport(sessions: Self.sessionsBody(["s-both"], input: 9),
+                                     sessionsBySince: [
+                                        hourSince: Self.sessionsBody(["s-both"], input: 4)])),
+            previous: .empty, now: now, projectsDirectory: root)
+
+        XCTAssertEqual(snapshot.contested.map(\.slugs), [["-Users-x-one", "-Users-x-two"]])
+        XCTAssertEqual(snapshot.hourlyContested.map(\.slugs), [["-Users-x-one", "-Users-x-two"]],
+                       "the hour dropped a contested session the week kept")
+        XCTAssertEqual(snapshot.hourlyContested.first?.tokens.input, 4,
+                       "the hour's contested spend came from the week's body")
+        XCTAssertTrue(snapshot.hourlyTokensBySlug.isEmpty,
+                      "a contested session was counted onto a row after all")
     }
 
     // MARK: - The allowance's own half
