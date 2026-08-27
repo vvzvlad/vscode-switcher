@@ -63,7 +63,8 @@ enum ConsoleDump {
         let usage = UsageStore.pollOnce(config: config)
         let cache = UsageCache()
         cache.store(usage)
-        let snapshot = DataSource(config: config, usage: cache).snapshot()
+        let source = DataSource(config: config, usage: cache)
+        let snapshot = measuredSnapshot { source.snapshot() }
         if json {
             printJSON(snapshot)
         } else {
@@ -101,6 +102,7 @@ enum ConsoleDump {
             print("      title:     \(shorten(row.window?.title, 90))")
             print("      topic:     \(shorten(row.chatTopic, 90))")
             print("      model:     \(row.model ?? "-")   context: \(formatContext(row))   subagents: \(row.activeSubagents)")
+            print("      cpu:       \(cpuCell(for: row))   orphan processes: \(row.orphanCount)")
             if let usage = row.usage {
                 print("      usage:     \(formatTokens(usage))")
             }
@@ -124,7 +126,13 @@ enum ConsoleDump {
         if !strayed.isEmpty {
             print("Live sessions without a window: \(strayed.count)")
             for row in strayed {
-                print("  - \(title(row))  \(indicator(row))  [\(stateBreakdown(row))]  \(shorten(row.chatTopic, 60))")
+                // Bracket then percentage, in the order the panel's title line
+                // puts them: `title` carries the bracket, and the CPU follows
+                // it. These are the rows with agents on them, so leaving the
+                // figure off here was leaving it off exactly where it is worth
+                // reading.
+                print("  - \(title(row))  \(cpuCell(for: row))"
+                    + "  \(indicator(row))  [\(stateBreakdown(row))]  \(shorten(row.chatTopic, 60))")
             }
             print("")
         }
@@ -140,6 +148,10 @@ enum ConsoleDump {
                 + "  \(column(indicator(row), 12))"
                 + "  \(column(workspace, 9))"
                 + "  \(column(usageCell(for: row), 8))"
+                // The orphan count is not a column of its own: it is inside the
+                // brackets `nameCell` already prints, exactly as the panel
+                // prints it.
+                + "  \(column(cpuCell(for: row), 5))"
                 + "  \(activity(row, config: config))")
         }
     }
@@ -280,6 +292,51 @@ enum ConsoleDump {
     static func usageCell(for row: SwitcherRow) -> String {
         guard let value = row.usageInputEquivalent else { return "-" }
         return (row.usageIsLowerBound ? ">=" : "") + compact(value)
+    }
+
+    /// The snapshot the dump reports: the second one, a tick after the first.
+    ///
+    /// The CPU figure is a rate, and a rate is a difference between two sweeps
+    /// of the process table (SPEC §2.8). The agent takes a sweep a second and
+    /// always has a predecessor; a single-pass dump would print a dash on every
+    /// row for want of one. So the first snapshot is thrown away.
+    ///
+    /// The two builds are `SnapshotStore.activeInterval` apart, which is the
+    /// panel's own interval while it is on screen — the window is taken from the
+    /// panel's tick rather than chosen by the dump.
+    ///
+    /// It is not *equal* to the panel's window, and saying it was would be a
+    /// claim about code this function cannot see. The sweep happens partway
+    /// through each build, so the gap between the two sweeps is this sleep plus
+    /// the tail of the first build and the head of the second — the 40–180 ms of
+    /// disk that `index.projects` and `sessionTimes` spend (§6), on both sides.
+    /// A rate measured over 1.1 s and labelled as being over 1.0 s is off by
+    /// that fraction and no more, which is well inside what the figure is read
+    /// for; making the sleep chase the difference would need the build to report
+    /// when its sweep happened, which is machinery for a rounding error.
+    ///
+    /// A function rather than four lines inside `run` so that a test can hold
+    /// it to two calls: deleting the first pass costs nothing anywhere else,
+    /// and the dump would quietly print `-` down the whole column.
+    static func measuredSnapshot(_ take: () -> SwitcherSnapshot) -> SwitcherSnapshot {
+        _ = take()
+        Thread.sleep(forTimeInterval: SnapshotStore.activeInterval)
+        return take()
+    }
+
+    /// The CPU column: what the row's sessions are burning, or a dash.
+    ///
+    /// The panel's own label, so the dash and the number appear on exactly the
+    /// rows the panel shows them on — including the rows below one percent,
+    /// which print `-` here because that is what the panel draws there
+    /// (`SwitcherRowView.cpuLabel`). A dump that reported a tenth of a core the
+    /// panel is deliberately silent about would be a second opinion about the
+    /// same row.
+    ///
+    /// Internal so a test can hold it: which rows are burning anything at all
+    /// depends on the machine the dump runs on.
+    static func cpuCell(for row: SwitcherRow) -> String {
+        SwitcherRowView.cpuLabel(for: row) ?? "-"
     }
 
     /// `21.30M`, `914k`, `512`: the coarsest unit that still tells two numbers

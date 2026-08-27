@@ -826,7 +826,7 @@ final class RowStatusTests: XCTestCase {
         }
         // Subagents belong to a chat, so they are hung off the first one.
         if subagents > 0, !sessions.isEmpty { sessions[0].activeSubagents = subagents }
-        let aggregate = DataSource.aggregate(sessions)
+        let aggregate = DataSource.aggregate(sessions, cpu: [:], orphans: [:])
         return SwitcherRow(id: "project:/tmp/p",
                            kind: .project,
                            displayName: "p",
@@ -943,8 +943,8 @@ final class RowStatusTests: XCTestCase {
     /// the second half could not fire — this pins the invariant that makes it
     /// redundant, instead of the dead branch that hid behind it.
     func testASubagentCannotOutliveTheChatItRunsUnder() {
-        XCTAssertEqual(DataSource.aggregate([]).activeSubagents, 0)
-        XCTAssertNil(DataSource.aggregate([]).state)
+        XCTAssertEqual(DataSource.aggregate([], cpu: [:], orphans: [:]).activeSubagents, 0)
+        XCTAssertNil(DataSource.aggregate([], cpu: [:], orphans: [:]).state)
     }
 
     /// Half the invariant lives in `aggregate`, the other half in the promise
@@ -987,7 +987,7 @@ final class RowStatusTests: XCTestCase {
         let rows = snapshot.rows
         for row in rows {
             XCTAssertEqual(row.activeSubagents,
-                           DataSource.aggregate(row.sessions).activeSubagents,
+                           DataSource.aggregate(row.sessions, cpu: [:], orphans: [:]).activeSubagents,
                            "\(row.id)")
         }
         // Which for a row with no chats means zero, the case the dead `guard`
@@ -3517,4 +3517,1847 @@ final class HookScriptTests: XCTestCase {
 
     private static let hasJQ: Bool = ["/opt/homebrew/bin/jq", "/usr/local/bin/jq", "/usr/bin/jq"]
         .contains { FileManager.default.isExecutableFile(atPath: $0) }
+}
+
+/// Which processes belong to which session, and what a rate between two sweeps
+/// is allowed to mean (SPEC §2.8).
+///
+/// The attribution is asked directly rather than through a sweep of the machine
+/// the tests run on: through a sweep a wrong answer is a percentage that looks
+/// slightly off, which is also what a dozen unrelated mistakes look like.
+final class SessionProcessTests: XCTestCase {
+
+    private func facts(_ rows: [(pid: Int32, ppid: Int32, marker: Int32?)]) -> [SessionProcesses.Facts] {
+        rows.map { SessionProcesses.Facts(pid: $0.pid, ppid: $0.ppid, marker: $0.marker) }
+    }
+
+    private func key(_ pid: Int32, _ start: UInt64) -> SessionProcesses.Key {
+        SessionProcesses.Key(pid: pid, startTime: start)
+    }
+
+    /// One sweep's reading of a process. `ppid: 1` unless the fixture is about
+    /// the tree, so that a vanished process in it has no heir and its
+    /// already-reported total is owed by nobody.
+    private func counters(_ own: UInt64,
+                          child: UInt64 = 0,
+                          ppid: Int32 = 1) -> SessionProcesses.Counters {
+        SessionProcesses.Counters(ppid: ppid, own: own, child: child)
+    }
+
+    /// The rates alone, for the fixtures that start with an empty ledger — which
+    /// is every fixture that is not about the ledger itself. Those call
+    /// `SessionProcesses.rates` directly and read `debts` off the answer.
+    private func percents(previous: [SessionProcesses.Key: SessionProcesses.Counters],
+                          current: [SessionProcesses.Key: SessionProcesses.Counters],
+                          elapsed: TimeInterval) -> [SessionProcesses.Key: Double]? {
+        SessionProcesses.rates(previous: previous, current: current,
+                               elapsed: elapsed, debts: [:])?.percentByKey
+    }
+
+    /// A debt written down this instant, for the fixtures that hand the ledger
+    /// in rather than build it up over two passes. The ledger is keyed by the
+    /// **debtor** and names the survivor it is charged to inside the entry, so
+    /// both halves have to be given.
+    private func debt(_ nanos: UInt64,
+                      to heir: SessionProcesses.Key,
+                      age: TimeInterval = 0) -> SessionProcesses.Debt {
+        SessionProcesses.Debt(nanos: nanos, age: age, heir: heir)
+    }
+
+    /// The owner table `ProcessSampler` builds: attribution answers in pids,
+    /// because the process tree is pid-shaped, and the sum is over keys.
+    private func owners(_ attribution: SessionProcesses.Attribution,
+                        startTime: UInt64) -> [SessionProcesses.Key: Int32] {
+        var table: [SessionProcesses.Key: Int32] = [:]
+        for (pid, owner) in attribution.ownerByPID { table[key(pid, startTime)] = owner }
+        return table
+    }
+
+    // MARK: - The parent chain
+
+    /// The ordinary case, and the one that carries almost everything: 261 of the
+    /// 262 processes attributed on this machine came this way.
+    ///
+    /// The session's own process is in there too, mapped to itself — without
+    /// that the `claude` binary's own CPU, which is most of a busy session's,
+    /// would count towards nothing.
+    func testAChildBelongsToTheSessionItHangsFrom() {
+        let attribution = SessionProcesses.attribute(facts([(pid: 100, ppid: 1, marker: nil),
+                                                            (pid: 200, ppid: 100, marker: nil)]),
+                                                     sessionPIDs: [100])
+        XCTAssertEqual(attribution.ownerByPID, [100: 100, 200: 100])
+        XCTAssertEqual(attribution.orphansBySessionPID, [:])
+    }
+
+    /// And it is walked all the way up, not one step: an agent's `Bash` is a
+    /// shell under a shell under the tool runner.
+    func testTheChainIsWalkedToTheTop() {
+        let attribution = SessionProcesses.attribute(facts([(pid: 100, ppid: 1, marker: nil),
+                                                            (pid: 200, ppid: 100, marker: nil),
+                                                            (pid: 300, ppid: 200, marker: nil),
+                                                            (pid: 400, ppid: 300, marker: nil)]),
+                                                     sessionPIDs: [100])
+        XCTAssertEqual(attribution.ownerByPID[400], 100)
+        XCTAssertEqual(attribution.ownerByPID.count, 4)
+    }
+
+    /// A process below no session at all belongs to nobody, and says so by being
+    /// absent rather than by naming somebody.
+    func testAProcessUnderNoSessionIsNotAttributed() {
+        let attribution = SessionProcesses.attribute(facts([(pid: 500, ppid: 1, marker: nil)]),
+                                                     sessionPIDs: [100])
+        XCTAssertEqual(attribution.ownerByPID, [:])
+    }
+
+    // MARK: - The marker
+
+    /// The whole reason the marker exists: a process whose parent has exited
+    /// reparents to pid 1, which names nobody, while `CLAUDE_PID` in its
+    /// environment still names the session that started it.
+    ///
+    /// Verified live on this machine — three spin loops left behind by an
+    /// exiting shell reparented to launchd and turned up here as three orphans
+    /// of the session that had spawned them (SPEC §2.8).
+    func testAnOrphanIsClaimedByItsMarker() {
+        let attribution = SessionProcesses.attribute(facts([(pid: 100, ppid: 1, marker: nil),
+                                                            (pid: 200, ppid: 1, marker: 100)]),
+                                                     sessionPIDs: [100])
+        XCTAssertEqual(attribution.ownerByPID, [100: 100, 200: 100])
+        XCTAssertEqual(attribution.orphansBySessionPID, [100: 1])
+    }
+
+    /// And the rule that keeps the inherited junk out. The marker is passed
+    /// sideways — the `claude` binary itself carries the marker of whatever
+    /// launched VSCode — so 120 of the 136 markers on this machine name a
+    /// session that is not live, against 24 that are (26.08.2026). Most of what
+    /// this signal says is junk, and the count that comes off it would be junk
+    /// too. A marker is worth something only when the pid it names is
+    /// a live session, and the two halves of that are checked apart:
+    ///
+    /// - `900` is not in the process table at all: the session is gone;
+    /// - `800` is a perfectly live process that is simply not a session.
+    ///
+    /// The second is what stops "the marker names something that exists" from
+    /// passing for the rule. Both processes stay unattributed, and neither adds
+    /// an orphan to anybody.
+    func testAMarkerThatDoesNotNameALiveSessionIsIgnored() {
+        let attribution = SessionProcesses.attribute(facts([(pid: 100, ppid: 1, marker: nil),
+                                                            (pid: 800, ppid: 1, marker: nil),
+                                                            (pid: 200, ppid: 1, marker: 900),
+                                                            (pid: 300, ppid: 1, marker: 800)]),
+                                                     sessionPIDs: [100])
+        XCTAssertNil(attribution.ownerByPID[200])
+        XCTAssertNil(attribution.ownerByPID[300])
+        XCTAssertEqual(attribution.orphansBySessionPID, [:])
+    }
+
+    /// When both signals speak and disagree, the chain wins and the marker is
+    /// not even consulted: a descendant of session A carrying a marker naming
+    /// session B is a process A spawned out of an environment B had already
+    /// polluted.
+    ///
+    /// Zero such cases on live data (measured over 740 processes and 25
+    /// sessions), which is exactly why the rule is written down and asked here:
+    /// otherwise it is whatever order the code happens to check in.
+    func testTheChainWinsOverAMarkerNamingAnotherLiveSession() {
+        let attribution = SessionProcesses.attribute(facts([(pid: 100, ppid: 1, marker: nil),
+                                                            (pid: 300, ppid: 1, marker: nil),
+                                                            (pid: 200, ppid: 100, marker: 300)]),
+                                                     sessionPIDs: [100, 300])
+        XCTAssertEqual(attribution.ownerByPID[200], 100)
+        // And it is not an orphan of anybody: nothing was lost, so nothing was
+        // recovered.
+        XCTAssertEqual(attribution.orphansBySessionPID, [:])
+    }
+
+    /// The marker is refused to everything hanging under the tree the sessions
+    /// themselves hang under, however live the session it names (SPEC §2.8).
+    ///
+    /// The shape is the editor's, and it is ordinary rather than exotic: VSCode
+    /// (`10`) was started with `code .` from a session that is still running, so
+    /// every process it runs — the plugin host `20`, a language server `40`, a
+    /// second `claude` typed into a neighbouring terminal — carries that
+    /// session's `CLAUDE_PID`. None of them lost a parent. Counting them as
+    /// orphans would put the whole editor's CPU on one row.
+    ///
+    /// On this machine the tree currently holds **80** processes the chain does
+    /// not place, and it works today only because the marker they carry names a
+    /// session that is dead — the accident this rule replaces.
+    func testTheEditorsOwnTreeIsNotAnOrphanOfTheSessionThatLaunchedIt() {
+        let attribution = SessionProcesses.attribute(facts([(pid: 10, ppid: 1, marker: 100),
+                                                            (pid: 20, ppid: 10, marker: 100),
+                                                            (pid: 30, ppid: 20, marker: nil),
+                                                            (pid: 40, ppid: 20, marker: 100),
+                                                            (pid: 100, ppid: 30, marker: 100)]),
+                                                     sessionPIDs: [100])
+        // The session itself, and nothing above or beside it.
+        XCTAssertEqual(attribution.ownerByPID, [100: 100])
+        XCTAssertEqual(attribution.orphansBySessionPID, [:])
+    }
+
+    /// And the rule must not cost a real orphan, which is the half that makes it
+    /// worth having. Verified on live data as well — 6 marker claims on this
+    /// machine, 6 kept, 0 refused — and asked here in both the shapes that
+    /// occurred there.
+    ///
+    /// `200` is the plain case: its parent exited and launchd adopted it.
+    /// `300` is the one a rule about ancestors could plausibly get wrong — it
+    /// still has its parent, and its parent is `200`. Five of the six live
+    /// claims were of that kind: a detached `python` with `docker` and two
+    /// `ssh` underneath it. Nothing in that chain is above a session, so
+    /// nothing in it is refused.
+    func testAnOrphanAndEverythingUnderItStillCount() {
+        let attribution = SessionProcesses.attribute(facts([(pid: 10, ppid: 1, marker: nil),
+                                                            (pid: 100, ppid: 10, marker: nil),
+                                                            (pid: 200, ppid: 1, marker: 100),
+                                                            (pid: 300, ppid: 200, marker: 100)]),
+                                                     sessionPIDs: [100])
+        XCTAssertEqual(attribution.ownerByPID[200], 100)
+        XCTAssertEqual(attribution.ownerByPID[300], 100)
+        XCTAssertEqual(attribution.orphansBySessionPID, [100: 2])
+    }
+
+    /// A chain the sweep cannot follow to the end proves nothing, and must not
+    /// be read as "detached" (SPEC §2.8).
+    ///
+    /// The hole is ordinary, not exotic. `proc_pid_rusage` refuses another
+    /// user's process, so that row is dropped — and the row it drops has
+    /// children of ours: `/usr/bin/login` is root-owned and refuses both calls
+    /// while the login shell under it answers both, which is the shape of every
+    /// Terminal.app tab. Of 266 foreign-parent/our-child pairs on this machine
+    /// 265 are launchd, already excluded by the walk stopping above pid 1, and
+    /// one is `login`.
+    ///
+    /// So `200` here is a process in a second terminal tab carrying a marker
+    /// inherited sideways from the live session `100`. Its parent `20` is alive
+    /// and well; the walk merely runs out of links at `6`, the `login` that was
+    /// dropped. Reading that as "nothing above it" manufactures an orphan under
+    /// a living parent — the flickering counter, arriving by another door.
+    ///
+    /// `300` is the control half, and it is what stops the fix from being "deny
+    /// every marker": a real orphan reaches pid 1 and is claimed as before. A
+    /// test without it stays green when the walk is made to return `broken` for
+    /// everything.
+    func testAChainTheSweepCannotFollowDoesNotManufactureAnOrphan() {
+        let attribution = SessionProcesses.attribute(facts([(pid: 100, ppid: 10, marker: nil),
+                                                            (pid: 10, ppid: 5, marker: nil),
+                                                            (pid: 200, ppid: 20, marker: 100),
+                                                            (pid: 20, ppid: 6, marker: 100),
+                                                            (pid: 300, ppid: 1, marker: 100)]),
+                                                     sessionPIDs: [100])
+        XCTAssertNil(attribution.ownerByPID[200])
+        XCTAssertNil(attribution.ownerByPID[20])
+        XCTAssertEqual(attribution.ownerByPID[300], 100)
+        XCTAssertEqual(attribution.orphansBySessionPID, [100: 1])
+    }
+
+    /// The three answers the walk has, asked one at a time, because `attribute`
+    /// can only show two of them apart at a time.
+    func testTheChainWalkTellsRunningOutOfLinksApartFromReachingTheTop() {
+        let parents: [Int32: Int32] = [7: 6, 6: 5, 4: 3, 3: 1, 9: 9]
+        XCTAssertEqual(SessionProcesses.walkUp(from: 7, parents: parents, to: [6]), .found(6))
+        XCTAssertEqual(SessionProcesses.walkUp(from: 7, parents: parents, to: [7]), .found(7))
+        // `5` has no line of its own: the walk has nowhere left to go.
+        XCTAssertEqual(SessionProcesses.walkUp(from: 7, parents: parents, to: [42]), .broken)
+        XCTAssertEqual(SessionProcesses.walkUp(from: 4, parents: parents, to: [42]), .reachedTop)
+        // A ring is a chain that leads nowhere, which is `broken`, not the top.
+        XCTAssertEqual(SessionProcesses.walkUp(from: 9, parents: parents, to: [42]), .broken)
+    }
+
+    /// launchd is above everything, so it must not be on the list: with pid 1 in
+    /// it the rule would refuse every marker on the machine and quietly report
+    /// no orphans ever.
+    func testTheAncestorListStopsBelowLaunchd() {
+        let ancestors = SessionProcesses.sessionAncestors(of: [100], parents: [100: 10, 10: 1])
+        XCTAssertEqual(ancestors, [10])
+    }
+
+    /// The parent table is read one process at a time while the machine goes on
+    /// forking, so a snapshot of it is not guaranteed to be a tree. A cycle in
+    /// it must end the walk rather than spin inside a function that runs once or
+    /// twice a second.
+    ///
+    /// Run with a timeout and off this thread, because the regression this
+    /// guards against is a test run that never finishes rather than one that
+    /// fails. Removing the visited set hangs here instead of going red, and the
+    /// timeout is what turns that back into a failure.
+    func testACycleInTheParentGraphEndsTheWalk() {
+        let done = expectation(description: "attribution returned")
+        let input = facts([(pid: 100, ppid: 1, marker: nil),
+                           (pid: 200, ppid: 300, marker: nil),
+                           (pid: 300, ppid: 400, marker: nil),
+                           (pid: 400, ppid: 200, marker: nil)])
+        DispatchQueue.global().async {
+            let attribution = SessionProcesses.attribute(input, sessionPIDs: [100])
+            // The ring reaches no session, so none of the three is claimed.
+            XCTAssertEqual(attribution.ownerByPID, [100: 100])
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 5)
+    }
+
+    // MARK: - Rates
+
+    /// A whole core busy for the whole interval is 100%, and four threads on
+    /// four cores are 400 — the convention `top` prints, and the reason the
+    /// figure is not clamped.
+    func testARateIsAPercentageOfOneCore() throws {
+        let rates = try XCTUnwrap(percents(previous: [key(1, 10): counters(0),
+                                                                    key(2, 10): counters(0)],
+                                           current: [key(1, 10): counters(2_000_000_000),
+                                                                   key(2, 10): counters(8_000_000_000)],
+                                           elapsed: 2))
+        XCTAssertEqual(try XCTUnwrap(rates[key(1, 10)]), 100, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(rates[key(2, 10)]), 400, accuracy: 0.001)
+    }
+
+    /// The first pass after launch has one sweep and no predecessor to subtract,
+    /// and answers "not measured" rather than "idle". Zero is below the floor
+    /// as well as being the division guard, and either way there is nothing to
+    /// report.
+    func testTheFirstSweepHasNoRateToReport() {
+        XCTAssertNil(percents(previous: [:],
+                              current: [key(1, 10): counters(500)],
+                              elapsed: 0))
+    }
+
+    /// A gap too *short* is refused as well, and that is the end of the scale
+    /// the panel actually lives at: three paths reach `refresh()` without the
+    /// timer — the panel sliding out refreshes immediately, `apply` refreshes
+    /// again when one was requested mid-build, and the watcher debounces at
+    /// 0.15 s while the state hook renames files on every transition.
+    ///
+    /// Asked in seconds rather than through the constant, for the reason the
+    /// ceiling is: through `minimumSampleSeconds` the test says only that the
+    /// guard compares against whatever it compares against.
+    ///
+    /// The numbers are the promise the constant makes. It has to sit above the
+    /// watcher's 0.15 s and below `SnapshotStore.activeInterval` — the fastest
+    /// tick the panel has — because a floor *on* the tick is rejected by a few
+    /// milliseconds of jitter every other time.
+    func testAGapTooShortToDivideIsNotReported() {
+        let previous = [key(1, 10): counters(0)]
+        let current = [key(1, 10): counters(1_000_000_000)]
+        func rate(after elapsed: TimeInterval) -> [SessionProcesses.Key: Double]? {
+            percents(previous: previous, current: current, elapsed: elapsed)
+        }
+        XCTAssertNil(rate(after: 0.05))
+        XCTAssertNil(rate(after: 0.15))
+        XCTAssertNil(rate(after: 0.499))
+        XCTAssertNotNil(rate(after: 0.5))
+        XCTAssertNotNil(rate(after: 1))
+    }
+
+    /// A gap too long to call "now" is thrown away rather than reported. What
+    /// comes out of such a pair is a mean over the gap, and the row promises the
+    /// opposite.
+    ///
+    /// Both sides of the threshold, and in seconds rather than through the
+    /// constant: asked through `staleSampleSeconds` itself the test says only
+    /// "the guard compares against whatever it compares against", and stays
+    /// green for 3 s and for 600 s alike.
+    ///
+    /// The numbers here are the promises the constant makes. An ordinary slow
+    /// pass — the slowest tick is `SnapshotStore.idleInterval` = 2 s and a slow
+    /// assembly adds up to 0.18 s of disk to it (§6) — must never blank the
+    /// column. Ten of those ticks is the last gap that still counts as "now".
+    /// And a minute is a mean over a minute whatever the constant says.
+    func testAGapTooLongToCallNowIsNotReported() {
+        let previous = [key(1, 10): counters(0)]
+        let current = [key(1, 10): counters(1_000_000_000)]
+        func rate(after elapsed: TimeInterval) -> [SessionProcesses.Key: Double]? {
+            percents(previous: previous, current: current, elapsed: elapsed)
+        }
+        XCTAssertNotNil(rate(after: 2.2))
+        XCTAssertNotNil(rate(after: 20))
+        XCTAssertNil(rate(after: 20.001))
+        XCTAssertNil(rate(after: 60))
+    }
+
+    /// A pid that came back is a different process with a counter of its own.
+    /// Keyed on the number alone, the new process's small total minus the old
+    /// one's large one is a wrong answer — negative, or a wrong zero once
+    /// clamped. Keyed on the pair, there is simply no rate for it this pass,
+    /// which is the same answer a process that has only just appeared gets.
+    ///
+    /// The environment cache in `ProcessSampler` is keyed by the same pair and
+    /// for the same reason: a marker read from the process that used to have
+    /// this pid would name the wrong session for as long as the new one lives.
+    ///
+    /// The fixture is the way round that the mistake actually shows, and the
+    /// margin has to be wide enough to see. The pid's previous owner had burned
+    /// 0.4 s; the process holding it now has burned 0.5 s, all of it inside this
+    /// gap because it did not exist at the previous sweep. Keyed on the pair
+    /// that is 50%. Keyed on the pid alone the new process is mistaken for a
+    /// survivor and the dead one's total is subtracted from it: 10%.
+    ///
+    /// Two totals a hundredth apart would not tell those answers apart at all —
+    /// which is what the fixture was before short-lived processes started
+    /// counting for their whole total, and it would have gone quietly green.
+    /// The other way round — an old total larger than the new one — the
+    /// backwards-counter guard below catches by accident, and a fixture it
+    /// catches proves nothing about *this* rule.
+    ///
+    /// `ppid: 1` on the dead process on purpose: launchd is not in the table, so
+    /// it leaves no heir and its 0.4 s is charged to nobody. That rule has its
+    /// own test; this one is about the key.
+    func testAReusedPidGetsNoRateFromTheProcessThatHadItBefore() throws {
+        let rates = try XCTUnwrap(percents(previous: [key(7, 100): counters(400_000_000)],
+                                           current: [key(7, 200): counters(500_000_000)],
+                                           elapsed: 1))
+        XCTAssertEqual(try XCTUnwrap(rates[key(7, 200)]), 50, accuracy: 0.001)
+        XCTAssertEqual(rates.count, 1)
+    }
+
+    /// The counters are cumulative and never fall. One that did is a reading
+    /// from something else, and is dropped rather than clamped.
+    func testACounterThatWentBackwardsIsDropped() throws {
+        let rates = try XCTUnwrap(percents(previous: [key(1, 10): counters(5_000_000_000)],
+                                           current: [key(1, 10): counters(1_000_000_000)],
+                                           elapsed: 1))
+        XCTAssertEqual(rates, [:])
+    }
+
+    // MARK: - Rates: the processes that do not survive a sweep
+
+    /// The work an agent does is mostly done by processes that never live long
+    /// enough to be seen twice: every `Bash` call is a fresh `rg`, `git`, `cc`
+    /// or `node` living a fraction of a second. Asked only about the processes
+    /// present in both sweeps, the rate misses all of it — measured 26.08.2026,
+    /// a shell spawning and reaping a child every 0.15 s reported 0.3% against
+    /// 63.6–86.9% of a core actually burned, and 0.3% is under the 1% the row
+    /// prints anything above at all.
+    ///
+    /// The shell survives both sweeps and its `ri_child_*` is where the reaped
+    /// children landed, so the figure is its own delta plus that one. Here the
+    /// shell burned 0.1 s of its own and reaped 0.6 s of children: 70%.
+    func testCPUBurnedByChildrenReapedBetweenSweepsIsCounted() throws {
+        let rates = try XCTUnwrap(
+            percents(previous: [key(50, 1): counters(0, child: 0)],
+                     current: [key(50, 1): counters(100_000_000, child: 600_000_000)],
+                     elapsed: 1))
+        XCTAssertEqual(try XCTUnwrap(rates[key(50, 1)]), 70, accuracy: 0.001)
+    }
+
+    /// A process born since the previous sweep and still alive is the other half
+    /// of the same hole, and the smaller one. Its counter starts at zero at
+    /// birth, so all of it belongs to this gap and none of it has been reported
+    /// before.
+    func testAProcessBornSinceTheLastSweepCountsForItsWholeCounter() throws {
+        let rates = try XCTUnwrap(percents(previous: [:],
+                                           current: [key(60, 1): counters(250_000_000)],
+                                           elapsed: 1))
+        XCTAssertEqual(try XCTUnwrap(rates[key(60, 1)]), 25, accuracy: 0.001)
+    }
+
+    /// And this is why adding `ri_child_*` naively would be worse than the bug
+    /// it fixes. At the moment a child is reaped the parent's counter gains the
+    /// child's **entire lifetime**, the part earlier passes already reported
+    /// included. A `swift build` that ran ten minutes and then exited would put
+    /// 600 s of CPU inside one 1 s tick — some 60000%, on a row whose figure is
+    /// read as "what is this window doing to my machine right now".
+    ///
+    /// Here the child was last seen holding 600 s and burned 0.2 s more before
+    /// exiting; the parent burned 0.1 s of its own. The answer is 0.3 s over
+    /// 1 s — 30%, not 60030%.
+    func testReapingALongLivedChildDoesNotSpike() throws {
+        let previous = [key(50, 1): counters(1_000_000_000, child: 0),
+                        key(51, 1): counters(600_000_000_000, ppid: 50)]
+        let current = [key(50, 1): counters(1_100_000_000, child: 600_200_000_000)]
+        let rates = try XCTUnwrap(percents(previous: previous,
+                                           current: current,
+                                           elapsed: 1))
+        XCTAssertEqual(try XCTUnwrap(rates[key(50, 1)]), 30, accuracy: 0.001)
+    }
+
+    /// `ri_child_*` folds in the **whole subtree** of a reaped child, not the
+    /// child's own time alone — measured 26.08.2026 rather than read out of the
+    /// header, a grandchild burning 1.0 s under a child burning 0.3 s landed
+    /// 1.24 s in the grandparent at the moment the child was reaped. So what is
+    /// subtracted for a vanished process is its last-seen *total*, own and child
+    /// both.
+    ///
+    /// Here the middle process was last seen with 1 s of its own and 9 s of
+    /// reaped grandchildren, and went in this gap having burned nothing more.
+    /// Subtracting its own 1 s alone leaves 9.5 s of already-reported time
+    /// inside one tick — 950%. Subtracting the total leaves 0.5 s of the top
+    /// process's own work: 50%.
+    func testWhatIsSubtractedForAVanishedProcessIncludesWhatItHadReaped() throws {
+        let previous = [key(50, 1): counters(0, child: 0),
+                        key(51, 1): counters(1_000_000_000, child: 9_000_000_000, ppid: 50)]
+        let current = [key(50, 1): counters(500_000_000, child: 10_000_000_000)]
+        let rates = try XCTUnwrap(percents(previous: previous,
+                                           current: current,
+                                           elapsed: 1))
+        XCTAssertEqual(try XCTUnwrap(rates[key(50, 1)]), 50, accuracy: 0.001)
+    }
+
+    /// When a process and its parent go in the same gap, both totals travel up
+    /// to the first ancestor still standing, so both have to be subtracted off
+    /// there. Charging the subtraction to the immediate parent instead loses the
+    /// deeper one — and `sh -c 'cc …'`, where the compiler and the shell that
+    /// ran it both exit inside one tick, is the ordinary shape of it, not a
+    /// contrived one.
+    ///
+    /// `50` survives. `51` (its child) and `52` (its grandchild) both vanish,
+    /// last seen holding 2 s and 3 s. `50` gained all 5 s plus 0.4 s of new
+    /// work: the answer is 40%, and charging only `51` would leave 3 s of
+    /// already-reported time in the tick — 340%.
+    func testAChainThatVanishedTogetherIsSubtractedAtTheSurvivor() throws {
+        let previous = [key(50, 1): counters(0, child: 0),
+                        key(51, 1): counters(2_000_000_000, ppid: 50),
+                        key(52, 1): counters(3_000_000_000, ppid: 51)]
+        let current = [key(50, 1): counters(400_000_000, child: 5_000_000_000)]
+        let rates = try XCTUnwrap(percents(previous: previous,
+                                           current: current,
+                                           elapsed: 1))
+        XCTAssertEqual(try XCTUnwrap(rates[key(50, 1)]), 40, accuracy: 0.001)
+    }
+
+    /// A process that was there for both sweeps and burned nothing reports `0`,
+    /// not an absence. "Measured, and idle" and "not measured yet" are different
+    /// answers, the row draws them differently and `--dump --json` keeps them
+    /// apart (§3.1), and the difference is made right here: a session whose
+    /// every process falls out of this map has no figure at all.
+    ///
+    /// It fell out once. Summing signed nanoseconds and then keeping only what
+    /// came out above zero reads as tidying away the negatives and quietly takes
+    /// the zeros with it — every quiet session on the machine turned `nil`, and
+    /// the whole suite stayed green. A live probe caught it, so the case is
+    /// written down.
+    func testAProcessThatBurnedNothingReportsZeroRatherThanNothing() throws {
+        let rates = try XCTUnwrap(percents(previous: [key(80, 1): counters(7_000_000_000)],
+                                           current: [key(80, 1): counters(7_000_000_000)],
+                                           elapsed: 1))
+        XCTAssertEqual(try XCTUnwrap(rates[key(80, 1)]), 0)
+    }
+
+    // MARK: - Rates: the ledger
+
+    /// **A process that leaves the table has not necessarily handed its counter
+    /// over yet, so what it is owed is written down rather than deducted.**
+    ///
+    /// This fixture used to be `testAnOverSubtractedProcessIsFlooredAtZeroAndNotDropped`
+    /// and asserted `0` — it pinned the defect as the expected answer. Two live
+    /// shapes produce it and neither is exotic (SPEC §2.8): a **zombie**, which
+    /// keeps answering `proc_pid_rusage` while `PROC_PIDTBSDINFO` refuses it, so
+    /// the sweep drops the row a tick or more before the parent's `wait` lands;
+    /// and a descendant **reparented to launchd**, whose counter never arrives
+    /// anywhere at all. Deducted on disappearance, both take 9 s of
+    /// already-reported time off a process that has gained none of it, and the
+    /// row of a session burning a core reads as empty space.
+    ///
+    /// `80` burned 0.2 s of its own in this gap and gained nothing from `81`.
+    /// The answer is its own work — 20%, not 0 — and the 9 s goes on the ledger
+    /// to wait for growth that may or may not come.
+    func testAVanishedProcessIsWrittenDownAgainstItsHeirRatherThanDeducted() throws {
+        let previous = [key(80, 1): counters(0), key(81, 1): counters(9_000_000_000, ppid: 80)]
+        // `81` is gone and `80` has gained nothing: no `wait` yet, or launchd
+        // took it. From here the two are the same picture.
+        let current = [key(80, 1): counters(200_000_000)]
+        let measured = try XCTUnwrap(SessionProcesses.rates(previous: previous,
+                                                            current: current,
+                                                            elapsed: 1,
+                                                            debts: [:]))
+        XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(80, 1)]), 20, accuracy: 0.001)
+        // Keyed by the debtor, charged to the parent it was last seen under.
+        XCTAssertEqual(measured.debts[key(81, 1)]?.nanos, 9_000_000_000)
+        XCTAssertEqual(measured.debts[key(81, 1)]?.heir, key(80, 1))
+        XCTAssertEqual(measured.expired, 0)
+    }
+
+    /// And the pass where the reap really lands settles it, so the 9 s is
+    /// reported exactly once — never, and then not twice.
+    ///
+    /// The gap between a child's exit and its parent's `wait` is what this
+    /// bridges: short for a shell blocked in `wait4`, longer for anything
+    /// reaping on its own loop. Here `80` finally reaps, its `ri_child_*`
+    /// jumping by the child's whole lifetime — the 9 s already reported plus the
+    /// 0.4 s the child burned after it was last seen — and `80` burned 0.1 s of
+    /// its own. The answer is 0.5 s over 1 s, and the ledger comes back empty.
+    ///
+    /// Without the settlement this tick reports 950%; with the old deduct-on-
+    /// disappearance rule it reported 940% here and 0 on the pass before.
+    func testADebtIsSettledByTheGrowthOfTheLaterPassWhereTheReapLands() throws {
+        let previous = [key(80, 1): counters(200_000_000)]
+        let current = [key(80, 1): counters(300_000_000, child: 9_400_000_000)]
+        let measured = try XCTUnwrap(SessionProcesses.rates(previous: previous,
+                                                            current: current,
+                                                            elapsed: 1,
+                                                            debts: [key(81, 1): debt(9_000_000_000,
+                                                                                     to: key(80, 1))]))
+        XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(80, 1)]), 50, accuracy: 0.001)
+        XCTAssertNil(measured.debts[key(81, 1)], "a settled debt is not kept around")
+        XCTAssertEqual(measured.expired, 0)
+    }
+
+    /// The other shape, and the one the walk cannot tell from the first: the
+    /// parent died before its child, so the child was handed to launchd and
+    /// reaped there. Its counter left the tree and no survivor ever gains a
+    /// nanosecond of it — measured 26.08.2026 on a live fixture, a grandparent
+    /// whose grandchild burned 1.0 s saw its `ri_child_*` move by the middle
+    /// process's own 6229 mach units and nothing more.
+    ///
+    /// `inheritor` still finds the grandparent, because from the table this is
+    /// indistinguishable from "the chain died bottom-up and the grandparent
+    /// holds it all". What tells them apart is that the growth never arrives:
+    /// `min(debt, childDelta)` settles nothing, and the grandparent's tick keeps
+    /// its own 1.0 s. Deducted outright, the same tick reported 0 — the busy
+    /// session drawn as an idle one.
+    func testAGrandchildReapedByLaunchdTakesNothingOffTheSurvivor() throws {
+        let previous = [key(90, 1): counters(0),
+                        key(91, 1): counters(50_000_000, ppid: 90),
+                        key(92, 1): counters(24_000_000_000, ppid: 91)]
+        // The middle and the grandchild both went in this gap, and `90` gained
+        // nothing at all: launchd reaped what was left.
+        let current = [key(90, 1): counters(1_000_000_000)]
+        let measured = try XCTUnwrap(SessionProcesses.rates(previous: previous,
+                                                            current: current,
+                                                            elapsed: 1,
+                                                            debts: [:]))
+        XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(90, 1)]), 100, accuracy: 0.001)
+        // Two debtors, one heir, and each written down for its own total: the
+        // grandchild's 24 s travels up inside the middle process's, because from
+        // the table the middle process may well have reaped it on the way out.
+        XCTAssertEqual(measured.debts[key(91, 1)]?.nanos, 50_000_000)
+        XCTAssertEqual(measured.debts[key(92, 1)]?.nanos, 24_000_000_000)
+        XCTAssertEqual(measured.debts[key(91, 1)]?.heir, key(90, 1))
+        XCTAssertEqual(measured.debts[key(92, 1)]?.heir, key(90, 1))
+    }
+
+    /// **Finding 1 of the fourth review: growth is only ever spent on a debt it
+    /// could have carried.**
+    ///
+    /// `70` is busy and it reaps: `71` is an ordinary short-lived child, and its
+    /// whole life lands in `70`'s `ri_child_*` in this gap. `72` disappears in
+    /// the same gap, but the sweep last saw it under **pid 1** — its own parent
+    /// had gone in some earlier gap, launchd holds it, and its 4 s will never
+    /// arrive anywhere at all.
+    ///
+    /// So `72` is written down nowhere. Charged to the first surviving ancestor
+    /// instead, its 4 s would be taken off the growth that came from `71`, and
+    /// the tick of a process burning a core would read as nearly idle: 10%
+    /// against the true 110%. This is the whole reason a debt is addressed to
+    /// the debtor's **last-seen parent** — reparenting is visible in `ppid`, and
+    /// a walk that ignores it cannot see the counter leaving the tree.
+    ///
+    /// `70` burned 0.1 s of its own and gained 1.1 s from `71`, 0.1 s of which
+    /// had already been reported: 1.1 s over 1 s.
+    func testGrowthIsNeverSpentOnADebtItCouldNotHaveCarried() throws {
+        let previous = [key(70, 1): counters(0, child: 0),
+                        key(71, 1): counters(100_000_000, ppid: 70),
+                        key(72, 1): counters(4_000_000_000, ppid: 1)]
+        let current = [key(70, 1): counters(100_000_000, child: 1_100_000_000)]
+        let measured = try XCTUnwrap(SessionProcesses.rates(previous: previous,
+                                                            current: current,
+                                                            elapsed: 1,
+                                                            debts: [:]))
+        // `71`'s own 0.1 s is written down and settled by the growth that
+        // carried it, on this one pass. `72` is not written down at all — and
+        // it could not have been settled even if it had been, because 4 s does
+        // not fit inside 1.1 s of growth, so an empty ledger is the assertion.
+        //
+        // What this fixture can and cannot fail on is worth being straight
+        // about. The 110% catches settlement gone wrong in either direction
+        // (none of it, or too much). The launchd half it cannot fail on by
+        // itself: pid 1 is not in this table, so the walk stops for want of a
+        // row whether or not the rule is there — that half is
+        // `testACounterHandedToLaunchdIsNotChargedToLaunchd`, and the "growth
+        // belongs to its own debt" half is
+        // `testOneSurvivorsGrowthDoesNotSettleAnothersDebt`.
+        XCTAssertNil(measured.debts[key(72, 1)],
+                     "a counter launchd already held was written down against a survivor")
+        XCTAssertTrue(measured.debts.isEmpty)
+        XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(70, 1)]), 110, accuracy: 0.001)
+    }
+
+    /// The other half of that finding: **a debt is spent only against the growth
+    /// of the process it is addressed to**, and the fixture is built so that the
+    /// growth in it is somebody else's.
+    ///
+    /// `70` is holding a zombie child, `71`, whose 2 s have already been
+    /// reported and whose reap has not happened yet — nothing has arrived at
+    /// `70` at all. `75` is an unrelated process on the same machine that reaped
+    /// 5 s of children of its own in this gap, which on an agent's machine is
+    /// the ordinary state of `claude`: it reaps the next `Bash` on nearly every
+    /// tick.
+    ///
+    /// A ledger that pools what is owed and pays it out of whatever growth turns
+    /// up settles `71`'s debt from `75`'s reap: `75` reports 300% instead of
+    /// 500%, `70` is left owing nothing, and when the reap finally lands there
+    /// is nothing to take the reported part off — the spike back, one pass
+    /// later. Per debtor and per heir, `75`'s growth is not eligible for it.
+    func testOneSurvivorsGrowthDoesNotSettleAnothersDebt() throws {
+        let previous = [key(70, 1): counters(0, child: 0),
+                        key(75, 1): counters(0, child: 0),
+                        key(71, 1): counters(2_000_000_000, ppid: 70)]
+        let current = [key(70, 1): counters(0, child: 0),
+                       key(75, 1): counters(0, child: 5_000_000_000)]
+        let measured = try XCTUnwrap(SessionProcesses.rates(previous: previous,
+                                                            current: current,
+                                                            elapsed: 1,
+                                                            debts: [:]))
+        XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(75, 1)]), 500, accuracy: 0.001,
+                       "an unrelated process paid somebody else's debt")
+        XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(70, 1)]), 0, accuracy: 0.001)
+        // And the debt is still standing, addressed where it was written.
+        XCTAssertEqual(measured.debts[key(71, 1)]?.nanos, 2_000_000_000)
+        XCTAssertEqual(measured.debts[key(71, 1)]?.heir, key(70, 1))
+    }
+
+    /// And the stop at launchd is a rule of its own, not a by-product of who
+    /// answers the kernel.
+    ///
+    /// On this machine pid 1 never reaches the sweep at all — measured
+    /// 27.08.2026, it answers neither `proc_pid_rusage` nor `PROC_PIDTBSDINFO`,
+    /// while 318 of the 974 pids listed sit directly under it — so the walk in
+    /// `heir(of:)` stops there anyway, for want of a row to climb to, and taking
+    /// the `ppid > 1` test out failed **no** test in the suite. That is the
+    /// accident, not the rule: launchd is unreadable because the app runs as the
+    /// user, and the day it were readable every debt on the machine would be
+    /// addressed to the one process that reaps every orphan there is, so
+    /// unrelated growth would settle all of them within a tick.
+    ///
+    /// The fixture therefore puts launchd in the table and gives it what it
+    /// really has — growth from reaping somebody else — and asks that the 4 s
+    /// last seen under it change nothing: 10 s of growth over 1 s is 1000%,
+    /// which is what a machine full of exiting orphans looks like. Charged to
+    /// launchd, the debt would take 4 s off and report 600%.
+    func testACounterHandedToLaunchdIsNotChargedToLaunchd() throws {
+        let previous = [key(1, 1): counters(0, child: 0, ppid: 0),
+                        key(72, 1): counters(4_000_000_000, ppid: 1)]
+        let current = [key(1, 1): counters(0, child: 10_000_000_000, ppid: 0)]
+        let measured = try XCTUnwrap(SessionProcesses.rates(previous: previous,
+                                                            current: current,
+                                                            elapsed: 1,
+                                                            debts: [:]))
+        XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(1, 1)]), 1000, accuracy: 0.001)
+        XCTAssertTrue(measured.debts.isEmpty)
+    }
+
+    /// **Finding 2 of the fourth review: an unsettled debt travels with the
+    /// counters it was written against, instead of being forgiven.**
+    ///
+    /// `61` was holding a debt for a zombie child of its own — 100 s already
+    /// reported, nothing settled, because `61` had not called `wait` yet. In
+    /// this gap it finally reaps, and then exits; `60` reaps `61`. Everything
+    /// `61` ever accounted for lands in `60`'s `ri_child_*` at that moment, the
+    /// zombie's 100 s included, because a reaped process hands over its whole
+    /// subtree (`Counters.child`).
+    ///
+    /// Given up on at the moment its debtor left the table — which is what the
+    /// ledger did until this review — those 100 s have nothing left to take them
+    /// off, and `60`'s one-second tick reports them in full: 10000%, bounded
+    /// only by how long the zombie lived. Carried up with `61`'s own total
+    /// instead, they are deducted exactly once and the tick keeps the 0.3 s of
+    /// work that is genuinely new.
+    ///
+    /// Asked twice, because the two halves of it show in different places. When
+    /// the reap lands in the same gap the ledger comes out empty either way and
+    /// only the *figure* tells the two apart; when `61` is still a zombie
+    /// nothing has arrived at `60` yet, and the debt's new address is on the
+    /// ledger to be read.
+    func testAnUnsettledDebtTravelsUpWithTheCountersItWasWrittenAgainst() throws {
+        let previous = [key(60, 1): counters(0, child: 0),
+                        key(61, 1): counters(200_000_000, ppid: 60)]
+        let ledger = [key(62, 1): debt(100_000_000_000, to: key(61, 1))]
+
+        let arrived = try XCTUnwrap(
+            SessionProcesses.rates(previous: previous,
+                                   current: [key(60, 1): counters(0, child: 100_500_000_000)],
+                                   elapsed: 1, debts: ledger))
+        XCTAssertEqual(arrived.expired, 0, "the debt was given up on when its heir left the table")
+        XCTAssertEqual(try XCTUnwrap(arrived.percentByKey[key(60, 1)]), 30, accuracy: 0.001)
+
+        // `61` exited and `60` has not called `wait`: nothing has travelled yet,
+        // so both debts sit at `60` waiting for the pass where it does.
+        let pending = try XCTUnwrap(
+            SessionProcesses.rates(previous: previous,
+                                   current: [key(60, 1): counters(0, child: 0)],
+                                   elapsed: 1, debts: ledger))
+        XCTAssertEqual(pending.debts[key(62, 1)]?.heir, key(60, 1),
+                       "the debt was dropped when the process it was charged to left")
+        XCTAssertEqual(pending.debts[key(62, 1)]?.age, 1, "and it kept ageing while it travelled")
+        XCTAssertEqual(pending.debts[key(61, 1)]?.nanos, 200_000_000)
+        XCTAssertEqual(pending.expired, 0)
+    }
+
+    /// **What keeps the figure off the floor is that settlement is bounded by
+    /// the growth, not by the debt** — and the arithmetic is unsigned, so this
+    /// is the invariant that keeps the whole function from trapping rather than
+    /// a matter of taste. There is no clamp at the end to catch a negative,
+    /// because with the ledger nothing can produce one: each counter is guarded
+    /// forward, and `settled ≤ childDelta` leaves `own + (child - settled) ≥ 0`.
+    ///
+    /// The mutation that proves it is `settled = min(debt, child)` → `settled =
+    /// debt`: on this fixture the debt is 9 s against 0.4 s of growth, so the
+    /// subtraction underflows. **It surfaces as a crashed test run rather than a
+    /// clean failure** — a `UInt64` underflow traps — so a suite that aborts
+    /// here is this guard firing, not the suite breaking.
+    ///
+    /// The answer is the whole of the growth eaten by the debt and the process's
+    /// own 0.1 s left standing: 10%. And 8.6 s of the debt is still owed.
+    func testSettlementCannotOutrunTheGrowthItSettles() throws {
+        let previous = [key(80, 1): counters(0)]
+        let current = [key(80, 1): counters(100_000_000, child: 400_000_000)]
+        let measured = try XCTUnwrap(SessionProcesses.rates(previous: previous,
+                                                            current: current,
+                                                            elapsed: 1,
+                                                            debts: [key(81, 1): debt(9_000_000_000,
+                                                                                     to: key(80, 1))]))
+        XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(80, 1)]), 10, accuracy: 0.001)
+        XCTAssertEqual(measured.debts[key(81, 1)]?.nanos, 8_600_000_000)
+    }
+
+    /// And no debt can be settled beyond **its own** amount, which is what
+    /// keeps one debtor's reap from working off another's already-reported
+    /// time. Two debts stand against `80`, 0.2 s and 5 s, and 1 s of growth
+    /// arrives: it clears the first whole and takes 0.8 s off the second, so
+    /// 4.2 s is still owed and the tick reports the 0.1 s `80` burned itself.
+    ///
+    /// Settled as one pooled amount the totals come out the same, which is why
+    /// this is asked of the **records**: the ledger has to still know which
+    /// debtor owes what, or the ages below cannot be per debtor either.
+    func testGrowthIsSpreadOverDebtsWithoutOverpayingAnyOfThem() throws {
+        let previous = [key(80, 1): counters(0)]
+        let current = [key(80, 1): counters(100_000_000, child: 1_000_000_000)]
+        let measured = try XCTUnwrap(
+            SessionProcesses.rates(previous: previous, current: current, elapsed: 1,
+                                   debts: [key(81, 1): debt(200_000_000, to: key(80, 1), age: 5),
+                                           key(82, 1): debt(5_000_000_000, to: key(80, 1), age: 2)]))
+        XCTAssertNil(measured.debts[key(81, 1)], "the older debt was left standing")
+        XCTAssertEqual(measured.debts[key(82, 1)]?.nanos, 4_200_000_000)
+        XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(80, 1)]), 10, accuracy: 0.001)
+    }
+
+    /// **Finding 1 of the fifth review: a debt of nothing must not stop the
+    /// settlement of the debts behind it.**
+    ///
+    /// `settle` used to leave the loop on `take == 0`, and `take` is
+    /// `min(debt, left)` — zero for two unrelated reasons. The one it meant is
+    /// "the growth has run out". The one it did not is "*this* debt is zero",
+    /// and a zero debt sorts to the **front** of its heir's bucket: ages tie at
+    /// 0 and the tie-break is the lower pid. So the loop stopped on the first
+    /// entry and never reached the real one behind it.
+    ///
+    /// The pid order is the whole fixture. `81` owes nothing, `82` owes one
+    /// second, `80` gains exactly that second, and the answer is 0%: the growth
+    /// is the reap of already-reported time. Against the old code this pass
+    /// reported **100%** — the spike the ledger exists to prevent — left `82`
+    /// still owing its second, to eat somebody's growth later or expire and be
+    /// charged twice, and did not even clear `81`, the removal sitting behind
+    /// the `break`.
+    ///
+    /// **With the zero debtor at the higher pid the fixture is green against
+    /// the bug** (measured: `percent80=0.0`, `owed82=nil` either way), which is
+    /// why it is `81` here and not `83`.
+    func testAZeroDebtDoesNotStopTheSettlementOfTheDebtsBehindIt() throws {
+        let previous = [key(80, 1): counters(0)]
+        let current = [key(80, 1): counters(0, child: 1_000_000_000)]
+        let measured = try XCTUnwrap(
+            SessionProcesses.rates(previous: previous, current: current, elapsed: 1,
+                                   debts: [key(81, 1): debt(0, to: key(80, 1)),
+                                           key(82, 1): debt(1_000_000_000, to: key(80, 1))]))
+        XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(80, 1)]), 0, accuracy: 0.001,
+                       "a zero debt abandoned the real debt behind it")
+        XCTAssertNil(measured.debts[key(82, 1)], "the debt behind the zero one was left standing")
+        XCTAssertNil(measured.debts[key(81, 1)], "the zero debt was not even cleared")
+        XCTAssertEqual(measured.expired, 0)
+    }
+
+    /// And the other end of the same finding: a vanishing that owes nothing is
+    /// not written down at all.
+    ///
+    /// `81` was there and is gone, having burned not one nanosecond. An entry
+    /// of zero on `80` settles for nothing and clears for nothing, but it is
+    /// still an entry: it counts itself among `PassStats.openDebts`, and among
+    /// `expiredDebts` if its heir sees no growth for the whole lifetime — the
+    /// two figures `debtLifetimeSeconds` argues from. Nothing owed, nothing
+    /// recorded.
+    func testAVanishingThatOwesNothingIsNotWrittenDown() throws {
+        let previous = [key(80, 1): counters(0), key(81, 1): counters(0, ppid: 80)]
+        let current = [key(80, 1): counters(0)]
+        let measured = try XCTUnwrap(SessionProcesses.rates(previous: previous,
+                                                            current: current,
+                                                            elapsed: 1,
+                                                            debts: [:]))
+        XCTAssertTrue(measured.debts.isEmpty, "a debt of nothing went on the ledger")
+        XCTAssertEqual(measured.expired, 0)
+    }
+
+    /// A debt has to live long enough to meet the only event that can settle it,
+    /// and that event is a pass. A pass may legitimately arrive as late as
+    /// `staleSampleSeconds` — that is the whole of why the lifetime is that same
+    /// gap and not a number of its own.
+    ///
+    /// So: a debt written down now survives a pass of the longest legal length,
+    /// whatever that costs. Halving the lifetime leaves this red.
+    ///
+    /// Asked in seconds on the far side, for the reason the two sampling guards
+    /// are: through the constant it would only say that the comparison compares.
+    /// The ledger ages by the gap each pass reports rather than by a clock, so
+    /// a burst of passes too short to divide — which compute no rate at all —
+    /// does not age it either.
+    func testADebtSurvivesTheLongestPassThatCouldSettleIt() throws {
+        let previous = [key(80, 1): counters(0)]
+        let current = [key(80, 1): counters(0)]
+        func ledger(after elapsed: TimeInterval,
+                    age: TimeInterval) throws -> [SessionProcesses.Key: SessionProcesses.Debt] {
+            try XCTUnwrap(SessionProcesses.rates(previous: previous, current: current,
+                                                 elapsed: elapsed,
+                                                 debts: [key(81, 1): debt(5_000_000_000,
+                                                                          to: key(80, 1),
+                                                                          age: age)])).debts
+        }
+        XCTAssertEqual(try ledger(after: SessionProcesses.staleSampleSeconds, age: 0).count, 1,
+                       "a debt has to outlive the longest pass that could settle it")
+        // And it does not live for ever: an unsettled debt is indistinguishable
+        // from a pending one and spends itself against the next genuine growth,
+        // so holding it longer holds that suppression longer. Letting go is not
+        // free either — the counter may still be coming, and then the whole
+        // forgiven amount lands on one tick — which is why `expired` is counted.
+        XCTAssertEqual(try ledger(after: 1, age: 19).count, 1)
+        XCTAssertEqual(try ledger(after: 1, age: 19.001).count, 0)
+        XCTAssertEqual(try XCTUnwrap(SessionProcesses.rates(previous: previous, current: current,
+                                                            elapsed: 1,
+                                                            debts: [key(81, 1): debt(5_000_000_000,
+                                                                                     to: key(80, 1),
+                                                                                     age: 19.001)])).expired,
+                       1, "and giving up on one is counted, because nothing else records it")
+    }
+
+    /// **Finding 3 of the fourth review: an old debt leaves a ledger that is
+    /// being topped up every pass.**
+    ///
+    /// The ledger used to be one pool per heir carrying one age, re-dated by
+    /// every addition — and the process that loses a descendant on nearly every
+    /// pass is exactly the one this matters for: `claude` is a node process
+    /// spawning the next `Bash`. Its pool would be re-dated for ever, so a debt
+    /// nothing can settle would never age out and would go on eating that
+    /// session's growth indefinitely.
+    ///
+    /// Here `80` is that heir. One debt has been waiting almost the whole
+    /// lifetime, a second is half its age, and `80` loses a fresh child on this
+    /// very pass. The old one has to go while the other two stay, with their own
+    /// ages. On a single-entry fixture both "never age an entry" and "re-date it
+    /// on every addition" stay green; here the first leaves `81` standing and so
+    /// does the second.
+    func testAnOldDebtLeavesALedgerThatIsToppedUpEveryPass() throws {
+        let previous = [key(80, 1): counters(0),
+                        key(83, 1): counters(700_000_000, ppid: 80)]
+        let current = [key(80, 1): counters(0)]
+        let measured = try XCTUnwrap(
+            SessionProcesses.rates(previous: previous, current: current, elapsed: 1,
+                                   debts: [key(81, 1): debt(5_000_000_000, to: key(80, 1), age: 19.5),
+                                           key(82, 1): debt(2_000_000_000, to: key(80, 1), age: 3)]))
+        XCTAssertNil(measured.debts[key(81, 1)], "the oldest debt outlived its deadline")
+        XCTAssertEqual(measured.debts[key(82, 1)]?.age, 4)
+        XCTAssertEqual(measured.debts[key(83, 1)]?.nanos, 700_000_000)
+        XCTAssertEqual(measured.debts[key(83, 1)]?.age, 0)
+        XCTAssertEqual(measured.expired, 1)
+    }
+
+    /// A debt with nowhere left to travel is given up on, and counted.
+    ///
+    /// `61` was holding the debt and has gone, but `61` hung directly off
+    /// launchd: its counters left the tree with it, nothing above will ever gain
+    /// them, and so nothing above may be charged for them. The other side of
+    /// this rule — the heir that *does* have a survivor above it — is
+    /// `testAnUnsettledDebtTravelsUpWithTheCountersItWasWrittenAgainst`, and
+    /// neither of the two is worth anything without the other: this one alone is
+    /// green even if debts never travel at all.
+    func testADebtWithNowhereLeftToTravelIsGivenUpOn() throws {
+        let previous = [key(61, 1): counters(200_000_000, ppid: 1)]
+        let current = [key(99, 1): counters(0)]
+        let measured = try XCTUnwrap(
+            SessionProcesses.rates(previous: previous, current: current, elapsed: 1,
+                                   debts: [key(62, 1): debt(5_000_000_000, to: key(61, 1))]))
+        XCTAssertTrue(measured.debts.isEmpty)
+        XCTAssertEqual(measured.expired, 1)
+    }
+
+    /// The heir has to be a process that was **already there** — an ancestor of
+    /// a process the previous sweep saw existed at the previous sweep. Looked up
+    /// by the bare pid among everything alive now, a pid handed to a new process
+    /// inside the gap answers instead, and the newcomer is left holding a debt
+    /// it can never work off: every reap it makes for the next twenty seconds
+    /// settles somebody else's already-reported time, and the session it belongs
+    /// to reads idle while it works.
+    ///
+    /// Here `50` dies and its pid is immediately reused — same number, different
+    /// start time — while its child `51` dies with it. Nothing is written down:
+    /// the walk goes past the impostor to launchd. Keyed on the bare pid, the
+    /// newcomer would be charged 3 s.
+    func testTheHeirOfAVanishedProcessMustBeAProcessThatWasAlreadyThere() throws {
+        let previous = [key(50, 100): counters(1_000_000_000),
+                        key(51, 100): counters(3_000_000_000, ppid: 50)]
+        let current = [key(50, 200): counters(80_000_000)]
+        let measured = try XCTUnwrap(SessionProcesses.rates(previous: previous,
+                                                            current: current,
+                                                            elapsed: 1,
+                                                            debts: [:]))
+        XCTAssertTrue(measured.debts.isEmpty, "the pid is the same, the process is not")
+        XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(50, 200)]), 8, accuracy: 0.001)
+    }
+
+    /// A process whose parent died first is adopted by launchd, and launchd
+    /// reaps it: its counter leaves the tree and is added to nothing we can see.
+    /// Subtracting it anyway would take already-reported time off a session that
+    /// never gained it — a second error stacked on the first, and one that shows
+    /// as an idle row under a busy agent.
+    ///
+    /// `70` survives and burned 0.5 s. `71` was an orphan — `ppid: 1` — holding
+    /// 4 s, and is gone. Nothing is subtracted, so the answer is 50%.
+    func testAProcessReapedByLaunchdSubtractsFromNobody() throws {
+        let previous = [key(70, 1): counters(0),
+                        key(71, 1): counters(4_000_000_000, ppid: 1)]
+        let current = [key(70, 1): counters(500_000_000)]
+        let rates = try XCTUnwrap(percents(previous: previous,
+                                           current: current,
+                                           elapsed: 1))
+        XCTAssertEqual(try XCTUnwrap(rates[key(70, 1)]), 50, accuracy: 0.001)
+    }
+
+    /// A session's CPU is the sum over every process attributed to it, the ones
+    /// the marker had to rescue included — an orphan is still doing the
+    /// session's work, and it is usually the one doing the most of it.
+    func testASessionSumsEveryProcessAttributedToIt() throws {
+        let rates = [key(100, 1): 5.0, key(200, 1): 20.0, key(300, 1): 40.0, key(400, 1): 90.0]
+        let attribution = SessionProcesses.attribute(facts([(pid: 100, ppid: 1, marker: nil),
+                                                            (pid: 200, ppid: 100, marker: nil),
+                                                            (pid: 300, ppid: 1, marker: 100),
+                                                            (pid: 400, ppid: 1, marker: nil)]),
+                                                     sessionPIDs: [100])
+        let cpu = SessionProcesses.cpuBySession(rates: rates,
+                                                ownerByKey: owners(attribution, startTime: 1))
+        // 5 of the session's own, 20 of its child, 40 of the orphan. The 90 of
+        // the unattributed process belongs to nobody and is not smuggled in.
+        XCTAssertEqual(try XCTUnwrap(cpu[100]), 65, accuracy: 0.001)
+        XCTAssertEqual(cpu.count, 1)
+    }
+
+    /// **The two sides of that sum need not be the same age**, and the join is
+    /// the one place the `(pid, startTime)` discipline used to be dropped. On a
+    /// pass that arrives too soon the rates are held from an earlier pass while
+    /// the ownership table is this sweep's, which is exactly what holding rates
+    /// per process rather than per session was for: "a process that has since
+    /// died drops out of the sum instead of being credited to a session by a
+    /// stale ownership table".
+    ///
+    /// Keyed on the bare pid it does the opposite. Here the held rate belongs to
+    /// pid 200 as it was — 40% under session 100 — and pid 200 now belongs to a
+    /// fresh process under session 700. By the number alone the dead process's
+    /// 40% is credited to session 700, which never ran it. By the key it drops
+    /// out, and 700 is left with the 5% of the process that really is its own.
+    func testAHeldRateIsNotCreditedToWhoeverInheritedThePid() throws {
+        let held = [key(200, 100): 40.0, key(300, 1): 5.0]
+        let attribution = SessionProcesses.attribute(facts([(pid: 700, ppid: 1, marker: nil),
+                                                            (pid: 200, ppid: 700, marker: nil),
+                                                            (pid: 300, ppid: 700, marker: nil)]),
+                                                     sessionPIDs: [700])
+        var table = owners(attribution, startTime: 1)
+        // Everything in this sweep started at 1; the held rate is for the pid as
+        // it was at 100, which is a different process.
+        XCTAssertEqual(table[key(200, 1)], 700)
+        let cpu = SessionProcesses.cpuBySession(rates: held, ownerByKey: table)
+        XCTAssertEqual(try XCTUnwrap(cpu[700]), 5, accuracy: 0.001)
+
+        // And the same figure is counted when the key really does match, or the
+        // assertion above would hold for a sum that credits nothing at all.
+        table[key(200, 100)] = 700
+        XCTAssertEqual(try XCTUnwrap(SessionProcesses.cpuBySession(rates: held, ownerByKey: table)[700]),
+                       45, accuracy: 0.001)
+    }
+
+    // MARK: - Onto the row
+
+    /// "Idle" and "not measured yet" are different answers, and the row is where
+    /// they are told apart: a session the sweep measured at nothing is `0`, a
+    /// session the sweep has not reached is `nil`. Folding the second into the
+    /// first would put a permanent `0%` on the panel one second after launch.
+    func testAnUnmeasuredSessionHasNoCPUAndAMeasuredIdleOneHasZero() throws {
+        var session = TestFixtures.session(id: "s", cwd: "/p", state: .idle)
+        session.pid = 4242
+        XCTAssertNil(DataSource.aggregate([session], cpu: [:], orphans: [:]).cpuPercent)
+        XCTAssertEqual(try XCTUnwrap(DataSource.aggregate([session], cpu: [4242: 0], orphans: [:]).cpuPercent), 0)
+    }
+
+    /// A row is a window, a window holds several chats, and the figure it shows
+    /// is the whole window's: both the CPU and the orphans are summed over every
+    /// chat in the row.
+    func testARowSumsEveryChatItHolds() throws {
+        var first = TestFixtures.session(id: "a", cwd: "/p", state: .working)
+        first.pid = 11
+        var second = TestFixtures.session(id: "b", cwd: "/p", state: .idle)
+        second.pid = 22
+        let aggregate = DataSource.aggregate([first, second],
+                                             cpu: [11: 30, 22: 12.5, 33: 500],
+                                             orphans: [11: 2, 22: 1, 33: 9])
+        XCTAssertEqual(try XCTUnwrap(aggregate.cpuPercent), 42.5, accuracy: 0.001)
+        XCTAssertEqual(aggregate.orphanCount, 3)
+        XCTAssertFalse(aggregate.cpuIsLowerBound, "a complete sum was marked as a floor")
+    }
+
+    /// **Finding 9 of the fourth review: a partial sum says that it is one.**
+    ///
+    /// The sweep answers per session, and a row is a window with several chats
+    /// in it, so one of them can be missing from a pass — a chat that started
+    /// this second, a process that went, a counter that went backwards. What is
+    /// left is still measured and still worth printing; what it must not do is
+    /// pass for the whole row.
+    ///
+    /// Reporting `nil` instead is the wrong repair and this is where that shows:
+    /// `nil` draws as `-`, exactly like a quiet row (§3.1), so it understates by
+    /// the *whole* figure where the partial sum understates by one chat's share.
+    /// The number stands and wears `≥`, which is what `usageIsLowerBound`
+    /// already does with the same shape of hole.
+    func testARowMissingAChatSaysItsFigureIsAFloor() throws {
+        var measured = TestFixtures.session(id: "a", cwd: "/p", state: .working)
+        measured.pid = 11
+        var missing = TestFixtures.session(id: "b", cwd: "/p", state: .working)
+        missing.pid = 22
+
+        let partial = DataSource.aggregate([measured, missing], cpu: [11: 30], orphans: [:])
+        XCTAssertEqual(try XCTUnwrap(partial.cpuPercent), 30, accuracy: 0.001)
+        XCTAssertTrue(partial.cpuIsLowerBound, "a sum over one chat of two passed for the whole row")
+
+        // Nothing measured at all is the other answer, and it is not a floor:
+        // there is no number under it to be a floor of.
+        let nothing = DataSource.aggregate([measured, missing], cpu: [:], orphans: [:])
+        XCTAssertNil(nothing.cpuPercent)
+        XCTAssertFalse(nothing.cpuIsLowerBound)
+    }
+
+    /// And every section of the panel carries them. The three row constructors
+    /// are three separate pieces of code — a window, a project with no window,
+    /// and the `cwd:` row for an agent outside every scan root — so a figure
+    /// wired into one of them can be missing from the other two without a single
+    /// test going red.
+    func testEverySectionOfThePanelCarriesTheProcessFigures() throws {
+        var windowed = TestFixtures.session(id: "w", cwd: "/p/open", state: .working, topic: "topic w")
+        windowed.pid = 11
+        var headless = TestFixtures.session(id: "h", cwd: "/p/quiet", state: .working)
+        headless.pid = 22
+        var stray = TestFixtures.session(id: "s", cwd: "/elsewhere/scratch", state: .working)
+        stray.pid = 33
+
+        let snapshot = DataSource.assemble(
+            projects: [TestFixtures.project(path: "/p/open", rootName: "open"),
+                       TestFixtures.project(path: "/p/quiet", rootName: "quiet")],
+            windows: [TestFixtures.window(index: 0, title: "topic w \u{2014} open (Workspace)")],
+            sessions: [windowed, headless, stray],
+            cpuBySessionPID: [11: 30, 22: 40, 33: 50],
+            orphansBySessionPID: [11: 1, 22: 2, 33: 3],
+            accessibilityTrusted: true)
+
+        let window = try XCTUnwrap(snapshot.openWindows.first)
+        XCTAssertEqual(try XCTUnwrap(window.cpuPercent), 30, accuracy: 0.001)
+        XCTAssertEqual(window.orphanCount, 1)
+
+        let project = try XCTUnwrap(snapshot.projects.first { $0.displayName == "quiet" })
+        XCTAssertEqual(try XCTUnwrap(project.cpuPercent), 40, accuracy: 0.001)
+        XCTAssertEqual(project.orphanCount, 2)
+
+        let orphanRow = try XCTUnwrap(snapshot.projects.first { $0.id == "cwd:/elsewhere/scratch" })
+        XCTAssertEqual(try XCTUnwrap(orphanRow.cpuPercent), 50, accuracy: 0.001)
+        XCTAssertEqual(orphanRow.orphanCount, 3)
+    }
+
+    /// The same question put to *every* row instead of to three named ones.
+    ///
+    /// `aggregate` refuses to have its two tables defaulted, so a fourth row
+    /// constructor that forgets to *ask* for the figures is a compile error.
+    /// That is only half the door: `SwitcherRow.cpuPercent`, `orphanCount` and
+    /// `cpuIsLowerBound` all have memberwise defaults, so a constructor that
+    /// asks `aggregate` and then forgets to carry the answer onto the row
+    /// compiles perfectly and shows a blank column — or an unmarked partial sum
+    /// — for ever. The test that names three rows cannot see that either, for
+    /// whichever row it does not name.
+    ///
+    /// `cpuIsLowerBound` was the field that proved the point. It reaches the row
+    /// through the same three constructors and nothing asked about it: deleting
+    /// `cpuIsLowerBound: aggregate.cpuIsLowerBound,` from all three left the
+    /// whole suite green, and in that state the `≥` could never appear on the
+    /// panel and a sum over one chat of two would read as a whole one.
+    ///
+    /// Which is why pid 44 is **not** in the `cpu` table below. With every
+    /// session measured the flag is `false` on every row, and an assertion that
+    /// compares `false` to `false` everywhere cannot go red whatever the
+    /// constructors do. Leaving the twin unmeasured lights it on the `quiet`
+    /// row, and costs that row's expected figure the twin's share: 40 rather
+    /// than 45.5.
+    ///
+    /// Modelled on `testEveryAssembledRowTakesItsSubagentsFromItsOwnChats`, and
+    /// over the same fixture shape, because the awkward row is the same one: two
+    /// windows of one project where only the second title names a chat, so the
+    /// twin ends up holding no sessions at all and must report `nil` CPU rather
+    /// than somebody else's.
+    func testEveryAssembledRowTakesItsProcessFiguresFromItsOwnChats() throws {
+        var windowed = TestFixtures.session(id: "w", cwd: "/p/open", state: .working, topic: "topic w")
+        windowed.pid = 11
+        var headless = TestFixtures.session(id: "h", cwd: "/p/quiet", state: .working)
+        headless.pid = 22
+        var headlessTwin = TestFixtures.session(id: "h2", cwd: "/p/quiet", state: .idle)
+        headlessTwin.pid = 44
+        var stray = TestFixtures.session(id: "s", cwd: "/elsewhere/scratch", state: .working)
+        stray.pid = 33
+
+        // No entry for 44: the twin is the chat that went unmeasured this pass,
+        // which is what lights `cpuIsLowerBound` on the row it shares.
+        let cpu: [Int32: Double] = [11: 30, 22: 40, 33: 50, 99: 900]
+        let orphans: [Int32: Int] = [11: 1, 22: 2, 33: 3, 44: 4, 99: 99]
+        let snapshot = DataSource.assemble(
+            projects: [TestFixtures.project(path: "/p/open", rootName: "open"),
+                       TestFixtures.project(path: "/p/quiet", rootName: "quiet")],
+            windows: [TestFixtures.window(index: 0, title: "\u{0438}\u{043d}\u{0430}\u{044f} \u{2014} open (Workspace)"),
+                      TestFixtures.window(index: 1, title: "topic w \u{2014} open (Workspace)")],
+            sessions: [windowed, headless, headlessTwin, stray],
+            cpuBySessionPID: cpu,
+            orphansBySessionPID: orphans,
+            accessibilityTrusted: true)
+
+        // `rows` rather than the two lists by hand: a third list would then be
+        // covered too instead of quietly skipped.
+        let rows = snapshot.rows
+        for row in rows {
+            let expected = DataSource.aggregate(row.sessions, cpu: cpu, orphans: orphans)
+            XCTAssertEqual(row.cpuPercent, expected.cpuPercent, "\(row.id)")
+            XCTAssertEqual(row.cpuIsLowerBound, expected.cpuIsLowerBound, "\(row.id)")
+            XCTAssertEqual(row.orphanCount, expected.orphanCount, "\(row.id)")
+        }
+
+        // And the fixture has to hold every kind of row the loop is for, or it
+        // agrees about nothing. The chat-less window is the fragile one: it
+        // exists only because `distribute` leaves the twin empty.
+        XCTAssertTrue(snapshot.openWindows.contains { $0.sessions.isEmpty }, "no chat-less window row")
+        XCTAssertTrue(snapshot.projects.contains { $0.id.hasPrefix("cwd:") }, "no orphan row")
+        // The two-chat row sums rather than picking one: 40 over the one chat
+        // that was measured, and 2 + 4 over both, because orphans are counted
+        // from the table for every chat the row holds.
+        let twoChats = try XCTUnwrap(snapshot.projects.first { $0.displayName == "quiet" })
+        XCTAssertEqual(twoChats.sessions.count, 2)
+        XCTAssertEqual(try XCTUnwrap(twoChats.cpuPercent), 40, accuracy: 0.001)
+        XCTAssertEqual(twoChats.orphanCount, 6)
+        // And the flag is lit somewhere, or the loop above compares `false` to
+        // `false` on every row and could not go red.
+        XCTAssertTrue(twoChats.cpuIsLowerBound, "the fixture measures every chat")
+        XCTAssertTrue(rows.contains { !$0.cpuIsLowerBound && $0.cpuPercent != nil },
+                      "and unlit somewhere, or it compares `true` to `true` instead")
+        // Every row that has a chat carries a figure, so the loop is comparing
+        // numbers rather than agreeing that everything is `nil`.
+        XCTAssertEqual(rows.filter { $0.cpuPercent != nil }.count,
+                       rows.filter { !$0.sessions.isEmpty }.count)
+        XCTAssertTrue(rows.contains { $0.sessions.isEmpty && $0.cpuPercent == nil }, "no unmeasured row")
+    }
+}
+
+/// The half of §2.8 that talks to the kernel: the units its counters are in,
+/// the hand-rolled parse of `KERN_PROCARGS2`, and what one pass of
+/// `ProcessSampler` promises the next one.
+///
+/// These run against real processes because there is nothing else to run them
+/// against — the questions here are all about what the machine actually hands
+/// over, and a fixture would only restate the assumption being tested.
+final class SessionProcessSyscallTests: XCTestCase {
+
+    private var spawned: [Process] = []
+
+    override func tearDown() {
+        for process in spawned where process.isRunning { process.terminate() }
+        spawned = []
+        super.tearDown()
+    }
+
+    /// An interpreter that hands its environment over. Platform binaries do not
+    /// — that is the point of `testAPlatformBinaryWithholdsItsEnvironment` — so
+    /// the marker tests need one that does.
+    private static let interpreter = "/usr/bin/python3"
+
+    /// A child that stays alive until the test ends, with the environment given.
+    ///
+    /// A fixture that has something to report back does it through a file it
+    /// renames into place, not through a pipe: a pipe can only be read by
+    /// blocking on it, and the fixtures here have to keep sampling while they
+    /// wait.
+    private func spawn(_ path: String,
+                       _ arguments: [String],
+                       _ environment: [String: String]) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        process.environment = environment
+        try process.run()
+        spawned.append(process)
+        return process.processIdentifier
+    }
+
+    /// The child's argument block only exists after `execve`, so a read that
+    /// beats the exec sees nothing. Polls rather than sleeps a fixed time.
+    private func marker(of pid: Int32, settlingFor seconds: TimeInterval = 5) -> SessionProcesses.Marker {
+        var buffer = [UInt8](repeating: 0, count: SessionProcesses.argumentsMaximum)
+        let deadline = Date().addingTimeInterval(seconds)
+        var answer = SessionProcesses.marker(of: pid, buffer: &buffer)
+        while case .withheld = answer, Date() < deadline {
+            usleep(20_000)
+            answer = SessionProcesses.marker(of: pid, buffer: &buffer)
+        }
+        return answer
+    }
+
+    private func requireInterpreter() throws {
+        guard FileManager.default.isExecutableFile(atPath: Self.interpreter) else {
+            throw XCTSkip("no \(Self.interpreter) to read an environment out of")
+        }
+    }
+
+    // MARK: - Units
+
+    /// `ri_user_time` and `ri_system_time` are mach absolute time units, not
+    /// nanoseconds, whatever the `_time` in their names suggests. Read as
+    /// nanoseconds every figure on the panel was 41.7 times too small on this
+    /// machine — three processes each burning a whole core showed as 7.25%.
+    ///
+    /// Asked against an independent clock rather than against the timebase the
+    /// conversion itself uses: one thread spinning for a third of a second must
+    /// move the process's counter by very nearly the wall time it spun for.
+    /// `DispatchTime.uptimeNanoseconds` does its own conversion, so the two
+    /// sides of this ratio share nothing but the hardware. Dropping the
+    /// conversion makes it 0.024.
+    func testTheKernelsCPUCounterIsNotAlreadyInNanoseconds() throws {
+        let before = try XCTUnwrap(SessionProcesses.cpuNanos(of: getpid())).own
+        let start = DispatchTime.now().uptimeNanoseconds
+        var spins = 0
+        while DispatchTime.now().uptimeNanoseconds - start < 300_000_000 { spins += 1 }
+        let elapsed = DispatchTime.now().uptimeNanoseconds - start
+        let burned = try XCTUnwrap(SessionProcesses.cpuNanos(of: getpid())).own - before
+        XCTAssertGreaterThan(spins, 0)
+        let ratio = Double(burned) / Double(elapsed)
+        // Not exactly 1: the process has other threads, and a busy machine
+        // deschedules this one. The bound has to leave room for that and still
+        // catch the mistake, and the mistake is a factor of 41.7 — read as
+        // nanoseconds this ratio is 0.024.
+        //
+        // 0.5 was too tight and was measured to be: under the load of agents
+        // and a sweep probe this thread got only 0.455 of the wall time it spun
+        // for, and the test went red in 1 run of 3 (26.08.2026). 0.1 sits
+        // between the two, and roughly four times from each: 4.6x below the
+        // worst descheduling actually seen, 4.2x above the ratio the mistake
+        // this test is named for would produce.
+        XCTAssertGreaterThan(ratio, 0.1, "the counter barely moved: still being read as nanoseconds?")
+        XCTAssertLessThan(ratio, 2.0)
+    }
+
+    /// The timebase is a ratio and the conversion is exact, remainder included.
+    ///
+    /// The ratio is a parameter here rather than this machine's own, because
+    /// asked through `timebase` the test cannot reach the branch it is named
+    /// after. It built its input as `denom * 1_000_003 + denom - 1`, which is a
+    /// multiple of `denom` whenever `denom == 1` — so on Intel and on the `(1,1)`
+    /// fallback the remainder is always zero and the oracle degenerates to
+    /// `units == units`. 125/3 is this machine; 1/1 is the other case, and it
+    /// has to be asked on purpose.
+    func testMachUnitsConvertExactly() {
+        func check(numer: UInt64, denom: UInt64) {
+            XCTAssertEqual(SessionProcesses.nanoseconds(fromMachUnits: 0, numer: numer, denom: denom), 0)
+            // Not a multiple of `denom`, whatever `denom` is, so the remainder
+            // path is the one being asked.
+            let units = denom * 1_000_003 + 1
+            XCTAssertEqual(SessionProcesses.nanoseconds(fromMachUnits: units, numer: numer, denom: denom),
+                           units * numer / denom,
+                           "\(numer)/\(denom)")
+        }
+        check(numer: 125, denom: 3)
+        check(numer: 1, denom: 1)
+
+        // And the live ratio really is the one the app converts with.
+        let (numer, denom) = SessionProcesses.timebase
+        XCTAssertGreaterThan(numer, 0)
+        XCTAssertGreaterThan(denom, 0)
+        XCTAssertEqual(SessionProcesses.nanoseconds(fromMachUnits: 1_000_003),
+                       SessionProcesses.nanoseconds(fromMachUnits: 1_000_003, numer: numer, denom: denom))
+    }
+
+    // MARK: - The argument block
+
+    /// The marker, read out of a live process's environment by the hand-rolled
+    /// parse: `argc`, the exec path, the NUL padding, `argv`, then the block the
+    /// answer is in.
+    ///
+    /// Two arguments past the script, so that the `argv` skip has more than one
+    /// string to get right — an off-by-one there lands in the middle of the
+    /// environment or past the end of it.
+    func testTheMarkerIsReadOutOfALiveProcessEnvironment() throws {
+        try requireInterpreter()
+        let pid = try spawn(Self.interpreter,
+                            ["-c", "import time; time.sleep(30)", "alpha", "beta"],
+                            ["CLAUDE_PID": "424242", "PATH": "/usr/bin:/bin"])
+        XCTAssertEqual(marker(of: pid), .pid(424242))
+    }
+
+    /// The compare is a prefix compare, and a prefix compare that starts
+    /// anywhere but the beginning of the variable matches `MY_CLAUDE_PID=` too.
+    /// The wrong session, from a variable that has nothing to do with Claude
+    /// Code — and nothing else on this path would notice.
+    func testAVariableMerelyEndingInTheMarkersNameIsNotTheMarker() throws {
+        try requireInterpreter()
+        let pid = try spawn(Self.interpreter,
+                            ["-c", "import time; time.sleep(30)"],
+                            ["MY_CLAUDE_PID": "424242", "PATH": "/usr/bin:/bin"])
+        XCTAssertEqual(marker(of: pid), .absent)
+    }
+
+    /// The measured negative result of §2.8: `KERN_PROCARGS2` hands over `argv`
+    /// and stops for a platform binary, whatever is actually in its
+    /// environment. The marker cannot see 296 of the 682 readable processes on
+    /// this machine — 43% of them — and `/bin/sleep` is one.
+    ///
+    /// The environment here really does carry the marker, which is what makes
+    /// this "withheld" rather than "absent": the parser is not being asked
+    /// whether the variable is there, it is being asked whether it was allowed
+    /// to look.
+    ///
+    /// And `.withheld` on its own cannot answer that. It is the parser's answer
+    /// to four different things — a buffer smaller than an `Int32`, a `sysctl`
+    /// that failed with EPERM, one that failed with ESRCH because the process
+    /// exited, and the one meant here, a block that ends where `argv` ends. The
+    /// assertion is their union, so it holds when the process simply died before
+    /// the call, which is the one outcome that would make this test about
+    /// nothing. So the cause is asked directly: the syscall **succeeded**, and
+    /// there is nothing past `argv`.
+    func testAPlatformBinaryWithholdsItsEnvironment() throws {
+        let pid = try spawn("/bin/sleep", ["30"], ["CLAUDE_PID": "424242", "PATH": "/usr/bin:/bin"])
+        // No settling loop: `withheld` is the answer, so waiting for it to stop
+        // being `withheld` would wait the whole timeout out every run.
+        var buffer = [UInt8](repeating: 0, count: SessionProcesses.argumentsMaximum)
+        usleep(200_000)
+        XCTAssertEqual(SessionProcesses.marker(of: pid, buffer: &buffer), .withheld)
+
+        var size = buffer.count
+        var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+        XCTAssertEqual(sysctl(&mib, 3, &buffer, &size, nil, 0), 0,
+                       "the kernel refused the call outright: this is not the case under test")
+        XCTAssertGreaterThan(size, MemoryLayout<Int32>.size)
+
+        var argc: Int32 = 0
+        withUnsafeMutableBytes(of: &argc) { $0.copyBytes(from: buffer[0..<MemoryLayout<Int32>.size]) }
+        XCTAssertEqual(argc, 2, "/bin/sleep 30")
+        var index = MemoryLayout<Int32>.size
+        while index < size, buffer[index] != 0 { index += 1 }
+        while index < size, buffer[index] == 0 { index += 1 }
+        for _ in 0..<argc {
+            while index < size, buffer[index] != 0 { index += 1 }
+            index += 1
+        }
+        XCTAssertGreaterThanOrEqual(index, size, "the block did not stop at argv after all")
+    }
+
+    // MARK: - The ledger, against real processes
+
+    /// The processes the sweep can see hanging directly off `parent`.
+    private func children(of parent: Int32) -> [Int32] {
+        SessionProcesses.listProcesses().filter { $0.counters.ppid == parent }.map(\.pid)
+    }
+
+    /// Waits for `parent` to fork, and answers with the child's pid.
+    private func firstChild(of parent: Int32, within seconds: TimeInterval = 5) throws -> Int32 {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if let child = children(of: parent).first { return child }
+            usleep(20_000)
+        }
+        throw XCTSkip("the fixture never forked")
+    }
+
+    /// The state finding 1 is about: the process has exited and nobody has
+    /// waited for it yet, so it is still in `proc_listallpids` and still answers
+    /// `proc_pid_rusage` while `PROC_PIDTBSDINFO` refuses it. `listProcesses`
+    /// needs both and therefore drops the row — a disappearance that is not one.
+    private func isZombie(_ pid: Int32) -> Bool {
+        SessionProcesses.cpuNanos(of: pid) != nil && SessionProcesses.parentAndStart(of: pid) == nil
+    }
+
+    /// **Finding 1, against a real zombie.** A child burns 3 s of CPU and exits;
+    /// its parent does not call `wait` for another three seconds. Through that
+    /// window the sweep cannot see the child at all, and its counter has not
+    /// gone anywhere — the parent's `ri_child_*` does not move until the `wait`.
+    ///
+    /// Deducted on disappearance, this fixture reports the child's whole
+    /// lifetime inside the tick where the reap lands: 3 s of CPU in a 1 s pass
+    /// is 300%, and the pass where the child turned into a zombie floors to
+    /// zero, because the deduction is charged to a parent that gained nothing.
+    /// With `swift build` in the child's place that spike is the 60000% §2.8
+    /// names. The ledger defers instead: no growth, nothing settled, and the
+    /// debt waits for the pass where the reap really lands.
+    ///
+    /// The table-driven fixtures cannot express this at all — in them a
+    /// disappearance and the reap that follows it always fall in the same gap,
+    /// which is the one arrangement where deducting on disappearance is right.
+    ///
+    /// What is asserted is the whole figure and not one tick: no pass may report
+    /// more than one core when only one core was ever burned, and the child's
+    /// CPU must be counted **once** across the run.
+    ///
+    /// How much CPU that is cannot be assumed, so the oracle is `wait4`, which
+    /// is a different API from the one under test and the same one §2.8's
+    /// whole-figure check used through `/usr/bin/time`: the fixture reports what
+    /// the kernel handed it at the reap, and the integral of the panel's own
+    /// figure has to come to the same thing. Deducting on disappearance roughly
+    /// doubles that integral — the child's total is reported once as it burns
+    /// and again in the tick where the reap lands.
+    ///
+    /// A run that never saw the zombie state would prove nothing, so that is
+    /// asserted too.
+    ///
+    /// **Every wait in here is on a condition, and it took a red run to get
+    /// there.** The child used to spin for 3 s of *wall* time, which on a
+    /// machine with its own work to do is not an amount of CPU at all: under a
+    /// concurrent build it came out below the half-core-second the canary
+    /// demands and the test failed for the machine's reasons rather than the
+    /// ledger's. The child now spins until `time.process_time()` says it has
+    /// burned 1.5 **core**-seconds, signals its exit through a file so the
+    /// zombie window is a window and not a guess, and the sampling loop runs
+    /// until the reap has landed and a pass has carried it rather than for a
+    /// fixed nine passes — because how many wall seconds those core-seconds
+    /// take now belongs to the machine. Same fix as
+    /// `testARealGrandchildLeftToLaunchdDoesNotBlankTheSurvivorsTick`, which
+    /// waits on the grandchild's counter for the same reason.
+    ///
+    /// A flake here is worse than it looks: this suite is the only thing between
+    /// the ledger and a silent regression, and a test that cries wolf under load
+    /// gets re-run rather than believed.
+    func testARealZombieIsDeferredRatherThanSpikingWhenItIsReaped() throws {
+        try requireInterpreter()
+        let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
+        let exited = scratch.appendingPathComponent("vscode-switcher-zombie-exited-\(getpid())")
+        let reaped = scratch.appendingPathComponent("vscode-switcher-zombie-reaped-\(getpid())")
+        for url in [exited, reaped] { try? FileManager.default.removeItem(at: url) }
+        defer { for url in [exited, reaped] { try? FileManager.default.removeItem(at: url) } }
+        // The child burns core-seconds, not wall seconds, and says so by
+        // touching a file the instant before it exits — the parent cannot ask
+        // whether it has exited without reaping it, and reaping it is the one
+        // thing that must wait. The result goes through a rename so a pass
+        // never reads it half-written.
+        let script = """
+            import os, time
+            exited = "\(exited.path)"
+            reaped = "\(reaped.path)"
+            pid = os.fork()
+            if pid == 0:
+                base = time.process_time()
+                while time.process_time() - base < 1.5: pass
+                open(exited, "w").close()
+                os._exit(0)
+            while not os.path.exists(exited): time.sleep(0.05)
+            time.sleep(3.0)
+            usage = os.wait4(pid, 0)[2]
+            with open(reaped + ".tmp", "w") as handle:
+                handle.write(repr(usage.ru_utime + usage.ru_stime))
+            os.rename(reaped + ".tmp", reaped)
+            time.sleep(120)
+            """
+        let parent = try spawn(Self.interpreter, ["-c", script], ["PATH": "/usr/bin:/bin"])
+        let child = try firstChild(of: parent)
+
+        let sampler = ProcessSampler()
+        _ = sampler.sample(sessionPIDs: [parent])
+        var last = DispatchTime.now().uptimeNanoseconds
+        var zombieSeen = false
+        var peak = 0.0
+        var coreSeconds = 0.0
+        // Until the reap has landed and a pass has carried it — the jump in
+        // `ri_child_*` lands in the gap after the `wait4`, so one more pass
+        // after the result appears is what makes the integral complete. The
+        // deadline is only there so a machine that cannot manage it at all
+        // fails rather than hangs.
+        let deadline = Date().addingTimeInterval(180)
+        var passesSinceReap = 0
+        while passesSinceReap < 2, Date() < deadline {
+            Thread.sleep(forTimeInterval: 1)
+            // The zombie window is what makes this fixture the case under test,
+            // so it is looked for at the same moment the sweep runs.
+            if isZombie(child) { zombieSeen = true }
+            let now = DispatchTime.now().uptimeNanoseconds
+            let percent = sampler.sample(sessionPIDs: [parent]).cpuPercentBySessionPID[parent] ?? 0
+            peak = max(peak, percent)
+            coreSeconds += percent / 100 * Double(now - last) / 1e9
+            last = now
+            if FileManager.default.fileExists(atPath: reaped.path) { passesSinceReap += 1 }
+        }
+
+        XCTAssertEqual(passesSinceReap, 2, "the fixture never got as far as the reap")
+        XCTAssertTrue(zombieSeen,
+                      "the child was never caught between exit and wait: this run tested nothing")
+        XCTAssertLessThan(peak, 150,
+                          "one core was burned and one pass claimed more than one core")
+
+        let printed = try String(contentsOf: reaped, encoding: .utf8)
+        let burned = try XCTUnwrap(Double(printed.trimmingCharacters(in: .whitespacesAndNewlines)),
+                                   "the fixture never reported what it reaped: \(printed)")
+        // The child spins on its own counter, so this cannot fail for want of a
+        // free core any more. It stays because it is the one assertion that
+        // would notice `process_time` measuring something other than CPU.
+        XCTAssertGreaterThan(burned, 0.5, "the child barely ran: this run tested nothing")
+        // Below `burned` by whatever the child had spent before the baseline
+        // sweep, and never above it: the point of the ledger is that the same
+        // nanoseconds are not reported twice.
+        XCTAssertGreaterThan(coreSeconds, burned * 0.7)
+        XCTAssertLessThan(coreSeconds, burned * 1.2)
+    }
+
+    /// **Finding 3, against a real reparented grandchild.** The middle process
+    /// exits first, so its child is handed to launchd and reaped there: the
+    /// counter leaves the tree, and the grandparent — which the walk still finds
+    /// and still charges — never gains a nanosecond of it.
+    ///
+    /// Both deaths are made to fall in one gap on purpose, because that is the
+    /// only arrangement in which the walk is fooled: given a sweep in between,
+    /// the grandchild is seen with `ppid` 1 and no heir is found at all (which
+    /// is `testAProcessReapedByLaunchdSubtractsFromNobody`, and was already
+    /// right). The live shape is a `Bash` timeout killing a process group, the
+    /// shell exiting a moment before the compiler.
+    ///
+    /// The grandparent burns a core throughout. Deducted on disappearance, the
+    /// grandchild's seconds come off the grandparent's one-second tick and the
+    /// row of a session burning a whole core reads as empty space. Written down
+    /// instead, it waits for growth that never comes, and the tick keeps its
+    /// own work.
+    ///
+    /// **How much work that is, is measured rather than assumed.** This machine
+    /// is shared and a spinning fixture does not get a whole core — under a load
+    /// average of 26 it got about two thirds of one (26.08.2026) — so the
+    /// assertion compares the panel's figure against the grandparent's own
+    /// counter over the same window, read directly. That is not an independent
+    /// syscall, and it is not meant to be: what it is independent of is the rate
+    /// path, the ledger and the attribution, which is the whole of what this
+    /// fixture is about. The defect reports 0 against an oracle that reports
+    /// whatever the process really got.
+    func testARealGrandchildLeftToLaunchdDoesNotBlankTheSurvivorsTick() throws {
+        try requireInterpreter()
+        let stop = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("vscode-switcher-reparent-\(getpid())")
+        try? FileManager.default.removeItem(at: stop)
+        let script = """
+            import os, time
+            stop = "\(stop.path)"
+            middle = os.fork()
+            if middle == 0:
+                grandchild = os.fork()
+                if grandchild == 0:
+                    while not os.path.exists(stop): pass
+                    time.sleep(0.4)
+                    os._exit(0)
+                while not os.path.exists(stop): time.sleep(0.01)
+                os._exit(0)
+            while True: pass
+            """
+        let grandparent = try spawn(Self.interpreter, ["-c", script], ["PATH": "/usr/bin:/bin"])
+        let middle = try firstChild(of: grandparent)
+        let grandchild = try firstChild(of: middle)
+
+        let sampler = ProcessSampler()
+        _ = sampler.sample(sessionPIDs: [grandparent])
+        // **Waited for rather than slept through.** The grandchild has to be
+        // holding more than one tick's worth when it goes, or deducting it
+        // would not blank anything and the run would prove nothing. Two seconds
+        // of wall clock is not that: this fixture spins two processes at once on
+        // a machine that has its own work to do, and while the suite itself was
+        // running the grandchild came out with 0.788 core-seconds of the two
+        // (27.08.2026) — the canary below fired, in a run that was green when
+        // the machine was quiet. So the gap lasts until the counter is really
+        // there, and the canary stays to catch the machine that cannot manage it
+        // at all.
+        let deadline = Date().addingTimeInterval(10)
+        var owed: UInt64 = 0
+        repeat {
+            Thread.sleep(forTimeInterval: 0.25)
+            owed = try XCTUnwrap(SessionProcesses.cpuNanos(of: grandchild)).own
+        } while owed <= 1_100_000_000 && Date() < deadline
+        _ = sampler.sample(sessionPIDs: [grandparent])
+        let ownBefore = try XCTUnwrap(SessionProcesses.cpuNanos(of: grandparent)).own
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        XCTAssertGreaterThan(owed, 1_000_000_000,
+                             "the grandchild has to hold more than one tick's worth, "
+                                 + "or deducting it would not blank anything")
+
+        // Both die inside this one gap: the middle at once, the grandchild 0.4 s
+        // later — orphaned in between, which is what sends it to launchd.
+        FileManager.default.createFile(atPath: stop.path, contents: nil)
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertNil(SessionProcesses.parentAndStart(of: grandchild), "the grandchild outlived the gap")
+        XCTAssertFalse(SessionProcesses.listProcesses().contains { $0.pid == middle },
+                       "the middle process outlived the gap")
+
+        let ownAfter = try XCTUnwrap(SessionProcesses.cpuNanos(of: grandparent)).own
+        let window = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1e9
+        let oracle = Double(ownAfter - ownBefore) / 1e9 / window * 100
+        let alone = sampler.sample(sessionPIDs: [grandparent]).cpuPercentBySessionPID[grandparent] ?? 0
+        XCTAssertGreaterThan(oracle, 20, "the grandparent was starved: this run tested nothing")
+        XCTAssertEqual(alone, oracle, accuracy: max(15, oracle * 0.25),
+                       "the survivor was charged for a counter that went to launchd")
+        // Nothing will ever settle it, which is exactly what the counter is for:
+        // an unsettled debt is invisible everywhere else.
+        XCTAssertGreaterThan(sampler.lastPassStats().openDebts, 0)
+        try? FileManager.default.removeItem(at: stop)
+    }
+
+    // MARK: - The sampler
+
+    /// A rate needs two passes, and the second one has to actually have it. The
+    /// timestamp of the pass before is the whole of that state: forget to store
+    /// it and every pass forever is a first pass, which the panel draws as a
+    /// blank column and nothing anywhere complains about.
+    func testARateArrivesOnTheSecondPassAndNotTheFirst() throws {
+        let sampler = ProcessSampler()
+        let me = getpid()
+        XCTAssertNil(sampler.sample(sessionPIDs: [me]).cpuPercentBySessionPID[me])
+
+        // Past `minimumSampleSeconds`, or the second pass is a hold of the first
+        // and the first had nothing to hold.
+        let start = DispatchTime.now().uptimeNanoseconds
+        var spins = 0
+        while DispatchTime.now().uptimeNanoseconds - start < 600_000_000 { spins += 1 }
+        XCTAssertGreaterThan(spins, 0)
+
+        let percent = try XCTUnwrap(sampler.sample(sessionPIDs: [me]).cpuPercentBySessionPID[me])
+        XCTAssertGreaterThan(percent, 10)
+    }
+
+    /// A pass that arrives too soon holds the last rate rather than computing a
+    /// new one from a gap too short to divide (SPEC §2.8), and holds its
+    /// baseline with it so the gap goes on growing.
+    ///
+    /// The shape is the panel's own: `SnapshotStore.setPanelVisible(_:)`
+    /// rebuilds the snapshot the moment the panel slides out, whenever the last
+    /// timer tick happened to be. Recomputed from that gap a steady 30% reads as
+    /// anything from 0 to 93 (§2.8); recomputed from nothing at all it reads as
+    /// a blank column at the one moment somebody is looking at it.
+    ///
+    /// Two things are asked, and the second is what makes it a hold rather than
+    /// a coincidence: the burst passes report the same figure the measured one
+    /// did, to the last bit, and the pass after the burst — a full gap later —
+    /// reports a different one. A sampler that simply recomputed would drift
+    /// across the burst; one that blanked would report nothing there at all.
+    func testAPassThatArrivesTooSoonHoldsTheRateItHad() throws {
+        let sampler = ProcessSampler()
+        let me = getpid()
+        _ = sampler.sample(sessionPIDs: [me])
+
+        let start = DispatchTime.now().uptimeNanoseconds
+        var spins = 0
+        while DispatchTime.now().uptimeNanoseconds - start < 600_000_000 { spins += 1 }
+        XCTAssertGreaterThan(spins, 0)
+        let measured = try XCTUnwrap(sampler.sample(sessionPIDs: [me]).cpuPercentBySessionPID[me])
+
+        for _ in 0..<3 {
+            let held = try XCTUnwrap(sampler.sample(sessionPIDs: [me]).cpuPercentBySessionPID[me])
+            XCTAssertEqual(held, measured)
+        }
+
+        // And the baseline was held too, so this one divides the whole span
+        // since `measured` rather than the sliver since the last burst pass.
+        let after = DispatchTime.now().uptimeNanoseconds
+        while DispatchTime.now().uptimeNanoseconds - after < 600_000_000 { spins += 1 }
+        XCTAssertNotEqual(try XCTUnwrap(sampler.sample(sessionPIDs: [me]).cpuPercentBySessionPID[me]),
+                          measured)
+    }
+
+    /// A process cannot change its environment after `execve`, so the sweep
+    /// reads each one once and remembers the answer — including the answer
+    /// "there is no marker here", which is nearly every process. Caching only
+    /// the markers that were found would leave the cache doing nothing and make
+    /// every pass a cold one: 5–8 ms of environment reads against 1–2 ms for
+    /// the whole warm pass (§6), on the panel's once-a-second tick.
+    func testASecondPassReadsOnlyTheEnvironmentsThatAreNew() {
+        let sampler = ProcessSampler()
+        _ = sampler.sample(sessionPIDs: [])
+        let cold = sampler.lastPassStats()
+        XCTAssertEqual(cold.environmentsRead, cold.processes)
+
+        _ = sampler.sample(sessionPIDs: [])
+        let warm = sampler.lastPassStats()
+        // The machine goes on forking, so this is not zero. It is nowhere near
+        // the table's size, and it is the whole size when the cache is broken.
+        XCTAssertLessThan(warm.environmentsRead * 4, warm.processes)
+    }
+
+    /// `--dump` throws its first snapshot away and reports the second, because
+    /// a rate needs a predecessor and a single-pass dump has none (SPEC §2.8).
+    ///
+    /// Nothing else in the dump depends on the first pass, so deleting it
+    /// breaks no other test and the only symptom is a dash down the whole CPU
+    /// column — which is also what a quiet machine looks like.
+    func testTheDumpThrowsItsFirstSnapshotAway() {
+        var passes = 0
+        let reported = ConsoleDump.measuredSnapshot { () -> SwitcherSnapshot in
+            passes += 1
+            return SwitcherSnapshot(openWindows: [],
+                                    projects: [SwitcherRow(id: "pass\(passes)",
+                                                           kind: .project,
+                                                           displayName: "pass\(passes)",
+                                                           colorHex: "#000000",
+                                                           project: nil,
+                                                           window: nil,
+                                                           sessions: [],
+                                                           state: nil,
+                                                           activeSubagents: 0,
+                                                           subagentDescriptions: [])],
+                                    accessibilityTrusted: true,
+                                    generatedAt: Date())
+        }
+        XCTAssertEqual(passes, 2)
+        XCTAssertEqual(reported.projects.first?.id, "pass2")
+    }
+
+    /// Evicting the dead and filling in the new are one operation: the tables
+    /// are rebuilt from each sweep rather than added to. Added to, they would
+    /// grow for as long as the app runs, holding an entry for every process the
+    /// machine has ever started.
+    ///
+    /// Processes are started and killed across the two passes so that there is
+    /// something to evict — on a quiet machine two consecutive sweeps can see
+    /// exactly the same table, and then a cache that never evicts looks the
+    /// same as one that does.
+    ///
+    /// The question has to be put as a **decrease**, and both halves of the
+    /// previous version of it were unable to answer it. `cacheEntries` was
+    /// filled from the local the field is built from, one entry per process by
+    /// construction, so `cacheEntries == processes` was a tautology and the
+    /// mutation "append to the cache instead of rebuilding it" — which makes it
+    /// grow for the life of the app — stayed green. And `previousCPU` was not
+    /// asked about at all, though the name of the test is plural. Both are now
+    /// read back off the fields themselves.
+    ///
+    /// Forty processes rather than one, because the machine goes on forking
+    /// between the sweeps and a decrease of one would be inside that noise.
+    /// The pass with them in it has to be a *measured* one, not a held one, or
+    /// `previousCPU` is deliberately not rebuilt and the counter half of this
+    /// asks nothing — hence the wait past `minimumSampleSeconds`.
+    func testTheTablesAreRebuiltFromEachSweepRatherThanAddedTo() throws {
+        let sampler = ProcessSampler()
+        var processes: [Process] = []
+        for _ in 0..<40 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+            process.arguments = ["30"]
+            try process.run()
+            processes.append(process)
+        }
+
+        _ = sampler.sample(sessionPIDs: [])
+        let before = sampler.lastPassStats()
+        XCTAssertGreaterThan(before.processes, 40)
+        XCTAssertEqual(before.cacheEntries, before.processes)
+
+        for process in processes { process.terminate() }
+        // `waitUntilExit` reaps them, so by here the pids are out of the table.
+        for process in processes { process.waitUntilExit() }
+        Thread.sleep(forTimeInterval: SessionProcesses.minimumSampleSeconds)
+
+        _ = sampler.sample(sessionPIDs: [])
+        let after = sampler.lastPassStats()
+        XCTAssertLessThan(after.cacheEntries, before.cacheEntries)
+        XCTAssertLessThan(after.counterEntries, before.counterEntries)
+        XCTAssertEqual(after.cacheEntries, after.processes)
+        XCTAssertEqual(after.counterEntries, after.processes)
+    }
 }

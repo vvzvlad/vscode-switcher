@@ -499,6 +499,33 @@ struct UsageSnapshot: Sendable {
     /// kept unattributed until the project list can be asked whether the two
     /// slugs mean two projects (`DataSource.settle`).
     var contested: [ContestedSpend]
+    /// The same spend per slug directory, counted over the last hour instead of
+    /// the last week (`UsageStore.hourWindowSeconds`) — a **rate**, and the reason
+    /// it is one takes a sentence.
+    ///
+    /// The gateway's per-session aggregates are windowed: a session's block covers
+    /// what it spent inside the window asked for and nothing earlier. That was not
+    /// assumed, it was measured — a live session reads 5.3M over 15 minutes, 25.5M
+    /// over an hour and 177.3M over eight hours, and 115 of 115 sessions grow
+    /// monotonically as the window widens (2026-08-27; §2.9). So the tokens
+    /// reported for a window one hour long *are* tokens per hour, and nothing
+    /// here or downstream divides by anything.
+    ///
+    /// Same shape and same key as `tokensBySlug`, folded by the same `fold`
+    /// against the same slug map, so it makes exactly the same claim: the spend of
+    /// the sessions *started* in this directory, in the last 3600 s. A slug absent
+    /// here spent nothing in the hour, which is a reading and not an absence —
+    /// though `TokenCounts.knowsNothing` still separates "spent nothing" from
+    /// "nothing was reported", as it does for the week.
+    var hourlyTokensBySlug: [String: TokenCounts]
+    /// The hour's contested sessions, on the same terms as `contested` and settled
+    /// by the same `DataSource.settle`.
+    ///
+    /// Kept rather than dropped because dropping it is not neutral: a session
+    /// resumed in another directory would then carry a week's figure on its row
+    /// and no hourly one, so a project being worked in *right now* could read as
+    /// idle for the single reason that its chat was once resumed elsewhere.
+    var hourlyContested: [ContestedSpend]
     /// Spend of the sessions whose transcript is not on this machine — agent
     /// nodes, mostly. Not an error: it is real spend with no local owner.
     var unmatched: TokenCounts
@@ -563,6 +590,8 @@ struct UsageSnapshot: Sendable {
                                      accounts: [],
                                      tokensBySlug: [:],
                                      contested: [],
+                                     hourlyTokensBySlug: [:],
+                                     hourlyContested: [],
                                      unmatched: .zero,
                                      unmatchedSessions: 0,
                                      sustainable: nil,

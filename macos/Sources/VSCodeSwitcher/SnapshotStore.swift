@@ -21,10 +21,20 @@ final class SnapshotStore: ObservableObject {
     /// Latest model. Only ever replaced on the main thread.
     @Published private(set) var snapshot: SwitcherSnapshot = .empty
 
-    /// Poll interval while the panel is hidden.
-    private static let idleInterval: TimeInterval = 2
-    /// Poll interval while the panel is on screen.
-    private static let activeInterval: TimeInterval = 1
+    /// Poll interval while the panel is hidden, and the slowest tick anything
+    /// built on this store's cadence can count on.
+    ///
+    /// Not private, because `SessionProcesses.staleSampleSeconds` is measured in
+    /// these ticks and would otherwise be a number with a story attached to it.
+    /// `nonisolated` because that reader runs off the main thread, and a
+    /// globally-isolated constant hops whoever touches it onto the main actor
+    /// without a word (§6).
+    nonisolated static let idleInterval: TimeInterval = 2
+    /// Poll interval while the panel is on screen, and so the window every
+    /// figure the panel shows is measured over. `--dump` holds its two sweeps
+    /// this far apart for that reason, and reads the constant rather than
+    /// spelling a 1 of its own. `nonisolated` for the reason `idleInterval` is.
+    nonisolated static let activeInterval: TimeInterval = 1
     /// A burst of file system events collapses into a single rebuild.
     private static let watchDebounce: TimeInterval = 0.15
 

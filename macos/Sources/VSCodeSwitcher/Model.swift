@@ -231,6 +231,43 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     /// them alone.
     var usage: TokenCounts? = nil
 
+    /// What the row's sessions are burning right now, as a percentage of one
+    /// core, summed over every process attributed to them (SPEC §2.8). Above
+    /// 100 is legitimate — that is several cores.
+    ///
+    /// `nil` is "not measured", not "idle": a rate needs two sweeps, and the
+    /// first pass after launch has only one. An idle session is `0`.
+    ///
+    /// Appended after `usage` for the same reason `usage` was appended after
+    /// everything else.
+    var cpuPercent: Double? = nil
+
+    /// True when `cpuPercent` is a number *and* that number is only a lower
+    /// bound, because some of the row's chats were not measured this pass.
+    ///
+    /// The row's figure is a sum over its sessions, and a session drops out of
+    /// the sum when the sweep had nothing to say about it — its `claude` had not
+    /// been seen at the pass the held rates come from, or its counter went
+    /// backwards and the pass dropped the reading (SPEC §2.8). Summing what is
+    /// left and printing it as the whole is the same class of error §3.1 keeps
+    /// `nil` and `0` apart to avoid, only without the label: the error direction
+    /// is understatement, and understatement on this panel reads as "nothing to
+    /// see here".
+    ///
+    /// Stored rather than computed, because measured-ness is not a property of a
+    /// session — it belongs to the pass, and by the time the row exists the pass
+    /// is over. `≥` is what draws it, the same mark and for the same reason as
+    /// `usageIsLowerBound`.
+    var cpuIsLowerBound: Bool = false
+
+    /// Processes that belong to the row's sessions but whose parent chain no
+    /// longer names them: the parent exited, they reparented to pid 1, and only
+    /// `CLAUDE_PID` in their environment still says whose they are (SPEC §2.8).
+    ///
+    /// Not optional, because a sweep that ran always has an answer and the
+    /// answer is usually zero.
+    var orphanCount: Int = 0
+
     var contextFraction: Double? {
         guard let used = contextUsedTokens, let limit = contextLimitTokens, limit > 0 else { return nil }
         return Double(used) / Double(limit)

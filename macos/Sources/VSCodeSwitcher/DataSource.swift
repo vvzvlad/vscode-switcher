@@ -20,6 +20,9 @@ final class DataSource: @unchecked Sendable {
     /// Test seam: replaces the disk-bound assembly, so the coalescing around it
     /// can be exercised with a build of a known duration.
     private let buildOverride: (@Sendable () -> SwitcherSnapshot)?
+    /// The one place the previous CPU sweep lives. `assemble` is pure, so the
+    /// state a rate needs has to be held here, beside it (SPEC §2.8).
+    private let processes = ProcessSampler()
 
     private let snapshotLock = NSLock()
     private var lastSnapshot: SwitcherSnapshot?
@@ -97,9 +100,21 @@ final class DataSource: @unchecked Sendable {
         // hand `assemble` a directory table from one pass and a contested list
         // from the next, which is one session counted twice or not at all.
         let usageSnapshot = usage.snapshot
+        // Read into a local rather than passed straight through: the process
+        // sweep below has to be classified against exactly these pids, and
+        // asking twice would mean classifying against a list the rows were not
+        // built from.
+        let sessions = ClaudeSessions.liveSessions(config: config)
+        // 1.07–1.24 ms by the median run for the whole sweep — `proc_pid_rusage`
+        // and `proc_pidinfo` over the process table, plus one environment read
+        // per process that appeared since the last pass — against 5.9–6.6 ms on
+        // the first pass, when every environment on the machine is read (§6,
+        // where both figures and the reason for the difference live). No disk,
+        // and nothing here waits on anything.
+        let load = processes.sample(sessionPIDs: Set(sessions.map(\.pid)))
         return Self.assemble(projects: projects,
                              windows: VSCodeWindows.listWindows(bundleID: config.editorBundleID),
-                             sessions: ClaudeSessions.liveSessions(config: config),
+                             sessions: sessions,
                              activity: activity,
                              // A plain dictionary read under a lock: the poll
                              // that fills it lives in `UsageStore`, on its own
@@ -108,6 +123,8 @@ final class DataSource: @unchecked Sendable {
                              tokensBySlug: usageSnapshot.tokensBySlug,
                              contested: usageSnapshot.contested,
                              worktrees: Self.worktrees(of: projects),
+                             cpuBySessionPID: load.cpuPercentBySessionPID,
+                             orphansBySessionPID: load.orphansBySessionPID,
                              accessibilityTrusted: VSCodeWindows.isAccessibilityTrusted(),
                              generatedAt: readAt)
     }
@@ -170,6 +187,8 @@ final class DataSource: @unchecked Sendable {
                          tokensBySlug: [String: TokenCounts] = [:],
                          contested: [ContestedSpend] = [],
                          worktrees: [String: [String]] = [:],
+                         cpuBySessionPID: [Int32: Double] = [:],
+                         orphansBySessionPID: [Int32: Int] = [:],
                          accessibilityTrusted: Bool,
                          generatedAt: Date = Date()) -> SwitcherSnapshot {
         let projectsByRootName = Dictionary(grouping: projects, by: \.rootName)
@@ -264,7 +283,9 @@ final class DataSource: @unchecked Sendable {
             openWindows.append(Self.makeWindowRow(window: window,
                                                   project: project,
                                                   sessions: sessionsByWindow[window.id] ?? [],
-                                                  usage: project.flatMap { usageByProjectPath[$0.path] }))
+                                                  usage: project.flatMap { usageByProjectPath[$0.path] },
+                                                  cpu: cpuBySessionPID,
+                                                  orphans: orphansBySessionPID))
         }
 
         // A project with no window of its own keeps its sessions. This is the
@@ -279,7 +300,9 @@ final class DataSource: @unchecked Sendable {
             for session in pool { claimedSessionIDs.insert(session.sessionId) }
             projectRows.append(Self.makeProjectRow(project: project,
                                                    sessions: pool,
-                                                   usage: usageByProjectPath[project.path]))
+                                                   usage: usageByProjectPath[project.path],
+                                                   cpu: cpuBySessionPID,
+                                                   orphans: orphansBySessionPID))
         }
 
         // Sessions whose cwd is outside every scan root belong to no project and
@@ -294,7 +317,7 @@ final class DataSource: @unchecked Sendable {
             let group = orphansByCwd[cwd] ?? []
             let name = (cwd as NSString).lastPathComponent
             let active = group.first
-            let aggregate = Self.aggregate(group)
+            let aggregate = Self.aggregate(group, cpu: cpuBySessionPID, orphans: orphansBySessionPID)
             orphanRows.append(SwitcherRow(id: "cwd:\(cwd)",
                                           kind: .project,
                                           displayName: name,
@@ -318,7 +341,10 @@ final class DataSource: @unchecked Sendable {
                                           // the gateway knows about would be a
                                           // row of its own if an agent were
                                           // running there.
-                                          usage: usageBySlugOutsideProjects[ClaudeSessions.slug(forPath: cwd)]))
+                                          usage: usageBySlugOutsideProjects[ClaudeSessions.slug(forPath: cwd)],
+                                          cpuPercent: aggregate.cpuPercent,
+                                          cpuIsLowerBound: aggregate.cpuIsLowerBound,
+                                          orphanCount: aggregate.orphanCount))
         }
 
         return SwitcherSnapshot(openWindows: Self.rankedWindows(openWindows),
@@ -409,11 +435,13 @@ final class DataSource: @unchecked Sendable {
     private static func makeWindowRow(window: VSCodeWindowInfo,
                                       project: ProjectInfo?,
                                       sessions: [ClaudeSessionInfo],
-                                      usage: TokenCounts?) -> SwitcherRow {
+                                      usage: TokenCounts?,
+                                      cpu: [Int32: Double],
+                                      orphans: [Int32: Int]) -> SwitcherRow {
         let name = project?.displayName ?? window.rootName ?? window.title
         let color = project?.colorHex ?? WorkspaceIndex.fallbackColor(for: name)
         let active = Self.activeSession(for: window, among: sessions)
-        let aggregate = Self.aggregate(sessions)
+        let aggregate = Self.aggregate(sessions, cpu: cpu, orphans: orphans)
 
         return SwitcherRow(id: "window:\(window.id)",
                            kind: .window,
@@ -430,17 +458,22 @@ final class DataSource: @unchecked Sendable {
                            contextUsedTokens: active?.contextUsedTokens,
                            contextLimitTokens: active?.contextLimitTokens,
                            lastActivity: active?.lastActivity ?? sessions.first?.lastActivity,
-                           usage: usage)
+                           usage: usage,
+                           cpuPercent: aggregate.cpuPercent,
+                           cpuIsLowerBound: aggregate.cpuIsLowerBound,
+                           orphanCount: aggregate.orphanCount)
     }
 
     /// A project with no window of its own. It still carries whatever sessions
     /// run in it, so the panel shows agent state with or without Accessibility.
     private static func makeProjectRow(project: ProjectInfo,
                                        sessions: [ClaudeSessionInfo],
-                                       usage: TokenCounts?) -> SwitcherRow {
+                                       usage: TokenCounts?,
+                                       cpu: [Int32: Double],
+                                       orphans: [Int32: Int]) -> SwitcherRow {
         // `sessions` keeps the pool's order, which is most recently active first.
         let active = sessions.first
-        let aggregate = Self.aggregate(sessions)
+        let aggregate = Self.aggregate(sessions, cpu: cpu, orphans: orphans)
 
         return SwitcherRow(id: "project:\(project.path)",
                            kind: .project,
@@ -457,20 +490,53 @@ final class DataSource: @unchecked Sendable {
                            contextUsedTokens: active?.contextUsedTokens,
                            contextLimitTokens: active?.contextLimitTokens,
                            lastActivity: active?.lastActivity ?? project.mtime,
-                           usage: usage)
+                           usage: usage,
+                           cpuPercent: aggregate.cpuPercent,
+                           cpuIsLowerBound: aggregate.cpuIsLowerBound,
+                           orphanCount: aggregate.orphanCount)
     }
 
-    /// What a row shows for a group of sessions: the highest state among them
-    /// and the subagents running underneath.
+    /// What a row shows for a group of sessions: the highest state among them,
+    /// the subagents running underneath, and what their processes are doing.
     ///
     /// The row folds this into one indicator (`SwitcherRow.status`); the
     /// per-chat detail it does not draw is read straight off `sessions`, by the
     /// tooltip and by `--dump`.
-    static func aggregate(_ sessions: [ClaudeSessionInfo])
-        -> (state: AgentState?, activeSubagents: Int, subagentDescriptions: [String]) {
-        (state: sessions.map(\.state).max(),
-         activeSubagents: sessions.reduce(0) { $0 + $1.activeSubagents },
-         subagentDescriptions: sessions.flatMap { $0.subagents.filter(\.isActive).compactMap(\.description) })
+    ///
+    /// The two process figures come in as tables keyed by session pid because
+    /// that is the only key the sweep has: it classifies processes, and a
+    /// process knows which `claude` it descends from, not which row that
+    /// `claude` ended up on (SPEC §2.8).
+    ///
+    /// CPU is `nil` unless at least one of the row's sessions was measured, and
+    /// the sum runs over those that were. `0` and `nil` are different answers —
+    /// "nothing is running here" against "there has been one sweep so far" —
+    /// and the row is what tells them apart.
+    ///
+    /// **A sum over some of the chats is a lower bound and has to say so.** A
+    /// row with two chats, one of them unmeasured this pass, otherwise shows a
+    /// partial sum wearing the label of a whole one — the same class of error,
+    /// without the label. Reporting `nil` instead is not the fix: it understates
+    /// by *more* than the partial sum does, and §3.1 draws `nil` exactly like a
+    /// quiet row. So the number stands and `cpuIsLowerBound` marks it, which is
+    /// the arrangement `usageIsLowerBound` already uses for the same shape of
+    /// hole.
+    ///
+    /// No defaults on the two tables: every row constructor has to name them,
+    /// so a fifth one that forgets is a compile error rather than a row that
+    /// silently never shows a figure.
+    static func aggregate(_ sessions: [ClaudeSessionInfo],
+                          cpu: [Int32: Double],
+                          orphans: [Int32: Int])
+        -> (state: AgentState?, activeSubagents: Int, subagentDescriptions: [String],
+            cpuPercent: Double?, cpuIsLowerBound: Bool, orphanCount: Int) {
+        let measured = sessions.compactMap { cpu[$0.pid] }
+        return (state: sessions.map(\.state).max(),
+                activeSubagents: sessions.reduce(0) { $0 + $1.activeSubagents },
+                subagentDescriptions: sessions.flatMap { $0.subagents.filter(\.isActive).compactMap(\.description) },
+                cpuPercent: measured.isEmpty ? nil : measured.reduce(0, +),
+                cpuIsLowerBound: !measured.isEmpty && measured.count < sessions.count,
+                orphanCount: sessions.reduce(0) { $0 + (orphans[$1.pid] ?? 0) })
     }
 
     // MARK: - Ranking
