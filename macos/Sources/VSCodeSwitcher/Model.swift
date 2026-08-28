@@ -403,7 +403,13 @@ struct SwitcherSnapshot: Sendable, Codable {
     var generatedAt: Date
 
     /// Spend the assembly refused to put on any row: sessions filed under more
-    /// than one slug whose slugs claim different projects (`DataSource.settle`).
+    /// than one slug that `DataSource.settle` could not place. Four ways to get
+    /// here, not one — a live session naming a directory that is not among the
+    /// copies which could have spent in this window (the veto); no copy left at all
+    /// once the window narrowed them; survivors claiming different projects; and a
+    /// survivor that matched no project — however many survivors stand beside it
+    /// and whether or not any of them was recognised.
+    ///
     /// Reported by `--dump` rather than drawn — a bucket nobody can see is the
     /// silent loss the split exists to prevent, and a number handed to one of
     /// two projects by guesswork is the silent gain.
@@ -416,23 +422,30 @@ struct SwitcherSnapshot: Sendable, Codable {
     /// The same bucket for the hour's window, and it is **not** a second copy of
     /// the one above for tidiness.
     ///
-    /// The two windows can report different sessions, and the way into that state
-    /// that is reachable today is **failure**: the two `/gw/sessions` calls go out
-    /// in parallel and are awaited apart, so a week that timed out leaves the
-    /// week's figures untouched while the hour's arrive (`UsageStore.poll`). A
-    /// contested session in that hour is refused by `settle`, and the week's line
-    /// above has nothing to say about it at all. One bucket for both would then be
-    /// spend that no line reports, which is exactly the silent loss the split
-    /// exists to prevent.
+    /// The two buckets hold **different sets by construction**: each report
+    /// narrows its contest by its own window start (`UsageIndex.narrowToWindow`,
+    /// called once per report), so one session's contest is settled inside the
+    /// hour and still open over the week, and the two empty apart. That is not a
+    /// hypothetical — it is this machine's ordinary reading: four dumps of the
+    /// release build on 2026-08-28, three within seconds of 04:33 and one at
+    /// 04:49, all gave `ambiguous 7d: 12 sessions` against `ambiguous 1h: 0
+    /// sessions, -`. The week's tokens drift between them (582.53M to 589.86M ie)
+    /// and the counts do not, which is the half of the reading this is about. One
+    /// bucket for both would report the hour's refusal as a week's number.
+    ///
+    /// **Failure is a second way in**, and it is the one that makes the split
+    /// matter most: the two `/gw/sessions` calls go out in parallel and are
+    /// awaited apart, so a week that timed out leaves the week's figures untouched
+    /// while the hour's arrive (`UsageStore.poll`). An hourly contest `settle`
+    /// still refuses then has no week's line to appear on at all — spend no line
+    /// reports, which is exactly the silent loss the split exists to prevent.
     ///
     /// The gateway's cap on the week — its 200 largest consumers, the rest dropped
-    /// with `truncated` set (SPEC §2.7) — produces the same state, and it is **not
+    /// with `truncated` set (SPEC §2.7) — is a third way in, and it is **not
     /// firing on this machine**: measured 2026-08-27, the week's report came back
     /// with 116 sessions and `truncated: false`, and `--dump`'s `window:` line
-    /// carried no truncation suffix. So today the hour's sessions are a subset of
-    /// the week's, and the reason the two buckets are separate is the one above.
-    /// Two buckets are right under either reason; a claim that the two sets differ
-    /// today would not be.
+    /// carried no truncation suffix. So the *reported* hour's sessions are a
+    /// subset of the week's today; what the two buckets make of them is not.
     var ambiguousHourlyUsage: TokenCounts = .zero
     var ambiguousHourlySessions: Int = 0
 

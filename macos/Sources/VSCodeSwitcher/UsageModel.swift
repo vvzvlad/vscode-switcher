@@ -496,8 +496,15 @@ struct UsageSnapshot: Sendable {
     /// slug of each known project (`DataSource`).
     var tokensBySlug: [String: TokenCounts]
     /// Sessions filed under more than one slug — resumed in another directory —
-    /// kept unattributed until the project list can be asked whether the two
-    /// slugs mean two projects (`DataSource.settle`).
+    /// kept unattributed here.
+    ///
+    /// Already narrowed to this report's own window: `UsageStore.poll` runs
+    /// `UsageIndex.narrowToWindow` on the way in, dropping the copies that were not
+    /// written to inside it. So an entry's `slugs` is what *could have spent* here,
+    /// which may have come out at one or at none, not the list of copies on disk.
+    /// Settling what is left needs a layer that has the live sessions and the
+    /// project list — the veto first, then whether the survivors mean one project,
+    /// two, or none at all (`DataSource.settle`).
     var contested: [ContestedSpend]
     /// The same spend per slug directory, counted over the last hour instead of
     /// the last week (`UsageStore.hourWindowSeconds`) — a **rate**, and the reason
@@ -530,6 +537,20 @@ struct UsageSnapshot: Sendable {
     /// nodes, mostly. Not an error: it is real spend with no local owner.
     var unmatched: TokenCounts
     var unmatchedSessions: Int
+    /// The same bucket for the hour, and it is here for the reason
+    /// `hourlyContested` is: the hour has to be able to say what it lost.
+    ///
+    /// The week's has always been kept and printed; the hour's was folded and
+    /// thrown away, so spend by a session with no local transcript disappeared
+    /// from the hour with no line anywhere to notice it by — and it had a live
+    /// figure to discard. `--dump` on this machine printed `no local session 1h:
+    /// 1 sessions, 179k ie` on 2026-08-27 and `0 sessions, -` at 02:37 the next
+    /// night, the week's line holding the same agent node (`71fbe714-…`, 7.52M then
+    /// 7.50M ie) throughout. A bucket that fills and empties with the sliding hour
+    /// is exactly the one that must not be conjured into existence only once it is
+    /// non-empty: that is the state in which nobody can see it.
+    var hourlyUnmatched: TokenCounts = .zero
+    var hourlyUnmatchedSessions: Int = 0
     /// What the fleet may spend an hour and still last the week
     /// (`FleetCapacity.sustainable`) — the allowance the lead figure is stated
     /// against, and the denominator of the ratio both surfaces are coloured by.

@@ -603,10 +603,73 @@ final class UsageAttributionTests: XCTestCase {
 
     /// One transcript, filed under the slug of the directory the session started
     /// in. The bytes are gibberish: attribution must not depend on them.
-    private func file(_ sessionId: String, startedIn directory: String) throws {
-        let slug = transcripts.appendingPathComponent(ClaudeSessions.slug(forPath: directory))
+    ///
+    /// `writtenAt` dates the file, which is the one thing about it anything reads:
+    /// a life last written to before a window opened cannot have spent inside it
+    /// (`UsageIndex.narrowToWindow`). Left out, the file is dated now, which is
+    /// inside every window a test can ask about.
+    @discardableResult
+    private func file(_ sessionId: String,
+                      startedIn directory: String,
+                      writtenAt: Date? = nil) throws -> String {
+        let slugName = ClaudeSessions.slug(forPath: directory)
+        let slug = transcripts.appendingPathComponent(slugName)
         try FileManager.default.createDirectory(at: slug, withIntermediateDirectories: true)
-        try Data("not json at all".utf8).write(to: slug.appendingPathComponent("\(sessionId).jsonl"))
+        let transcript = slug.appendingPathComponent("\(sessionId).jsonl")
+        try Data("not json at all".utf8).write(to: transcript)
+        if let writtenAt {
+            try FileManager.default.setAttributes([.modificationDate: writtenAt],
+                                                  ofItemAtPath: transcript.path)
+        }
+        return slugName
+    }
+
+    /// One subagent transcript of that session, in the place Claude Code puts it:
+    /// `<slug>/<sessionId>/subagents/`, a level below the session's own file.
+    ///
+    /// It exists here because the gateway reports one aggregate for the whole
+    /// `session_id` while a subagent's writing lands in a different file entirely,
+    /// so the session's own mtime is not the whole of "was this life written to".
+    @discardableResult
+    private func subagentFile(_ name: String,
+                              of sessionId: String,
+                              startedIn directory: String,
+                              writtenAt: Date) throws -> String {
+        let slugName = ClaudeSessions.slug(forPath: directory)
+        let directory = transcripts.appendingPathComponent(slugName)
+            .appendingPathComponent(sessionId)
+            .appendingPathComponent("subagents")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let path = directory.appendingPathComponent("\(name).jsonl")
+        try Data("not json at all".utf8).write(to: path)
+        try FileManager.default.setAttributes([.modificationDate: writtenAt],
+                                              ofItemAtPath: path.path)
+        return slugName
+    }
+
+    /// A subagent entry that the directory listing names and `stat(2)` then
+    /// refuses — the same race the parent transcript has, one level down.
+    ///
+    /// A dangling symlink is that state made deterministic. `contentsOfDirectory`
+    /// returns the name (it does not follow the link), and `fileStamp` calls
+    /// `stat`, which does follow it and fails — which is exactly what a file
+    /// removed between the listing and the stamp looks like from inside
+    /// `wasWrittenInWindow`. The alternative, removing the file after the listing,
+    /// cannot be written from out here: the listing happens inside the function
+    /// under test.
+    @discardableResult
+    private func unstatableSubagentFile(_ name: String,
+                                        of sessionId: String,
+                                        startedIn directory: String) throws -> String {
+        let slugName = ClaudeSessions.slug(forPath: directory)
+        let subagents = transcripts.appendingPathComponent(slugName)
+            .appendingPathComponent(sessionId)
+            .appendingPathComponent("subagents")
+        try FileManager.default.createDirectory(at: subagents, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: subagents.appendingPathComponent("\(name).jsonl"),
+            withDestinationURL: subagents.appendingPathComponent("removed-\(name).jsonl"))
+        return slugName
     }
 
     private func session(_ identifier: String, input: Int) throws -> GatewaySession {
@@ -623,11 +686,19 @@ final class UsageAttributionTests: XCTestCase {
         let slugs = UsageIndex.slugsBySessionId(for: Set(sessions.map(\.sessionId)),
                                                 projectsDirectory: transcripts)
         let folded = UsageIndex.fold(sessions: sessions, slugsBySessionId: slugs)
+        // The window step the app takes between the fold and the assembly. Every
+        // transcript these tests write is dated now, so nothing here is narrowed
+        // away; it is in the path because leaving it out would make this helper a
+        // different pipeline from the one it stands for.
+        let contested = UsageIndex.narrowToWindow(
+            folded.contested,
+            since: Date().addingTimeInterval(-UsageStore.windowSeconds),
+            projectsDirectory: transcripts)
         let snapshot = DataSource.assemble(projects: projects,
                                            windows: [],
                                            sessions: [],
                                            tokensBySlug: folded.tokensBySlug,
-                                           contested: folded.contested,
+                                           contested: contested,
                                            worktrees: DataSource.worktrees(of: projects),
                                            accessibilityTrusted: true)
         return (snapshot, folded.unmatched, folded.unmatchedSessions)
@@ -771,11 +842,66 @@ final class UsageAttributionTests: XCTestCase {
         XCTAssertEqual(ConsoleDump.ambiguousLine(window: "7d",
                                                  sessions: result.snapshot.ambiguousUsageSessions,
                                                  tokens: result.snapshot.ambiguousUsage),
-                       "ambiguous 7d:     1 sessions, 12 ie (in 12, out 0, cw 0, cr 0)")
+                       "ambiguous 7d:        1 sessions, 12 ie (in 12, out 0, cw 0, cr 0)")
         XCTAssertEqual(ConsoleDump.ambiguousLine(window: "1h", sessions: 0, tokens: .zero),
-                       "ambiguous 1h:     0 sessions, -",
+                       "ambiguous 1h:        0 sessions, -",
                        "and it is printed when the bucket is empty: a line that appears only "
                        + "when it is non-empty teaches nobody the bucket exists")
+    }
+
+    /// **Every figure in the usage section starts in one column, and the widest
+    /// label is what that column is for.**
+    ///
+    /// The section was eight hand-counted runs of spaces plus one `column(…)` of
+    /// 18, and `no local session:` fitted that at 17 characters. Giving it a window
+    /// took it to 20, and `column` pads without ever truncating — so those two
+    /// lines, and only those two, would have started their figures two columns
+    /// right of every other line in the section, silently, with nothing anywhere to
+    /// fail.
+    ///
+    /// Asked of **the whole assembled section**, and that is the correction this
+    /// test needed. It used to compose four lines by hand out of `unmatchedLine`
+    /// and `ambiguousLine` — the only two of the section's eleven that have a
+    /// function of their own — while the other seven called `label` inline inside
+    /// `printUsage` and were reachable from no test at all. `unavailable:` growing
+    /// past the width would have pushed its own figure right, quietly, exactly the
+    /// way the four windowed labels once did. That is the `spendColumnWidth` defect
+    /// again: a constant pinned to its cell while the table it aligns is pinned to
+    /// nothing, and it is fixed the same way — by extracting the composition
+    /// (`ConsoleDump.usageLines`) and asking the rows.
+    ///
+    /// The fixture forces both optional lines out — `unavailable:`, the widest
+    /// inline label at 12 characters, and `window:` — so all eleven are measured.
+    ///
+    /// Two mutations, and the second is the one that shows the gap was real.
+    /// Putting the width back to 18 takes down 3 test cases and 6 assertions of
+    /// 639 (this one, `testTheDumpNamesTheAmbiguousBucketAndCountsIt` and
+    /// `testTheHoursOwnerlessSpendIsKeptAndPrinted`). Writing the literal `12` at
+    /// an inline call site — `column("unavailable:", 12)` in `usageLines`, where
+    /// `column` then pads nothing, the label being 12 characters itself — takes
+    /// down 1: this one. Run against the **pre-fix body** of this test, that same
+    /// literal fails **0 of 639**, which is the finding in one number.
+    func testTheUsageSectionsFiguresAllStartInOneColumn() throws {
+        var usage = UsageSnapshot.empty
+        usage.sessionsFailure = "/gw/sessions: timed out"
+        usage.since = Date().addingTimeInterval(-UsageStore.windowSeconds)
+        let lines = ConsoleDump.usageLines(usage, snapshot: .empty)
+
+        XCTAssertEqual(lines.count, 11,
+                       "the fixture has to reach every line of the section, the two conditional "
+                       + "ones included, or the labels it does not draw go unmeasured")
+        for line in lines {
+            // The label is everything up to its colon; the figure starts at the
+            // first non-blank after the padding. Asking where the padding ends is
+            // the whole property — `column` never truncates, so a label wider than
+            // the width simply moves its own figure right.
+            let colon = try XCTUnwrap(line.firstIndex(of: ":"), "no label in \(line)")
+            let figure = try XCTUnwrap(line[line.index(after: colon)...].firstIndex { $0 != " " },
+                                       "no figure in \(line)")
+            XCTAssertEqual(line.distance(from: line.startIndex, to: figure),
+                           2 + ConsoleDump.usageLabelWidth,
+                           "\(line) does not line up with the rest of the section")
+        }
     }
 
     /// The hour has a bucket of its own, and it is filled by the hour's own
@@ -851,6 +977,435 @@ final class UsageAttributionTests: XCTestCase {
                        "two directories of one project are not a disagreement")
     }
 
+    // MARK: - A session resumed in another project, over two windows
+
+    /// The live pair of 2026-08-27, cut down to what decides it.
+    ///
+    /// Session `8fa4e946-…` had a copy under the slug of `hammerola` — 16.5 MB and
+    /// being written at 20:01 that day — and a copy under the slug of
+    /// `cad_snapshot_hub`, 6.1 MB and untouched since 2026-08-24 17:20. Both are
+    /// real projects inside the scan roots, so the contest is genuine: over the
+    /// week the gateway's single aggregate really does hold spend from both lives.
+    /// Over the sliding hour it cannot: the second life is days outside it.
+    ///
+    /// The second project is named with underscores on purpose. `cad_snapshot_hub`
+    /// and a directory literally called `cad-snapshot-hub` slug identically, which
+    /// is what makes reading a slug backwards a way to invent a directory that
+    /// never existed — and it cost a wrong diagnosis on this very session.
+    private func resumedSession(now: Date, input: Int = 12, silentFor: TimeInterval = 3 * 86_400)
+        throws -> (current: ProjectInfo, previous: ProjectInfo, contested: [ContestedSpend]) {
+        let current = try makeProject("hammerola")
+        let previous = try makeProject("cad_snapshot_hub")
+        try file("s1", startedIn: current.path, writtenAt: now)
+        try file("s1", startedIn: previous.path, writtenAt: now.addingTimeInterval(-silentFor))
+
+        let folded = UsageIndex.fold(sessions: [try session("s1", input: input)],
+                                     slugsBySessionId: UsageIndex.slugsBySessionId(
+                                        for: ["s1"], projectsDirectory: transcripts))
+        XCTAssertEqual(folded.contested.count, 1, "the fixture has to be contested to be about this")
+        return (current, previous, folded.contested)
+    }
+
+    /// A live session file for `sessionId`, started in `cwd` — the record outside
+    /// the transcript tree that says which life of the session is the current one.
+    private func live(_ sessionId: String, startedIn cwd: String) -> ClaudeSessionInfo {
+        TestFixtures.session(id: sessionId, cwd: cwd, state: .working)
+    }
+
+    private func narrow(_ contested: [ContestedSpend], since: Date) -> [ContestedSpend] {
+        UsageIndex.narrowToWindow(contested, since: since, projectsDirectory: transcripts)
+    }
+
+    /// **The hour gives the contest to the life that is actually being written.**
+    ///
+    /// This is the defect the change was made for: on 2026-08-27 the hour reported
+    /// 42.53M, of which 30.58M reached rows and 11.95M — the largest single
+    /// spender on the machine, in a project with four agents working in it — was
+    /// dropped as ambiguous. 28.1% of the hour, and the row it belonged to printed
+    /// no rate at all, for the single reason that its chat had once been resumed
+    /// somewhere else. SPEC §2.9 already named that outcome as the thing not to do.
+    ///
+    /// The mtime is what settles it, and it is not a tie-break between two
+    /// transcripts (mtime and size as *tie-breaks* stay rejected — see
+    /// `DataSource.settle`): it is the observation that a file untouched for three
+    /// days cannot have spent anything in the last hour. The live session file
+    /// agrees, and this fixture has one, because that is the shape the live case
+    /// had.
+    ///
+    /// Checked by having `narrowToWindow` keep the newest copy instead of every
+    /// copy inside the window — the tempting rule, and the one that would answer
+    /// the week wrongly: this test stays green and its pair below fails.
+    func testTheHourGivesTheContestToTheLifeThatWasWrittenInIt() throws {
+        let now = Date()
+        let fixture = try resumedSession(now: now)
+        let projects = [fixture.current, fixture.previous]
+
+        let snapshot = DataSource.assemble(
+            projects: projects,
+            windows: [],
+            sessions: [live("s1", startedIn: fixture.current.path)],
+            hourlyContested: narrow(fixture.contested,
+                                    since: now.addingTimeInterval(-UsageStore.hourWindowSeconds)),
+            worktrees: DataSource.worktrees(of: projects),
+            accessibilityTrusted: true)
+
+        let current = try XCTUnwrap(snapshot.projects.first { $0.project?.path == fixture.current.path })
+        let previous = try XCTUnwrap(snapshot.projects.first { $0.project?.path == fixture.previous.path })
+        XCTAssertEqual(current.hourlyUsage?.input, 12,
+                       "the project being worked in right now still prints no rate")
+        XCTAssertNil(previous.hourlyUsage, "the life that has been silent for days took the spend")
+        XCTAssertEqual(snapshot.ambiguousHourlySessions, 0)
+        XCTAssertEqual(snapshot.ambiguousHourlyUsage, .zero)
+    }
+
+    /// **And the week keeps the very same contest ambiguous, because over a week
+    /// both lives really were running.**
+    ///
+    /// One rule, two windows, two different and correct answers — that pair is the
+    /// whole change. Handing the week to `hammerola` as well would move up to four
+    /// days of another project's work onto the wrong row: a new silent
+    /// misattribution, which is the class of defect this path exists to remove.
+    ///
+    /// Checked by the mutation named on its pair above — `narrowToWindow` keeping
+    /// only the newest copy — which resolves this contest to `hammerola` and turns
+    /// this test red while leaving the hour's green.
+    func testTheWeekKeepsTheSameContestAmbiguousBecauseBothLivesRanInsideIt() throws {
+        let now = Date()
+        let fixture = try resumedSession(now: now)
+        let projects = [fixture.current, fixture.previous]
+
+        let snapshot = DataSource.assemble(
+            projects: projects,
+            windows: [],
+            sessions: [live("s1", startedIn: fixture.current.path)],
+            contested: narrow(fixture.contested,
+                              since: now.addingTimeInterval(-UsageStore.windowSeconds)),
+            worktrees: DataSource.worktrees(of: projects),
+            accessibilityTrusted: true)
+
+        for project in projects {
+            let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == project.path })
+            XCTAssertNil(row.usage, "a week of another project's work landed on \(project.rootName)")
+        }
+        XCTAssertEqual(snapshot.ambiguousUsageSessions, 1)
+        XCTAssertEqual(snapshot.ambiguousUsage.input, 12, "counted, and still named as nobody's")
+    }
+
+    /// **A copy that cannot be stat'ed keeps its claim on the window.**
+    ///
+    /// The rule was written down in `narrowToWindow`'s comment and held by nothing
+    /// else: turning its `else { return true }` into `else { return false }` left
+    /// the whole suite green. What it costs is not hypothetical. A copy is listed
+    /// and then stat'ed, the writer that removes it is not synchronised with this
+    /// pass at all, and any gap between the two will do — so a copy can be listed
+    /// and be gone by the time it is asked about. If the copy that vanishes is the
+    /// *winning* one, the contest is left holding a single claim, `settle` counts
+    /// it, and a whole session's spend lands on a row it does not belong to. That
+    /// is the silent misattribution `contested` exists to prevent.
+    ///
+    /// **The rule is written twice, so it is asked twice.** `wasWrittenInWindow`
+    /// stats two kinds of file — the parent transcript and every `*.jsonl` under
+    /// `subagents/` — and each has its own `else { return true }`. Only the parent's
+    /// was held here, and flipping the subagent one to `false` took down nothing at
+    /// all. The cost is the same and just as reachable, and the caching is beside
+    /// the point on both halves: the `subagents/` listing goes through no cache at
+    /// all (`UsageIndex.listingCache` serves `slugsBySessionId` alone), and the slug
+    /// listings that do are re-checked against directory mtime on every call, so
+    /// neither half's listing is any staler than the pass it runs in.
+    ///
+    /// Four lives, because a direction needs a control: the one written inside the
+    /// window survives, the one three days stale is dropped, the one whose own
+    /// transcript is missing survives with the first, and the one that is stale by
+    /// its transcript but has a subagent entry that cannot be stat'ed survives too.
+    /// Without the stale life this would agree with a rule that narrows nothing at
+    /// all.
+    func testACopyThatCannotBeStatedKeepsItsClaimOnTheWindow() throws {
+        let now = Date()
+        let longAgo = now.addingTimeInterval(-3 * 86_400)
+        let fresh = try makeProject("hammerola")
+        let stale = try makeProject("cad_snapshot_hub")
+        let vanishing = try makeProject("research_mcp")
+        let racing = try makeProject("ukuetis_site")
+        try file("s1", startedIn: fresh.path, writtenAt: now)
+        try file("s1", startedIn: stale.path, writtenAt: longAgo)
+        let vanished = try file("s1", startedIn: vanishing.path, writtenAt: now)
+        // Stale by its own transcript, so the listing is reached, and the only
+        // thing the listing names is a file the stamp cannot answer about.
+        try file("s1", startedIn: racing.path, writtenAt: longAgo)
+        let raced = try unstatableSubagentFile("agent-1", of: "s1", startedIn: racing.path)
+
+        // Listed first and removed second, which is the order the race takes: the
+        // slug is in the contest because the listing saw it, and the file is gone
+        // by the time the stamp is asked for.
+        let contested = UsageIndex.fold(
+            sessions: [try session("s1", input: 12)],
+            slugsBySessionId: UsageIndex.slugsBySessionId(for: ["s1"],
+                                                          projectsDirectory: transcripts)).contested
+        XCTAssertEqual(contested.first?.slugs.count, 4, "the fixture has to hold all four lives")
+        try FileManager.default.removeItem(at: transcripts.appendingPathComponent(vanished)
+                                            .appendingPathComponent("s1.jsonl"))
+
+        // The fourth life is only about the subagent branch if the listing really
+        // does name the file and the stamp really is what fails. Both halves are
+        // asked, because a fixture that quietly listed nothing would pass the
+        // assertion below for the wrong reason.
+        let subagents = transcripts.appendingPathComponent(raced)
+            .appendingPathComponent("s1/subagents")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: subagents.path),
+                       ["agent-1.jsonl"], "the listing has to name the file for this to be the race")
+        XCTAssertNil(fileStamp(atPath: subagents.appendingPathComponent("agent-1.jsonl").path),
+                     "and the stamp has to be the half that fails")
+
+        let survivors = Set(narrow(contested,
+                                   since: now.addingTimeInterval(-UsageStore.hourWindowSeconds))
+            .first?.slugs ?? [])
+        XCTAssertTrue(survivors.contains(ClaudeSessions.slug(forPath: fresh.path)),
+                      "the life written inside the window lost its claim")
+        XCTAssertTrue(survivors.contains(vanished),
+                      "a copy that could not be stat'ed was dropped from the contest, which is "
+                      + "how a whole session's spend is handed to whichever copy is left")
+        XCTAssertTrue(survivors.contains(raced),
+                      "a copy whose subagent file could not be stat'ed was dropped, which costs "
+                      + "exactly what the parent transcript's half of this rule costs")
+        XCTAssertFalse(survivors.contains(ClaudeSessions.slug(forPath: stale.path)),
+                       "a life three days out of the window kept its claim, so this fixture "
+                       + "would agree with a rule that narrows nothing")
+    }
+
+    /// **A life whose subagent is writing could have spent**, even while the
+    /// session's own transcript stands still.
+    ///
+    /// The narrowing asked `<slug>/<sessionId>.jsonl` and nothing else, and that is
+    /// not where a subagent writes: its records go to
+    /// `<slug>/<sessionId>/subagents/agent-*.jsonl` (§2.6.3) while the gateway
+    /// keeps reporting one aggregate for the whole `session_id`. So the parent file
+    /// can stand still through a long stretch of real spending. That is a live
+    /// table, and the population moves with the finding, so neither is a fixed
+    /// number: passes on 2026-08-27 and 2026-08-28 over 609 session transcripts
+    /// with 344 `subagents/` directories found 10 and then 6 with a subagent file
+    /// newer than their parent, the largest gap 917.5 s (15.29 min) and then
+    /// 124.2 s, while recounts on 2026-08-28 saw 613 transcripts, 345 directories
+    /// and 5 such sessions both times, gap 355.8 s (5.93 min) at 05:44 and 330.2 s
+    /// at 05:58. All
+    /// fit inside the hour, so nothing is misattributed today — which is luck: a
+    /// subagent running longer than the window drops the working life out of the
+    /// survivors and leaves a rival copy that a resume had merely touched, and the
+    /// live-session veto is no backstop because it only sees sessions started from
+    /// the VSCode extension.
+    ///
+    /// Both lives carry a `subagents/` directory on purpose. What keeps the first
+    /// one is that something under it was written *inside the window*, not that it
+    /// has subagents at all.
+    func testASubagentWritingKeepsALifeWhoseTranscriptStandsStill() throws {
+        let now = Date()
+        let longAgo = now.addingTimeInterval(-3 * 86_400)
+        let working = try makeProject("hammerola")
+        let quiet = try makeProject("cad_snapshot_hub")
+        try file("s1", startedIn: working.path, writtenAt: longAgo)
+        try subagentFile("agent-1", of: "s1", startedIn: working.path, writtenAt: now)
+        try file("s1", startedIn: quiet.path, writtenAt: longAgo)
+        try subagentFile("agent-1", of: "s1", startedIn: quiet.path, writtenAt: longAgo)
+
+        let contested = UsageIndex.fold(
+            sessions: [try session("s1", input: 12)],
+            slugsBySessionId: UsageIndex.slugsBySessionId(for: ["s1"],
+                                                          projectsDirectory: transcripts)).contested
+        XCTAssertEqual(contested.first?.slugs.count, 2, "the fixture has to be contested")
+
+        let survivors = narrow(contested,
+                               since: now.addingTimeInterval(-UsageStore.hourWindowSeconds))
+            .first?.slugs
+        XCTAssertEqual(survivors, [ClaudeSessions.slug(forPath: working.path)],
+                       "the life being written to by a subagent was narrowed away, and the "
+                       + "contest handed to the copy a resume had merely touched")
+    }
+
+    /// A live session whose **own** life was narrowed out of the window, while a
+    /// rival copy was being written inside it. The two records describe two
+    /// different situations, and the safe answer is the one that was there before:
+    /// ambiguous.
+    ///
+    /// This is the reachable form of the veto's condition, and it took a second
+    /// look to find. The fixture here used to name `/private/tmp/somewhere-else` —
+    /// a directory among none of the copies — which cannot happen: a running
+    /// session has a transcript under the slug of the directory it started in, and
+    /// `slugsBySessionId` lists every copy there is, so the live slug is always one
+    /// of them at the fold. What removes it is the *narrowing*: the live session's
+    /// own transcript can be silent longer than the window (it is idle, or the
+    /// hour has slid past its last record) while the other life of the same
+    /// `session_id`, resumed elsewhere, is being written right now. Then the hour
+    /// has exactly one claim standing and it is not the one the live record names.
+    ///
+    /// Reachable rather than decorative in the second sense too — the narrowing
+    /// has left exactly one claim standing, so without the veto this spend lands on
+    /// `hammerola`.
+    ///
+    /// Checked by deleting the live-session refusal in `settle`. It used to say
+    /// here that this test fails "and its neighbours do not", which was never run:
+    /// the mutation takes down **2 test cases and 6 assertions** of 639 — this one
+    /// and `testBothWindowsAreSettledAgainstTheSameLiveSessions`, which is exactly
+    /// right, since that one exists to check the veto reaches both windows. Rerun
+    /// on the fixture above (2026-08-28), because a fixture change is a change to
+    /// what the mutation can be caught by: same 2 cases, same 6 assertions.
+    func testALiveSessionWhoseOwnLifeFellOutOfTheWindowLeavesTheContestAmbiguous() throws {
+        let now = Date()
+        let fixture = try resumedSession(now: now)
+        let projects = [fixture.current, fixture.previous]
+
+        let snapshot = DataSource.assemble(
+            projects: projects,
+            windows: [],
+            sessions: [live("s1", startedIn: fixture.previous.path)],
+            hourlyContested: narrow(fixture.contested,
+                                    since: now.addingTimeInterval(-UsageStore.hourWindowSeconds)),
+            worktrees: DataSource.worktrees(of: projects),
+            accessibilityTrusted: true)
+
+        let current = try XCTUnwrap(snapshot.projects.first { $0.project?.path == fixture.current.path })
+        XCTAssertNil(current.hourlyUsage,
+                     "the surviving claim was taken for the answer while the live session says "
+                     + "its own life is the other one")
+        XCTAssertEqual(snapshot.ambiguousHourlySessions, 1)
+    }
+
+    /// **One `session_id`, one live row.** This is the invariant that lets
+    /// `DataSource.liveSlugsBySessionId` be a map at all, and therefore lets the
+    /// contest veto ask one question and get one answer.
+    ///
+    /// It replaces a `LiveStart.disputed` case that refused a contest when two live
+    /// sessions claimed one identifier from two different directories. That case
+    /// could not fire: the only producer of its input is
+    /// `ClaudeSessions.liveSessions`, which dedupes by session id, so the pair never
+    /// reached the map and the only test for it built the pair by hand — a test of
+    /// the line next to it rather than of the system. Its comment was wrong as well
+    /// as unreachable, claiming a protection against
+    /// `Dictionary(uniquingKeysWith:)` picking one of two disagreeing answers while
+    /// `liveSessions` had already done exactly that one layer below, keeping the
+    /// lexicographically first `<pid>.json`. So: the branch is gone, and this holds
+    /// the reason it is unnecessary. It is what has to go red before the veto's
+    /// assumption is reopened.
+    ///
+    /// Two session files naming one identifier from two directories, and a pid that
+    /// really is alive — this process — because `isSessionProcessAlive` throws out
+    /// everything else before the dedup is ever reached.
+    func testOneSessionIdYieldsOneLiveRow() throws {
+        let sessionsDirectory = base.appendingPathComponent("claude-sessions")
+        try FileManager.default.createDirectory(at: sessionsDirectory, withIntermediateDirectories: true)
+        let identifier = "live-\(UUID().uuidString)"
+        for (name, cwd) in [("100.json", "first"), ("200.json", "second")] {
+            let body = """
+            {"sessionId": "\(identifier)", "cwd": "\(projectsRoot.appendingPathComponent(cwd).path)",
+             "entrypoint": "claude-vscode", "pid": \(getpid())}
+            """
+            try Data(body.utf8).write(to: sessionsDirectory.appendingPathComponent(name))
+        }
+
+        let sessions = ClaudeSessions.liveSessions(config: .default,
+                                                   sessionsDirectory: sessionsDirectory)
+        XCTAssertEqual(sessions.count, 1,
+                       "two files named one session and both became rows, so the veto now has "
+                       + "two answers to one question and the map keeps whichever it likes")
+        XCTAssertEqual(sessions.first?.cwd, projectsRoot.appendingPathComponent("first").path,
+                       "the winner is the lexicographically first file, not directory order")
+        // Asked of the map's *answer*, not of its size: `count == 1` is true for
+        // any non-empty `sessions` here, since the fixture has one identifier and
+        // a dictionary keyed by it cannot hold two — an assertion with no "no" in
+        // it, green under the very mutation it was put here to catch.
+        XCTAssertEqual(DataSource.liveSlugsBySessionId(of: sessions)[identifier],
+                       ClaudeSessions.slug(forPath: projectsRoot.appendingPathComponent("first").path),
+                       "the veto is answered about a directory the surviving row does not name")
+    }
+
+    /// No live session at all — both lives are over — and both copies were written
+    /// inside the window. This is the case that has to keep behaving exactly as it
+    /// did before any of this: two claims, nothing to choose between them,
+    /// ambiguous.
+    ///
+    /// Checked by the same "keep the newest copy" mutation as the week's test: it
+    /// hands this spend to whichever life was written last, which is the coin-flip
+    /// with a straight face `settle` has always refused.
+    func testWithNoLiveSessionAndBothLivesInsideTheWindowNothingIsResolved() throws {
+        let now = Date()
+        let fixture = try resumedSession(now: now.addingTimeInterval(-3 * 86_400),
+                                         silentFor: 2 * 86_400)
+        let projects = [fixture.current, fixture.previous]
+
+        let snapshot = DataSource.assemble(
+            projects: projects,
+            windows: [],
+            sessions: [],
+            contested: narrow(fixture.contested,
+                              since: now.addingTimeInterval(-UsageStore.windowSeconds)),
+            worktrees: DataSource.worktrees(of: projects),
+            accessibilityTrusted: true)
+
+        for project in projects {
+            let row = try XCTUnwrap(snapshot.projects.first { $0.project?.path == project.path })
+            XCTAssertNil(row.usage, "\(project.rootName) was handed a contest nobody can settle")
+        }
+        XCTAssertEqual(snapshot.ambiguousUsageSessions, 1)
+    }
+
+    /// **Both windows are settled against the same live sessions**, and nothing
+    /// else in the suite says so.
+    ///
+    /// `spread` is one function called twice because "whose spend is this" may have
+    /// only one policy in one snapshot (SPEC §2.9). The live-session map is that
+    /// policy, so a window given it while the other went without would be exactly
+    /// the split the single function exists to prevent — and it would be invisible,
+    /// since each window's figures are read on their own.
+    ///
+    /// The fixture makes both windows resolvable on their own: the rival life is a
+    /// month old, so it falls outside the week as well as the hour, and only the
+    /// live session's refusal keeps either figure off a row.
+    ///
+    /// The live record names that rival life, and it used to name
+    /// `/private/tmp/somewhere-else` — a directory among none of the copies, which
+    /// cannot happen for the reason
+    /// `testALiveSessionWhoseOwnLifeFellOutOfTheWindowLeavesTheContestAmbiguous`
+    /// gives: a running session has a transcript under the slug of the directory it
+    /// started in, and `slugsBySessionId` lists every copy there is. Pointing it at
+    /// `previous` costs the fixture nothing — that life is already a month silent,
+    /// so both windows narrow it away and the veto fires in both exactly as before —
+    /// and it buys the difference between "implausible" and "impossible": a session
+    /// resumed elsewhere and left idle for a month is a session anyone could have.
+    ///
+    /// Checked by passing `[:]` to one `spread` call and then to the other, and
+    /// the two directions are **not** symmetric — the note here used to claim each
+    /// way round turns one half red "and nothing else in the file notices", which
+    /// holds for one of them only. Starving the **week** takes down 1 test case and
+    /// 2 assertions of 639: this one, alone, as claimed. Starving the **hour**
+    /// takes down 2 test cases and 4 assertions — this one and
+    /// `testALiveSessionWhoseOwnLifeFellOutOfTheWindowLeavesTheContestAmbiguous`,
+    /// whose fixture is an hourly contest and which therefore has every right to
+    /// notice. Rerun on the fixture above (2026-08-28), because moving the live
+    /// record is a change to what those mutations can be caught by: same 1 case and
+    /// 2 assertions, same 2 cases and 4 assertions. Deleting the veto in `settle`
+    /// outright was rerun on it too — all four assertions here go red, 2 cases and
+    /// 6 assertions of 639 across the file, exactly as before the move.
+    func testBothWindowsAreSettledAgainstTheSameLiveSessions() throws {
+        let now = Date()
+        let fixture = try resumedSession(now: now, silentFor: 30 * 86_400)
+        let projects = [fixture.current, fixture.previous]
+
+        let snapshot = DataSource.assemble(
+            projects: projects,
+            windows: [],
+            sessions: [live("s1", startedIn: fixture.previous.path)],
+            contested: narrow(fixture.contested,
+                              since: now.addingTimeInterval(-UsageStore.windowSeconds)),
+            hourlyContested: narrow(fixture.contested,
+                                    since: now.addingTimeInterval(-UsageStore.hourWindowSeconds)),
+            worktrees: DataSource.worktrees(of: projects),
+            accessibilityTrusted: true)
+
+        let current = try XCTUnwrap(snapshot.projects.first { $0.project?.path == fixture.current.path })
+        XCTAssertNil(current.usage, "the week was settled without the live sessions")
+        XCTAssertNil(current.hourlyUsage, "the hour was settled without the live sessions")
+        XCTAssertEqual(snapshot.ambiguousUsageSessions, 1)
+        XCTAssertEqual(snapshot.ambiguousHourlySessions, 1)
+    }
+
     /// The worktree listing is the one piece of disk `assemble` cannot do for
     /// itself. A project with no `.claude/worktrees` must not appear in it at
     /// all — that guard is what keeps 96 failing `contentsOfDirectory` calls off
@@ -903,7 +1458,8 @@ final class UsageJoinTests: XCTestCase {
         XCTAssertEqual(folded.tokensBySlug, ["-x-two": TokenCounts(input: 5, output: 0,
                                                                    cacheCreation: 0, cacheRead: 0)],
                        "only the session with one slug was folded")
-        XCTAssertEqual(folded.contested, [ContestedSpend(slugs: ["-x-one", "-x-two"],
+        XCTAssertEqual(folded.contested, [ContestedSpend(sessionId: "a",
+                                                         slugs: ["-x-one", "-x-two"],
                                                          tokens: try session("a", input: 10).tokens)])
         XCTAssertEqual(folded.unmatchedSessions, 0, "it has a transcript; whose is the open question")
     }
@@ -1657,11 +2213,20 @@ final class UsageStoreTests: XCTestCase {
     }
 
     /// A transcript filed under the slug of `directory`, where Claude Code files
-    /// one. Never opened — the slug of the directory is the whole signal.
-    private func file(_ sessionId: String, under directory: String, in root: URL) throws {
+    /// one. Never opened — the slug of the directory is the whole signal, and
+    /// `writtenAt` is the one thing about the file itself that anything reads.
+    private func file(_ sessionId: String,
+                      under directory: String,
+                      in root: URL,
+                      writtenAt: Date? = nil) throws {
         let slug = root.appendingPathComponent(ClaudeSessions.slug(forPath: directory))
         try FileManager.default.createDirectory(at: slug, withIntermediateDirectories: true)
-        try Data("not json at all".utf8).write(to: slug.appendingPathComponent("\(sessionId).jsonl"))
+        let transcript = slug.appendingPathComponent("\(sessionId).jsonl")
+        try Data("not json at all".utf8).write(to: transcript)
+        if let writtenAt {
+            try FileManager.default.setAttributes([.modificationDate: writtenAt],
+                                                  ofItemAtPath: transcript.path)
+        }
     }
 
     /// A `/gw/sessions` body naming the given sessions, each with `input` input
@@ -1832,6 +2397,81 @@ final class UsageStoreTests: XCTestCase {
                        "the hour's contested spend came from the week's body")
         XCTAssertTrue(snapshot.hourlyTokensBySlug.isEmpty,
                       "a contested session was counted onto a row after all")
+    }
+
+    /// **Each window narrows a contested session against its own length.**
+    ///
+    /// One session, two copies, and the second copy last written three days ago:
+    /// inside the week, days outside the hour. So the week keeps both claims — over
+    /// seven days the gateway's single aggregate really does hold spend from both
+    /// lives — and the hour keeps one, because a file nothing has touched since
+    /// Tuesday cannot have spent in the last sixty minutes. Which project each
+    /// claim belongs to is settled a layer up; what is held here is that the two
+    /// windows are narrowed apart.
+    ///
+    /// Checked by narrowing the hour with `windowSeconds` instead of
+    /// `hourWindowSeconds`: the hour then keeps the stale copy and this fails.
+    func testEachWindowNarrowsAContestedSessionAgainstItsOwnLength() async throws {
+        let root = try makeProjectsDirectory()
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        try file("s-both", under: "/Users/x/current", in: root, writtenAt: now)
+        try file("s-both", under: "/Users/x/stale", in: root,
+                 writtenAt: now.addingTimeInterval(-3 * 86_400))
+
+        let hourSince = Int(now.timeIntervalSince1970 - UsageStore.hourWindowSeconds)
+        let snapshot = await UsageStore.poll(
+            client: client(transport(sessions: Self.sessionsBody(["s-both"], input: 9),
+                                     sessionsBySince: [
+                                        hourSince: Self.sessionsBody(["s-both"], input: 4)])),
+            previous: .empty, now: now, projectsDirectory: root)
+
+        XCTAssertEqual(snapshot.contested.map(\.slugs), [["-Users-x-current", "-Users-x-stale"]],
+                       "both lives ran inside the week and both have to keep their claim")
+        XCTAssertEqual(snapshot.hourlyContested.map(\.slugs), [["-Users-x-current"]],
+                       "a life last written three days ago still claims the last hour")
+        XCTAssertEqual(snapshot.hourlyContested.first?.sessionId, "s-both",
+                       "the identifier is what lets the live sessions be asked about this entry")
+    }
+
+    /// **The hour's ownerless spend reaches the snapshot, and a line of `--dump`.**
+    ///
+    /// The week has always kept `unmatched` and printed it; the hourly fold threw
+    /// its copy away, so spend by a session with no local transcript — the agent
+    /// nodes, mostly — left the hour with nothing anywhere to notice it by. That
+    /// bucket does fill: `--dump` on this machine printed `no local session 1h:
+    /// 1 sessions, 179k ie` on 2026-08-27 beside the week's `1 sessions, 7.52M ie`,
+    /// the same session `71fbe714-…` in both, and `0 sessions, -` at 02:37 the next
+    /// night while the week still held it. So the hourly fold was discarding a live
+    /// figure — a stronger reason for the field than an empty bucket would have
+    /// been, and the reason the line is printed even when it reads zero.
+    ///
+    /// Checked by deleting the two assignments in the hourly branch of `poll`: the
+    /// counters go to zero and this fails.
+    func testTheHoursOwnerlessSpendIsKeptAndPrinted() async throws {
+        let root = try makeProjectsDirectory()
+        try file("s-here", under: "/Users/x/project", in: root)
+
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        let hourSince = Int(now.timeIntervalSince1970 - UsageStore.hourWindowSeconds)
+        let snapshot = await UsageStore.poll(
+            client: client(transport(sessions: Self.sessionsBody(["s-here"], input: 11),
+                                     sessionsBySince: [
+                                        hourSince: Self.sessionsBody(["s-here", "s-node"], input: 7)])),
+            previous: .empty, now: now, projectsDirectory: root)
+
+        XCTAssertEqual(snapshot.hourlyUnmatchedSessions, 1)
+        XCTAssertEqual(snapshot.hourlyUnmatched.input, 7, "counted, and counted as nobody's")
+        XCTAssertEqual(snapshot.unmatchedSessions, 0,
+                       "the week's session has a transcript right here; its bucket must stay empty")
+        XCTAssertEqual(ConsoleDump.unmatchedLine(window: "1h",
+                                                 sessions: snapshot.hourlyUnmatchedSessions,
+                                                 tokens: snapshot.hourlyUnmatched),
+                       "no local session 1h: 1 sessions, 7 ie (in 7, out 0, cw 0, cr 0)")
+        XCTAssertEqual(ConsoleDump.unmatchedLine(window: "7d",
+                                                 sessions: snapshot.unmatchedSessions,
+                                                 tokens: snapshot.unmatched),
+                       "no local session 7d: 0 sessions, -",
+                       "printed empty, like every other bucket in the section")
     }
 
     // MARK: - The allowance's own half
