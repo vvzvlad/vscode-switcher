@@ -375,7 +375,14 @@ final class UsageStore: ObservableObject {
             result.since = report.since
             result.truncated = report.truncated
             result.tokensBySlug = folded.tokensBySlug
-            result.contested = folded.contested
+            // Narrowed against this window and no other. The rule is one function
+            // called twice, exactly as `fold` above it is — what differs is the
+            // window, which is the whole point: a life last written three days ago
+            // is inside the week and outside the hour.
+            result.contested = UsageIndex.narrowToWindow(
+                folded.contested,
+                since: now.addingTimeInterval(-windowSeconds),
+                projectsDirectory: projectsDirectory)
             result.unmatched = folded.unmatched
             result.unmatchedSessions = folded.unmatchedSessions
         case .failed(let reason):
@@ -390,7 +397,20 @@ final class UsageStore: ObservableObject {
             let folded = UsageIndex.fold(sessions: report.sessions,
                                          slugsBySessionId: slugsBySessionId)
             result.hourlyTokensBySlug = folded.tokensBySlug
-            result.hourlyContested = folded.contested
+            result.hourlyContested = UsageIndex.narrowToWindow(
+                folded.contested,
+                since: now.addingTimeInterval(-hourWindowSeconds),
+                projectsDirectory: projectsDirectory)
+            // And the hour's ownerless spend, which used to be dropped right here.
+            // The week kept it and `--dump` printed it; the hour had no counterpart
+            // anywhere, so a session with no local transcript vanished from the
+            // hour with no line to notice it by. It is not a hypothetical bucket:
+            // `--dump` on this machine printed 1 session and 179k ie in it on
+            // 2026-08-27 and 0 the next night, which is the point — it fills and
+            // empties with the sliding hour, and this branch was throwing away
+            // whatever happened to be in it.
+            result.hourlyUnmatched = folded.unmatched
+            result.hourlyUnmatchedSessions = folded.unmatchedSessions
         case .failed(let reason):
             blame.append(sessionsBlame(window: hourWindowSeconds, reason: reason))
         }

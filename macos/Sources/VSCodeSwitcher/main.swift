@@ -195,64 +195,133 @@ enum ConsoleDump {
         // the figures themselves cannot: a session's tokens are counted against
         // the project it was *started* in, not the ones it spent them in.
         print("Usage (claude_gw) — a session's spend counts against the project it was started in")
-        // Every half in one line: each reason names its own endpoint already,
-        // and the dump acts on none of them.
-        if let failure = usage.failureText {
-            print("  unavailable:      \(failure)")
-        }
-        if usage.since != .distantPast {
-            print("  window:           applied since \(age(of: usage.since)) ago"
-                + (usage.truncated ? ", truncated by the gateway's cap" : ""))
-        }
-        print("  fleet 7d:         \(percent(usage.fleetSevenDayMean))")
-        print("  spend rate:       \(rateLine(now: usage.fleetTokenRate, allowance: usage.sustainable))")
-        let accounts = usage.accounts.map {
-            "\($0.label) 5h \(percent($0.fiveHour?.utilization)) 7d \(percent($0.sevenDay?.utilization))"
-        }
-        print("  accounts:         \(accounts.isEmpty ? "-" : accounts.joined(separator: "   "))")
-        print("  total:            \(formatTokens(usage.total))")
-        // Both windows, because both are spread over the rows: the week feeds the
-        // tooltip and the projects column, the hour feeds the line the panel draws.
-        print("  start dirs:       \(usage.tokensBySlug.count) over 7d,"
-            + " \(usage.hourlyTokensBySlug.count) in the last hour")
-        print("  no local session: \(usage.unmatchedSessions) sessions, \(formatTokens(usage.unmatched))")
-        let week = ambiguousLine(window: "7d",
-                                 sessions: snapshot.ambiguousUsageSessions,
-                                 tokens: snapshot.ambiguousUsage)
-        let hour = ambiguousLine(window: "1h",
-                                 sessions: snapshot.ambiguousHourlySessions,
-                                 tokens: snapshot.ambiguousHourlyUsage)
-        print("  " + week)
-        print("  " + hour)
+        for line in usageLines(usage, snapshot: snapshot) { print(line) }
         print("")
     }
 
-    /// The line that names the spend nothing may claim: sessions filed under two
-    /// slugs that belong to two different projects.
+    /// The section's rows, composed rather than printed.
+    ///
+    /// Split out of `printUsage` for the reason `projectRow` was: the property
+    /// worth holding is that every figure in the section starts in one column, and
+    /// only the assembled rows can be asked about it. While this was nine `print`
+    /// calls, the test on the column reached the two of them that went through
+    /// `unmatchedLine` and `ambiguousLine` and none of the seven that called
+    /// `label` inline — so `unavailable:` growing past `usageLabelWidth` would have
+    /// pushed its own figure right with nothing anywhere to fail. That is the
+    /// `spendColumnWidth` defect again: a constant pinned to its cell while the
+    /// table it aligns is pinned to nothing.
+    ///
+    /// Indented here rather than by the caller so that what the test measures is
+    /// the line as it is printed.
+    static func usageLines(_ usage: UsageSnapshot, snapshot: SwitcherSnapshot) -> [String] {
+        var lines: [String] = []
+        // Every half in one line: each reason names its own endpoint already,
+        // and the dump acts on none of them.
+        if let failure = usage.failureText {
+            lines.append("  " + label("unavailable:") + failure)
+        }
+        if usage.since != .distantPast {
+            lines.append("  " + label("window:") + "applied since \(age(of: usage.since)) ago"
+                + (usage.truncated ? ", truncated by the gateway's cap" : ""))
+        }
+        lines.append("  " + label("fleet 7d:") + percent(usage.fleetSevenDayMean))
+        lines.append("  " + label("spend rate:")
+            + rateLine(now: usage.fleetTokenRate, allowance: usage.sustainable))
+        let accounts = usage.accounts.map {
+            "\($0.label) 5h \(percent($0.fiveHour?.utilization)) 7d \(percent($0.sevenDay?.utilization))"
+        }
+        lines.append("  " + label("accounts:") + (accounts.isEmpty ? "-" : accounts.joined(separator: "   ")))
+        lines.append("  " + label("total:") + formatTokens(usage.total))
+        // Both windows, because both are spread over the rows: the week feeds the
+        // tooltip and the projects column, the hour feeds the line the panel draws.
+        lines.append("  " + label("start dirs:") + "\(usage.tokensBySlug.count) over 7d,"
+            + " \(usage.hourlyTokensBySlug.count) in the last hour")
+        lines.append("  " + unmatchedLine(window: "7d",
+                                          sessions: usage.unmatchedSessions,
+                                          tokens: usage.unmatched))
+        lines.append("  " + unmatchedLine(window: "1h",
+                                          sessions: usage.hourlyUnmatchedSessions,
+                                          tokens: usage.hourlyUnmatched))
+        lines.append("  " + ambiguousLine(window: "7d",
+                                          sessions: snapshot.ambiguousUsageSessions,
+                                          tokens: snapshot.ambiguousUsage))
+        lines.append("  " + ambiguousLine(window: "1h",
+                                          sessions: snapshot.ambiguousHourlySessions,
+                                          tokens: snapshot.ambiguousHourlyUsage))
+        return lines
+    }
+
+    /// The width of the label column this whole section is read by, and the reason
+    /// it is a constant rather than eight hand-counted runs of spaces.
+    ///
+    /// It was those runs until `no local session:` grew a window into
+    /// `no local session 7d:` and went from 17 characters to 20. `column` pads and
+    /// never truncates, so at the old width of 18 those two lines — and only those
+    /// two — would have started their figures two columns right of every other
+    /// line, quietly, with nothing to fail. Held by
+    /// `testTheUsageSectionsFiguresAllStartInOneColumn`, which asks the assembled
+    /// section (`usageLines`) and not the two lines that happen to be composed by
+    /// a function of their own.
+    static let usageLabelWidth = 21
+
+    private static func label(_ text: String) -> String { column(text, usageLabelWidth) }
+
+    /// The line that names the spend nothing may claim: sessions filed under more
+    /// than one slug that `DataSource.settle` could not place. Survivors belonging
+    /// to two different projects are one way in and the loudest, not the only one —
+    /// the live session naming a directory none of the survivors is, no survivor
+    /// left once the window narrowed the copies, and a survivor that matched no
+    /// project all end up on this line too (`SwitcherSnapshot.ambiguousUsage`).
     ///
     /// Printed whether or not there are any, exactly like `no local session`
     /// above it. A bucket that appears only when it is non-empty teaches nobody
     /// it exists, and the misattribution this one replaced was invisible by
     /// construction. It is no longer the empty bucket it was when it was written,
-    /// either: on 2026-08-27 this machine printed 16 sessions and 637.15M
-    /// input-equivalent over the week, so the premise that the duplicated
-    /// identifiers here are all older than the gateway's window no longer holds.
-    /// §2.7 keeps the figure, its drift over the day, and the fact that why the
-    /// bucket grew is not established.
+    /// either. Four dumps of the release build on 2026-08-28: `12 sessions` every
+    /// time, at 582.53M, 582.53M and 582.62M ie within seconds of 04:33 and
+    /// 589.86M at 04:49 — the count holds while the figure drifts, so read the
+    /// sessions and not the tokens. The premise that the duplicated identifiers
+    /// here are all older than the gateway's window no longer holds. Measured on
+    /// the shipped rule, not before it: the `16 sessions, 637.15M ie` this used to
+    /// quote was read on 2026-08-27 with the window narrowing switched off, and
+    /// narrowing is most of the difference — §2.7's A/B at one moment that day has
+    /// 15 sessions without it against 12 with it. §2.7 keeps both readings, their
+    /// drift over the day, and the fact that why the bucket grew is not
+    /// established.
     ///
     /// Internal so a test can hold the text: `printUsage` prints whatever the
     /// gateway said about the machine the dump runs on, and a machine with a
     /// contested session is not a state a test run can arrange for itself.
     ///
-    /// One line per window, and both are printed, because the two buckets can hold
-    /// different sets of sessions: the two `/gw/sessions` calls fail apart, so an
-    /// hour's contested session need not appear in the week's bucket at all. The
-    /// gateway's 200-consumer cap on the week would do the same and is not doing
-    /// it today — both readings are on `SwitcherSnapshot.ambiguousHourlyUsage`.
+    /// One line per window, and both are printed, because the two buckets hold
+    /// different sets of sessions by construction — each window narrows its
+    /// contest by its own start, so the hour settles contests the week cannot —
+    /// and because the two `/gw/sessions` calls fail apart, so an hour's contested
+    /// session need not appear in the week's bucket at all. The gateway's
+    /// 200-consumer cap on the week is a third way into that state and is not
+    /// firing today — the readings are on
+    /// `SwitcherSnapshot.ambiguousHourlyUsage`.
     /// Two short lines rather than one long one for the same reason every other
     /// line here is short — the label column is what makes the section readable.
     static func ambiguousLine(window: String, sessions: Int, tokens: TokenCounts) -> String {
-        "\(column("ambiguous \(window):", 18))\(sessions) sessions, \(formatTokens(tokens))"
+        label("ambiguous \(window):") + "\(sessions) sessions, \(formatTokens(tokens))"
+    }
+
+    /// The line that names spend whose session has no transcript on this machine —
+    /// the agent nodes, mostly. Real spend with no local owner rather than an
+    /// error, and printed empty for the same reason `ambiguousLine` is.
+    ///
+    /// One line per window, like the bucket above it, and the hour's is new: the
+    /// hourly fold used to discard `unmatched` outright, so this spend left the
+    /// hour with nothing anywhere to notice it by — and it had something to
+    /// discard. On 2026-08-27 the two lines read `1 sessions, 7.52M ie` over the
+    /// week and `1 sessions, 179k ie` over the hour, the same agent node
+    /// (`71fbe714-…`) in both, and the hour's half of that was reaching nothing at
+    /// all. At 02:37 the next night the hour's line was back to `0 sessions, -`
+    /// while the week's still held it — which is why the line is printed empty
+    /// rather than conjured up when it is not.
+    static func unmatchedLine(window: String, sessions: Int, tokens: TokenCounts) -> String {
+        label("no local session \(window):") + "\(sessions) sessions, \(formatTokens(tokens))"
     }
 
     private static func percent(_ value: Double?) -> String {

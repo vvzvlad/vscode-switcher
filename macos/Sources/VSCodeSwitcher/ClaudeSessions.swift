@@ -46,7 +46,17 @@ enum ClaudeSessions {
     /// Sessions whose process is still running and which were started from the
     /// VSCode extension. Dead session files stay on disk forever and have to be
     /// filtered out. Sorted by last activity, most recent first.
-    static func liveSessions(config: Config) -> [ClaudeSessionInfo] {
+    ///
+    /// **At most one row per `sessionId`**, and that is not a convenience: it is
+    /// what lets `DataSource.liveSlugsBySessionId` be a map at all, and therefore
+    /// what lets the contest veto ask one question and get one answer
+    /// (`DataSource.settle`). Held by `testOneSessionIdYieldsOneLiveRow`.
+    ///
+    /// The directory is a parameter for the same reason `UsageIndex` takes
+    /// `projectsDirectory`: that invariant is about a directory full of files, and
+    /// there is no other way to put two files naming one session in front of it.
+    static func liveSessions(config: Config,
+                             sessionsDirectory: URL = ClaudeSessions.sessionsDirectory) -> [ClaudeSessionInfo] {
         let fileManager = FileManager.default
         guard let names = try? fileManager.contentsOfDirectory(atPath: sessionsDirectory.path) else { return [] }
 
@@ -61,6 +71,11 @@ enum ClaudeSessions {
                   let cwd = dict["cwd"] as? String
             else { continue }
 
+            // A session started from a terminal is running just as much and is
+            // dropped here, because the panel is about windows. Anything that
+            // reads this list as "the sessions that are running" inherits that
+            // gap — the contest veto in `DataSource.settle` is the one place
+            // where it matters, and it says so.
             let entrypoint = (dict["entrypoint"] as? String) ?? ""
             guard entrypoint.hasPrefix("claude-vscode") else { continue }
 

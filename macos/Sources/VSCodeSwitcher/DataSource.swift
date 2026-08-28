@@ -215,19 +215,23 @@ final class DataSource: @unchecked Sendable {
         // gateway hands back one aggregate per session with nothing to split it
         // by (`UsageIndex`).
         let projectPathsBySlug = Self.projectPathsBySlug(projects: projects, worktrees: worktrees)
-        // The very same map for both windows, and the very same function over it:
-        // the week's answer and the hour's are two answers to one question, and
-        // "whose spend is this" may have only one policy in one snapshot. The
+        let liveSlugsBySessionId = Self.liveSlugsBySessionId(of: sessions)
+        // The very same maps for both windows, and the very same function over
+        // them: the week's answer and the hour's are two answers to one question,
+        // and "whose spend is this" may have only one policy in one snapshot. The
         // collection half already refused to keep two (`UsageStore.poll` folds
         // both reports through one `UsageIndex.fold` against one slug map, §2.9),
         // and a second copy of this loop here would put the split back one layer
-        // down.
+        // down. The two windows differ in what they are asked about, never in what
+        // they are asked.
         let week = Self.spread(tokensBySlug: tokensBySlug,
                                contested: contested,
-                               projectPathsBySlug: projectPathsBySlug)
+                               projectPathsBySlug: projectPathsBySlug,
+                               liveSlugsBySessionId: liveSlugsBySessionId)
         let hour = Self.spread(tokensBySlug: hourlyTokensBySlug,
                                contested: hourlyContested,
-                               projectPathsBySlug: projectPathsBySlug)
+                               projectPathsBySlug: projectPathsBySlug,
+                               liveSlugsBySessionId: liveSlugsBySessionId)
         let usageByProjectPath = week.byProjectPath
         let usageBySlugOutsideProjects = week.bySlugOutsideProjects
         let hourlyUsageByProjectPath = hour.byProjectPath
@@ -390,10 +394,17 @@ final class DataSource: @unchecked Sendable {
     ///
     /// `projectPathsBySlug` is passed in rather than built here precisely so that
     /// both calls are against the same map: built inside, it would be built twice
-    /// per snapshot for an answer that cannot differ.
+    /// per snapshot for an answer that cannot differ. `liveSlugsBySessionId` is
+    /// passed in for the stronger version of the same reason — it is the policy
+    /// itself, and a window given it while the other went without would be the two
+    /// policies this function exists to prevent. What may legitimately differ
+    /// between the windows is the *input*: each window's contested list has already
+    /// been narrowed to the lives that could have spent inside it
+    /// (`UsageIndex.narrowToWindow`).
     private static func spread(tokensBySlug: [String: TokenCounts],
                                contested: [ContestedSpend],
-                               projectPathsBySlug: [String: String])
+                               projectPathsBySlug: [String: String],
+                               liveSlugsBySessionId: [String: String])
         -> (byProjectPath: [String: TokenCounts],
             bySlugOutsideProjects: [String: TokenCounts],
             ambiguous: TokenCounts,
@@ -408,9 +419,13 @@ final class DataSource: @unchecked Sendable {
             byProjectPath[path] = (byProjectPath[path] ?? .zero) + tokens
         }
 
-        // The sessions filed under more than one slug. Settled here and nowhere
-        // earlier, because settling them needs the project list.
-        let settled = Self.settle(contested: contested, projectPathsBySlug: projectPathsBySlug)
+        // The sessions filed under more than one slug, already narrowed to this
+        // window, so a list of slugs may be down to one or to none. Settled here
+        // and nowhere earlier, because settling them needs the project list and
+        // the live sessions.
+        let settled = Self.settle(contested: contested,
+                                  projectPathsBySlug: projectPathsBySlug,
+                                  liveSlugsBySessionId: liveSlugsBySessionId)
         for (path, tokens) in settled.tokensByProjectPath {
             byProjectPath[path] = (byProjectPath[path] ?? .zero) + tokens
         }
@@ -438,8 +453,47 @@ final class DataSource: @unchecked Sendable {
         return index
     }
 
-    /// Decides what to do with the sessions filed under more than one slug:
-    /// attribute them, or admit that nothing here knows.
+    /// `session id → the slug of the directory the running session started in`,
+    /// for the sessions that are running right now.
+    ///
+    /// `~/.claude/sessions/<pid>.json` is where Claude Code writes that directory,
+    /// and it is the *first* of the three things called `cwd` (§2.7): the start
+    /// directory of the process, which is the one the transcript is filed under —
+    /// not the directory of the moment, which walks about while the session runs.
+    /// The app already trusts this file completely; a row exists on the panel
+    /// because of it.
+    ///
+    /// **One session id, one answer, and that is decided upstream.** There used to
+    /// be a `disputed` case here for two live sessions claiming one id from two
+    /// different directories, refusing the contest rather than letting
+    /// `Dictionary(uniquingKeysWith:)` pick one of two disagreeing answers. It
+    /// could not fire: the only producer of this input is
+    /// `ClaudeSessions.liveSessions`, which yields at most one row per session id,
+    /// and the only test for it built the pair by hand. Worse, the case claimed a
+    /// protection the system does not have — `liveSessions` resolves duplicates
+    /// exactly that way, keeping the lexicographically first `<pid>.json`. What
+    /// holds the invariant now is `testOneSessionIdYieldsOneLiveRow`, and it is the
+    /// test that has to go red before this veto's assumption is re-examined.
+    ///
+    /// **This map knows a subset of "running", and the veto's wording has to be
+    /// read against that.** `liveSessions` keeps only sessions whose `entrypoint`
+    /// begins with `claude-vscode`, so a session started from a terminal is absent
+    /// here and its contest simply goes unvetoed. Safe for a veto, which only ever
+    /// refuses — but it means the veto is not a backstop for anything, and in
+    /// particular not for a life whose parent transcript stands still while its
+    /// subagents work (`UsageIndex.narrowToWindow`).
+    static func liveSlugsBySessionId(of sessions: [ClaudeSessionInfo]) -> [String: String] {
+        var starts: [String: String] = [:]
+        for session in sessions where starts[session.sessionId] == nil {
+            starts[session.sessionId] = ClaudeSessions.slug(forPath: session.cwd)
+        }
+        return starts
+    }
+
+    /// Decides what to do with the sessions filed under more than one slug —
+    /// narrowed to this report's window before they got here, so a list of slugs
+    /// may be down to one or to none: attribute them, or admit that nothing here
+    /// knows.
     ///
     /// A `session_id` is not unique across `~/.claude/projects/`, and the copies
     /// under two slugs are one session rather than two. Resuming a session in
@@ -452,37 +506,122 @@ final class DataSource: @unchecked Sendable {
     /// `<project>/.claude/worktrees/<name>` are two slugs and one project, which
     /// is an answer.
     ///
-    /// Two projects is not an answer, and nothing here tries to make one. The
-    /// tempting tie-breaks are the file's mtime and its size, and both are
-    /// coin-flips with a straight face: the live pair `83804075` has its two
-    /// copies written one minute apart, and the bigger copy of `65f9afa1` is the
-    /// one whose records mostly name the *other* project's directory. Comparing
-    /// the records themselves would mean reading transcripts whole — up to
-    /// 40 MB on this machine (measured 2026-08-17), which is the one thing the
-    /// transcript layer must never do.
-    /// So such spend goes to `ambiguous`: counted, reported by `--dump`, and put
-    /// on no row.
+    /// Two projects is not an answer, and nothing here tries to make one **between
+    /// two transcripts**. The tempting tie-breaks there are the file's mtime and
+    /// its size, and both are coin-flips with a straight face: the live pair
+    /// `83804075` has its two copies written one minute apart, and the bigger copy
+    /// of `65f9afa1` is the one whose records mostly name the *other* project's
+    /// directory. Comparing the records themselves would mean reading transcripts
+    /// whole — up to 40 MB on this machine (measured 2026-08-17), which is the one
+    /// thing the transcript layer must never do. So such spend goes to `ambiguous`:
+    /// counted, reported by `--dump`, and put on no row.
     ///
-    /// Also `ambiguous` when the slugs claim *no* project between them — two
-    /// directories outside every scan root are two different orphan rows, and
-    /// the spend belongs to neither more than the other — and when one slug is a
-    /// project and the other is not, which is the same "one aggregate, two
+    /// Also `ambiguous` when the slugs claim *no* project between them, and when
+    /// one slug is a project and the other is not — the same "one aggregate, two
     /// lives" with one of the lives simply unrecognised.
+    ///
+    /// **The unrecognised case survives narrowing down to a single claim, and it
+    /// is still refused.** Two unrecognised slugs used to be argued away as "two
+    /// different orphan rows, and the spend belongs to neither more than the
+    /// other", which stopped being the whole story once `narrowToWindow` could
+    /// leave exactly one of them standing: then there is one directory, not two,
+    /// and that argument does not reach it. It is refused for a different reason,
+    /// and the reason is *not* that such a row cannot be identified. An orphan row
+    /// identifies itself forwards, from the directory a live session reports
+    /// (§2.2.1), and the uncontested spend under that very slug already reaches
+    /// one: `spread` files it under `bySlugOutsideProjects`, which is what the
+    /// `cwd:` row reads as its `usage`. What is missing is a channel. This function
+    /// answers in `tokensByProjectPath`, `ambiguous` and `ambiguousSessions`, and a
+    /// surviving slug that is not a project path has nothing to be named by in that
+    /// answer.
+    ///
+    /// A second channel for it would be machinery with no reader today. Measured
+    /// 2026-08-28 05:42 over the 23 duplicated identifiers on this machine (47
+    /// copies): over the week 12 narrow to two different projects — and a `--dump`
+    /// of the release build at 06:01 that morning printed exactly that,
+    /// `ambiguous 7d: 12 sessions, 600.44M ie` against `ambiguous 1h: 0 sessions,
+    /// -` — 3 narrow to a single survivor and all
+    /// three of those are a project, so they are answered with a number on a row,
+    /// and 8 keep no survivor at all. The single *unrecognised* survivor happens
+    /// **zero** times today. Unrecognised slugs are not exotic (20 of the 78 slug
+    /// directories match no project) and the contested set holds one — a removed
+    /// worktree of `vscode-switcher` — but that entry narrows to no survivor at all.
+    ///
+    /// **What has narrowed the field by the time this runs**, and why neither half
+    /// of it is a tie-break between two transcripts:
+    ///
+    /// - `entry.slugs` no longer holds every copy on disk. `UsageIndex.narrowToWindow`
+    ///   has dropped the lives that were not written to inside the window this
+    ///   report covers — in their transcript or in any of their subagents' — which
+    ///   is not a guess about which copy is the better
+    ///   one — it is the observation that a file untouched for three days cannot
+    ///   have spent anything in the last hour. That is what lets one rule give the
+    ///   hour and the week two different and correct answers on `8fa4e946-…`:
+    ///   `hammerola` on the hour, ambiguous over the week, where both of its lives
+    ///   really were running.
+    /// - `liveSlugsBySessionId` names, for a session that is *running*, the
+    ///   directory this life of it started in — from `~/.claude/sessions/<pid>.json`,
+    ///   a separate record written by Claude Code, not a comparison of two copies of
+    ///   one. It is a veto rather than a chooser: if it names a directory that is
+    ///   not among the lives that could have spent, then this is not the shape it
+    ///   is taken for, and the safe answer is the status quo. It never picks a
+    ///   winner out of two surviving claims — two claims are still two claims. And
+    ///   it covers only the sessions started from the VSCode extension, so most
+    ///   contests reach the project list unvetoed; it is a refusal that can be
+    ///   absent, never a guarantee that can be leaned on.
+    ///
+    /// **"The status quo" is not the whole truth about that refusal, and the order
+    /// of these two steps is why.** The veto runs before `claimants` is worked out,
+    /// so it also fires on entries whose answer never depended on which life spent:
+    /// `<project>` and `<project>/.claude/worktrees/<name>` are two slugs and one
+    /// project, and `claimants` would have come out at one. There the code before
+    /// this change produced a number and this one refuses — a number lost, which is
+    /// a real cost even though its direction is safe (spend never lands on a wrong
+    /// row this way).
+    ///
+    /// It is left in this order on purpose. Measured 2026-08-28 05:42: of the 23
+    /// duplicated identifiers on this machine, **1** has a worktree slug among its
+    /// copies, and that one pairs a worktree of `vscode-switcher` with
+    /// `home-network` — not a project beside a worktree of itself, and the worktree
+    /// has since been removed, so that slug matches no project at all today. The
+    /// contest is refused on either reading, and over the week that entry keeps no
+    /// survivor to argue about, so the over-refusal fires **0** times. Moving the veto below
+    /// `claimants` would be machinery built for a configuration with no live
+    /// instance, which is the abstraction this project does not add; if such a pair
+    /// ever appears, this is the note that says where to look.
     ///
     /// Pure, and separate from `assemble`, so the rule can be asked directly:
     /// through the assembly a wrong answer surfaces as a number missing from a
     /// row, which is also what a dozen unrelated mistakes look like.
+    ///
+    /// No default for `liveSlugsBySessionId`, for the reason `spread` has none: a
+    /// window settled without it while the other was settled with it would be the
+    /// two policies this whole path exists to prevent, and a defaulted argument is
+    /// how that happens by omission rather than by decision.
     static func settle(contested: [ContestedSpend],
-                       projectPathsBySlug: [String: String])
+                       projectPathsBySlug: [String: String],
+                       liveSlugsBySessionId: [String: String])
         -> (tokensByProjectPath: [String: TokenCounts], ambiguous: TokenCounts, ambiguousSessions: Int) {
         var tokensByProjectPath: [String: TokenCounts] = [:]
         var ambiguous = TokenCounts.zero
         var ambiguousSessions = 0
 
         for entry in contested {
+            // A running session says where its current life started. If that is not
+            // among the lives that could have spent in this window, the live record
+            // and the transcripts describe two different situations, and nothing
+            // here may pick between them.
+            if let live = liveSlugsBySessionId[entry.sessionId], !entry.slugs.contains(live) {
+                ambiguous = ambiguous + entry.tokens
+                ambiguousSessions += 1
+                continue
+            }
             let claimants = Set(entry.slugs.map { projectPathsBySlug[$0] })
             // One claimant, and a real one: `[nil]` is "no slug matched
-            // anything", which is agreement about nothing.
+            // anything", which is agreement about nothing, and an empty set is
+            // "no life was written to inside this window at all" — the gateway
+            // says the session spent and no copy of it says so, which is not a
+            // state to attribute anything on.
             guard claimants.count == 1, let path = claimants.first ?? nil else {
                 ambiguous = ambiguous + entry.tokens
                 ambiguousSessions += 1
