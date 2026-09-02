@@ -2862,8 +2862,8 @@ final class UsageConfigTests: XCTestCase {
     }
 
     func testAConfiguredAddressIsTaken() throws {
-        let config = try load(["usageBaseURL": "http://10.20.30.1:8787"])
-        XCTAssertEqual(config.resolvedUsageBaseURL.absoluteString, "http://10.20.30.1:8787")
+        let config = try load(["usageBaseURL": "http://10.0.0.1:8787"])
+        XCTAssertEqual(config.resolvedUsageBaseURL.absoluteString, "http://10.0.0.1:8787")
     }
 
     /// `URL(string:)` accepts far more than it looks like it does — `not a url

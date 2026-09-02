@@ -53,7 +53,8 @@ struct Config: Sendable, Equatable {
     var editorBundleID: String
     /// Base address of the claude_gw gateway the token figures come from. The
     /// default is the local launchd relay, which forwards to the gateway over
-    /// WireGuard; `http://10.20.30.1:8787` is the gateway itself, for when the
+    /// WireGuard; the alternative is the gateway itself,
+    /// `http://<gateway address on the WireGuard network>:8787`, for when the
     /// relay is not running. Neither takes any authentication.
     ///
     /// The poll interval and the seven-day window are constants in the code:
