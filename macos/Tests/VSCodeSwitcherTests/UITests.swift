@@ -2388,23 +2388,23 @@ final class MenuBarIconTests: XCTestCase {
 
     private static let scale = 4.0
 
-    /// A spend ratio to colour a bar by, given as a per cent of the allowance.
+    /// A burn ratio to colour a bar by, in per cent of the week's refill rate.
     ///
-    /// The two rates are chosen so their ratio comes out at `percent` and nothing
-    /// else in the picture depends on how large either of them is — the drawing
-    /// reads `HeadlineRates.percent` and the lower-bound flag, and no more.
-    private func rates(_ percent: Double,
-                       lowerBound: Bool = false) -> UsagePopoverView.HeadlineRates {
-        UsagePopoverView.HeadlineRates(current: percent, allowance: 100, isLowerBound: lowerBound)
+    /// One number and a flag, which is all the drawing reads — it used to take a
+    /// pair of token rates and divide them, and the division moved into
+    /// `FleetCapacity` when both sides of the figure became percentage points.
+    private func ratio(_ percent: Double,
+                       lowerBound: Bool = false) -> UsagePopoverView.HeadlineRatio {
+        UsagePopoverView.HeadlineRatio(percent: percent, isLowerBound: lowerBound)
     }
 
     /// The appearance is always named, never left to the machine: the picture is
     /// no longer a template, so what colour it comes out is decided by an input —
     /// and a suite that inherited the appearance of whoever ran it would pass or
     /// fail by the time of day.
-    private func render(_ rates: UsagePopoverView.HeadlineRates?,
+    private func render(_ ratio: UsagePopoverView.HeadlineRatio?,
                         appearance: NSAppearance? = NSAppearance(named: .aqua)) throws -> Rendered {
-        let image = MenuBarIcon.image(for: rates, appearance: try XCTUnwrap(appearance))
+        let image = MenuBarIcon.image(for: ratio, appearance: try XCTUnwrap(appearance))
         XCTAssertFalse(image.isTemplate, """
             the status item picture is a template again: the system would tint the bar's fill \
             for the menu bar and the colour that says whether the week holds the demand would \
@@ -2450,8 +2450,8 @@ final class MenuBarIconTests: XCTestCase {
     /// the presence of a figure at all, which is the second way a status item
     /// can be made to twitch, once a minute, whenever a tunnel goes down.
     func testThePictureIsTheSameWidthWhateverTheFigure() throws {
-        let widths = try [nil, rates(0), rates(5), rates(42), rates(100), rates(197),
-                          rates(999), rates(1000), rates(1e12)].map { try render($0).width }
+        let widths = try [nil, ratio(0), ratio(5), ratio(42), ratio(100), ratio(197),
+                          ratio(999), ratio(1000), ratio(1e12)].map { try render($0).width }
         for width in widths {
             XCTAssertEqual(width, widths[0], accuracy: 0.001, "widths: \(widths)")
         }
@@ -2479,7 +2479,7 @@ final class MenuBarIconTests: XCTestCase {
         let widest = ceil(NSAttributedString(string: "\(MenuBarIcon.ceilingPercent)%",
                                              attributes: [.font: MenuBarIcon.font]).size().width)
         XCTAssertEqual(MenuBarIcon.width, widest, accuracy: 0.001)
-        XCTAssertEqual(try render(rates(100)).width, Double(widest), accuracy: 0.001)
+        XCTAssertEqual(try render(ratio(100)).width, Double(widest), accuracy: 0.001)
         XCTAssertLessThan(MenuBarIcon.width, 30,
                           "the item is back to taking a row of the menu bar: \(MenuBarIcon.width) pt")
         // And the stack fills the height a status item is drawn at, exactly.
@@ -2489,14 +2489,14 @@ final class MenuBarIconTests: XCTestCase {
         XCTAssertEqual(MenuBarIcon.contentHeight, MenuBarIcon.height, accuracy: 0.001,
                        "bar \(MenuBarIcon.barHeight) + gap \(MenuBarIcon.gap) "
                        + "+ number \(MenuBarIcon.numberHeight) is not the 18 pt of the picture")
-        XCTAssertEqual(try render(rates(42)).height, Double(MenuBarIcon.height), accuracy: 0.001)
+        XCTAssertEqual(try render(ratio(42)).height, Double(MenuBarIcon.height), accuracy: 0.001)
     }
 
     /// Drawn, and not merely declared: the number's ink is below the bar's, the
     /// two do not touch, and the bar is drawn across the whole width of the
     /// picture rather than in a column of its own.
     func testTheNumberIsDrawnUnderTheBarAndNothingOverlaps() throws {
-        let rendered = try render(rates(42))
+        let rendered = try render(ratio(42))
         // Two clusters of ink with clear picture between them, found in the
         // bitmap: this is what "under" means, and asking the declared bands
         // instead is a question that cannot come out wrong (checked by drawing the
@@ -2550,10 +2550,10 @@ final class MenuBarIconTests: XCTestCase {
     func testEveryFigureEndsAtTheSameEdgeAndFitsItsColumn() throws {
         var rightEdges: [Double] = []
         for percent in [0.0, 5, 42, 100, 197, 999, 1000, 1e12] {
-            let columns = try render(rates(percent)).columns(in: MenuBarIcon.numberRows)
+            let columns = try render(ratio(percent)).columns(in: MenuBarIcon.numberRows)
             XCTAssertFalse(columns.isEmpty, "nothing drawn for \(percent)%")
             rightEdges.append(try XCTUnwrap(columns.max()))
-            XCTAssertLessThanOrEqual(MenuBarIcon.label(for: rates(percent)).size().width,
+            XCTAssertLessThanOrEqual(MenuBarIcon.label(for: ratio(percent)).size().width,
                                      MenuBarIcon.width,
                                      "at \(percent)% the string is wider than the column and the "
                                      + "leading digit is drawn outside the picture")
@@ -2580,18 +2580,18 @@ final class MenuBarIconTests: XCTestCase {
                       "something was drawn in the number's rows with no reading")
         XCTAssertFalse(blank.rows(in: Self.barBand).isEmpty,
                        "the dashed bar is missing too: the measurement is not about the number")
-        XCTAssertFalse(try render(rates(0)).rows(in: MenuBarIcon.numberRows).isEmpty,
+        XCTAssertFalse(try render(ratio(0)).rows(in: MenuBarIcon.numberRows).isEmpty,
                        "a genuine 0% drew no number")
 
         // And the fallback is refused where it would be taken: a snapshot with a
-        // quota to fall back on and no rates draws exactly the same nothing.
+        // quota to fall back on and no ratio draws exactly the same nothing.
         var snapshot = UsageSnapshot.empty
         snapshot.fleetSevenDayMean = 47.4
-        XCTAssertNil(MenuBarIcon.rates(for: snapshot),
-                     "the fixture has rates after all and cannot say anything about the fallback")
+        XCTAssertNil(MenuBarIcon.ratio(for: snapshot),
+                     "the fixture has a ratio after all and cannot say anything about the fallback")
         XCTAssertEqual(UsagePopoverView.quotaLabel(for: snapshot), "47%",
                        "the popover has a quota to lead with here, which is the whole point")
-        XCTAssertTrue(try render(MenuBarIcon.rates(for: snapshot))
+        XCTAssertTrue(try render(MenuBarIcon.ratio(for: snapshot))
             .rows(in: MenuBarIcon.numberRows).isEmpty,
                       "the menu bar fell back to the quota, in a picture with no room to say so")
     }
@@ -2607,16 +2607,15 @@ final class MenuBarIconTests: XCTestCase {
     func testTheNumberIsTheRatioAndNotTheWeeksMean() throws {
         var snapshot = UsageSnapshot.empty
         snapshot.fleetSevenDayMean = 47.4
-        snapshot.fleetTokenRate = 12_600_000
-        snapshot.sustainable = UsagePopoverLabelTests.allowance(10_000_000)
-        snapshot.allowanceFetchedAt = Date()
-        let drawn = try render(MenuBarIcon.rates(for: snapshot))
+        snapshot.fleetBurn = UsagePopoverLabelTests.burn(126)
+        snapshot.historiesFetchedAt = Date()
+        let drawn = try render(MenuBarIcon.ratio(for: snapshot))
             .columns(in: MenuBarIcon.numberRows)
-        XCTAssertEqual(drawn, try render(rates(126)).columns(in: MenuBarIcon.numberRows),
-                       "the number is not the 126% the two rates come to")
-        XCTAssertNotEqual(drawn, try render(rates(47)).columns(in: MenuBarIcon.numberRows),
+        XCTAssertEqual(drawn, try render(ratio(126)).columns(in: MenuBarIcon.numberRows),
+                       "the number is not the 126% the fleet burned against its refill")
+        XCTAssertNotEqual(drawn, try render(ratio(47)).columns(in: MenuBarIcon.numberRows),
                           "the number is still the weekly mean")
-        XCTAssertEqual(MenuBarIcon.label(for: try XCTUnwrap(MenuBarIcon.rates(for: snapshot))).string,
+        XCTAssertEqual(MenuBarIcon.label(for: try XCTUnwrap(MenuBarIcon.ratio(for: snapshot))).string,
                        "126%")
     }
 
@@ -2624,12 +2623,12 @@ final class MenuBarIconTests: XCTestCase {
     /// the outline spans the whole bar in every state and a span would not tell
     /// an empty bar from a full one.
     ///
-    /// **And it stops at the allowance**, exactly as the popover's lead bar does:
-    /// past that point the length has nothing left to say and the figure under it
-    /// says the rest. A scale stretched to three allowances would put the point
-    /// the whole reading turns on a third of the way along.
-    func testTheBarFillsWithTheRatioAndStopsAtTheAllowance() throws {
-        let inked = try [nil, rates(0), rates(50), rates(100)]
+    /// **And it stops at the refill rate**, exactly as the popover's lead bar
+    /// does: past that point the length has nothing left to say and the figure
+    /// under it says the rest. A scale stretched to three refills would put the
+    /// point the whole reading turns on a third of the way along.
+    func testTheBarFillsWithTheRatioAndStopsAtTheRefillRate() throws {
+        let inked = try [nil, ratio(0), ratio(50), ratio(100)]
             .map { try render($0).pixels(in: Self.barBand) }
         // Dashed and empty is the least ink of all; a bar drawn 0% full is a
         // solid outline and already more.
@@ -2639,19 +2638,19 @@ final class MenuBarIconTests: XCTestCase {
 
         // The clamp, in points of fill rather than in pixels of band, because the
         // band carries the frame too and the frame changes colour at the anchor.
-        XCTAssertEqual(MenuBarIcon.fillWidth(for: rates(50)),
+        XCTAssertEqual(MenuBarIcon.fillWidth(for: ratio(50)),
                        MenuBarIcon.barFillBounds.width / 2, accuracy: 0.001)
         for percent in [100.0, 130, 300, 1e12] {
-            XCTAssertEqual(MenuBarIcon.fillWidth(for: rates(percent)),
+            XCTAssertEqual(MenuBarIcon.fillWidth(for: ratio(percent)),
                            MenuBarIcon.barFillBounds.width, accuracy: 0.001,
-                           "at \(percent)% the fill is not stopped at the allowance")
+                           "at \(percent)% the fill is not stopped at the refill rate")
         }
     }
 
     /// The figure is capped at three digits, and what the cap buys is measured
     /// rather than argued.
     ///
-    /// The ratio has no top — the allowance goes to zero as the week runs out —
+    /// The ratio has no top — a fleet can burn many times what its week refills —
     /// while the column is a constant, because a status item that resizes itself
     /// drags every item to its left along with it. Drawn flush right, `1000%` at
     /// 32.75 pt starts at −5.75 in a 27 pt picture and the leading digit is
@@ -2663,19 +2662,19 @@ final class MenuBarIconTests: XCTestCase {
     /// reading: the accessibility description, which has no width to run out of,
     /// says what was measured.
     func testTheFigureIsCappedAtThreeDigitsAndNeverClipped() throws {
-        XCTAssertEqual(MenuBarIcon.label(for: rates(999)).string, "999%")
-        XCTAssertEqual(MenuBarIcon.label(for: rates(1000)).string, "999%")
-        XCTAssertEqual(MenuBarIcon.label(for: rates(1e12)).string, "999%")
+        XCTAssertEqual(MenuBarIcon.label(for: ratio(999)).string, "999%")
+        XCTAssertEqual(MenuBarIcon.label(for: ratio(1000)).string, "999%")
+        XCTAssertEqual(MenuBarIcon.label(for: ratio(1e12)).string, "999%")
         // Not a cap on the reading: the description carries the figure whole.
-        XCTAssertEqual(MenuBarIcon.describe(rates(1240)),
-                       "1240% of the sustainable spend rate")
+        XCTAssertEqual(MenuBarIcon.describe(ratio(1240)),
+                       "1240% of the weekly refill rate")
 
         // Drawn, and identical to the drawing of the cap itself. The comparison
         // is the ink and not its span: a clipped `1000%` spans 0.25…26.25, which
         // is exactly what `999%` spans, so a test on the edges would pass over
         // the defect it is named after.
-        let capped = try render(rates(1000)).columns(in: MenuBarIcon.numberRows)
-        XCTAssertEqual(capped, try render(rates(999)).columns(in: MenuBarIcon.numberRows))
+        let capped = try render(ratio(1000)).columns(in: MenuBarIcon.numberRows)
+        XCTAssertEqual(capped, try render(ratio(999)).columns(in: MenuBarIcon.numberRows))
         // The column is measured on the cap and nothing else, so moving the cap
         // moves the column instead of overflowing it.
         XCTAssertEqual(MenuBarIcon.numberColumnWidth,
@@ -2684,8 +2683,8 @@ final class MenuBarIconTests: XCTestCase {
                        accuracy: 0.001)
         // And the rounding is the popover's, so the two surfaces print the same
         // digits wherever the picture is not capped.
-        XCTAssertEqual(MenuBarIcon.label(for: rates(125.6)).string, "126%")
-        XCTAssertEqual(MenuBarIcon.label(for: rates(0)).string, "0%")
+        XCTAssertEqual(MenuBarIcon.label(for: ratio(125.6)).string, "126%")
+        XCTAssertEqual(MenuBarIcon.label(for: ratio(0)).string, "0%")
     }
 
     // MARK: - Colour, now that the picture owns it
@@ -2718,7 +2717,7 @@ final class MenuBarIconTests: XCTestCase {
             let plate = MenuBarIcon.background(for: appearance)
             var drawn: [Double] = []
             for percent in rampSamples {
-                let fill = try XCTUnwrap(render(rates(percent), appearance: appearance)
+                let fill = try XCTUnwrap(render(ratio(percent), appearance: appearance)
                     .chromaticMean(in: Self.barBand),
                                          "at \(percent)% of capacity the bar on a \(name.rawValue) "
                                          + "menu bar has no colour of its own at all")
@@ -2762,7 +2761,7 @@ final class MenuBarIconTests: XCTestCase {
         for name in [NSAppearance.Name.aqua, .darkAqua] {
             let appearance = try XCTUnwrap(NSAppearance(named: name))
             let plate = MenuBarIcon.background(for: appearance)
-            let calm = try render(rates(UsagePopoverView.greenRatioPercent - 0.001),
+            let calm = try render(ratio(UsagePopoverView.greenRatioPercent - 0.001),
                                   appearance: appearance)
             XCTAssertNil(calm.chromaticMean(in: Self.frameBand),
                          "a hair under capacity the frame was painted on \(name.rawValue)")
@@ -2772,7 +2771,7 @@ final class MenuBarIconTests: XCTestCase {
             var frames: [Double] = []
             var numbers: [Double] = []
             for percent in rampSamples where percent >= UsagePopoverView.greenRatioPercent {
-                let warned = try render(rates(percent), appearance: appearance)
+                let warned = try render(ratio(percent), appearance: appearance)
                 let frame = try XCTUnwrap(warned.chromaticMean(in: Self.frameBand),
                                           "at \(percent)% the frame carries no warning at all")
                 let number = try XCTUnwrap(warned.chromaticMean(in: MenuBarIcon.numberRows),
@@ -2847,8 +2846,8 @@ final class MenuBarIconTests: XCTestCase {
         return hue(of: (srgb.redComponent, srgb.greenComponent, srgb.blueComponent))
     }
 
-    /// Past the allowance the warning is on the frame and on the number, not on
-    /// the fill alone — and what that is worth changed with this round.
+    /// Past the refill rate the warning is on the frame and on the number, not
+    /// on the fill alone — and what that is worth changed with this round.
     ///
     /// It used to be worth the warning existing at all. The fill's length was the
     /// quota mean, so at a mean near zero there was nothing to colour — measured
@@ -2868,9 +2867,9 @@ final class MenuBarIconTests: XCTestCase {
     /// whole on-demand colouring path deletable. Re-run 2026-08-24 against the
     /// ratio: both still redden this test.
     func testOverCapacityIsLoudOnTheFrameAndTheNumberToo() throws {
-        let alarming = try render(rates(300))
+        let alarming = try render(ratio(300))
         let frame = try XCTUnwrap(alarming.chromaticMean(in: Self.frameBand), """
-            past the allowance the bar's frame drew nothing in a colour of its own, so the \
+            past the refill rate the bar's frame drew nothing in a colour of its own, so the \
             warning is carried by the fill and by nothing else (§4)
             """)
         XCTAssertGreaterThan(frame.red, frame.green + 0.2,
@@ -2885,7 +2884,7 @@ final class MenuBarIconTests: XCTestCase {
         // the assertions above stop being two. The fill is coloured here — it
         // carries the whole ramp and always has — so the fixture asks the frame's
         // own rows and the number's, which is what the boundary is about.
-        let quiet = try render(rates(30))
+        let quiet = try render(ratio(30))
         XCTAssertNil(quiet.chromaticMean(in: Self.frameBand),
                      "a fleet well inside its capacity coloured the frame anyway")
         XCTAssertNil(quiet.chromaticMean(in: MenuBarIcon.numberRows),
@@ -3014,7 +3013,7 @@ final class MenuBarIconTests: XCTestCase {
             // its own rows, which the fill cannot reach — at this figure the fill
             // is a hair short of full and a reading over the whole band would be
             // the fill's.
-            let calm = try render(rates(UsagePopoverView.greenRatioPercent - 0.001),
+            let calm = try render(ratio(UsagePopoverView.greenRatioPercent - 0.001),
                                   appearance: appearance)
             let calmFrame = try XCTUnwrap(onPlate(calm, in: Self.frameBand, on: plate))
             let calmNumber = try XCTUnwrap(onPlate(calm, in: MenuBarIcon.numberRows, on: plate))
@@ -3031,7 +3030,7 @@ final class MenuBarIconTests: XCTestCase {
                 // the rows above them. Two were needed while the fill's length
                 // was a second quantity that could be set to zero to get it out
                 // of the way; a picture drawn from one reading has no such knob.
-                let drawn = try render(rates(percent), appearance: appearance)
+                let drawn = try render(ratio(percent), appearance: appearance)
                 let fill = try XCTUnwrap(onPlate(drawn, in: Self.fillBand, on: plate,
                                                  colouredOnly: true),
                                          "at \(percent)% on \(short) the fill has no colour at all")
@@ -3094,7 +3093,7 @@ final class MenuBarIconTests: XCTestCase {
     /// threshold.
     func testAFillTooNarrowToSeeIsNotDrawnAtAll() throws {
         for percent in [0.0, 1, 2, 3, 4, 5] {
-            let figure = rates(percent)
+            let figure = ratio(percent)
             let drawn = try render(figure).chromaticMean(in: Self.fillBand) != nil
             XCTAssertEqual(MenuBarIcon.fillWidth(for: figure) >= MenuBarIcon.minimumVisibleFillWidth,
                            drawn, """
@@ -3109,8 +3108,8 @@ final class MenuBarIconTests: XCTestCase {
         // The fixture is one where the threshold decides: the smallest figures
         // are below it and the largest of the six is above, so the loop is not
         // green by being all one answer.
-        XCTAssertLessThan(MenuBarIcon.fillWidth(for: rates(1)), MenuBarIcon.minimumVisibleFillWidth)
-        XCTAssertGreaterThanOrEqual(MenuBarIcon.fillWidth(for: rates(5)),
+        XCTAssertLessThan(MenuBarIcon.fillWidth(for: ratio(1)), MenuBarIcon.minimumVisibleFillWidth)
+        XCTAssertGreaterThanOrEqual(MenuBarIcon.fillWidth(for: ratio(5)),
                                     MenuBarIcon.minimumVisibleFillWidth)
     }
 
@@ -3139,7 +3138,7 @@ final class MenuBarIconTests: XCTestCase {
         let chosen = MenuBarIcon.appearance(ofButton: button, system: light)
         XCTAssertEqual(chosen.name, .darkAqua,
                        "the picture followed the system theme past a button that has its own")
-        let dark = try XCTUnwrap(try render(rates(42), appearance: chosen).luminance(in: MenuBarIcon.numberRows))
+        let dark = try XCTUnwrap(try render(ratio(42), appearance: chosen).luminance(in: MenuBarIcon.numberRows))
         XCTAssertGreaterThan(dark, 0.7,
                              "drawn against the button's dark appearance the number is not light "
                              + "ink (luminance \(dark))")
@@ -3147,7 +3146,7 @@ final class MenuBarIconTests: XCTestCase {
         // No button, no picture of its own to resolve: the application's
         // appearance is all there is, and it is what the drawing gets.
         XCTAssertEqual(MenuBarIcon.appearance(ofButton: nil, system: light).name, .aqua)
-        let ink = try XCTUnwrap(try render(rates(42), appearance: MenuBarIcon.appearance(ofButton: nil,
+        let ink = try XCTUnwrap(try render(ratio(42), appearance: MenuBarIcon.appearance(ofButton: nil,
                                                                                         system: light))
             .luminance(in: MenuBarIcon.numberRows))
         XCTAssertLessThan(ink, 0.3, "the fallback did not draw against the appearance given")
@@ -3163,7 +3162,7 @@ final class MenuBarIconTests: XCTestCase {
     func testTheBarsFillIsTheColourThePopoverWouldUse() throws {
         for plate in [UsagePopoverView.RampBackground.light, .dark] {
             for percent in [0.0, 99.0, UsagePopoverView.greenRatioPercent, 300.0] {
-                let figure = rates(percent)
+                let figure = ratio(percent)
                 XCTAssertEqual(MenuBarIcon.fillColor(for: figure, on: plate),
                                NSColor(UsagePopoverView.ratioColor(atPercent: figure.percent, on: plate)),
                                "the menu bar and the popover disagree about \(percent)% on \(plate)")
@@ -3185,8 +3184,8 @@ final class MenuBarIconTests: XCTestCase {
     func testTheNumberAndTheFrameFollowTheAppearanceTheyAreDrawnAgainst() throws {
         let dark = NSAppearance(named: .darkAqua)
 
-        let lightNumber = try XCTUnwrap(try render(rates(42)).luminance(in: MenuBarIcon.numberRows))
-        let darkNumber = try XCTUnwrap(try render(rates(42), appearance: dark)
+        let lightNumber = try XCTUnwrap(try render(ratio(42)).luminance(in: MenuBarIcon.numberRows))
+        let darkNumber = try XCTUnwrap(try render(ratio(42), appearance: dark)
             .luminance(in: MenuBarIcon.numberRows))
         XCTAssertLessThan(lightNumber, 0.3,
                           "the number is not dark ink on a light menu bar (luminance \(lightNumber))")
@@ -3216,16 +3215,22 @@ final class MenuBarIconTests: XCTestCase {
     /// same fact about a description having no width: the `≥` of a ratio that is
     /// only a floor, and a figure the column would have had to cap.
     func testTheDescriptionCarriesTheRatioAndNamesItRight() {
-        XCTAssertEqual(MenuBarIcon.describe(nil), "Spend rate: no data")
-        XCTAssertEqual(MenuBarIcon.describe(rates(126)), "126% of the sustainable spend rate")
-        XCTAssertEqual(MenuBarIcon.describe(rates(126, lowerBound: true)),
-                       "≥126% of the sustainable spend rate",
+        XCTAssertEqual(MenuBarIcon.describe(nil), "Weekly burn: no data")
+        XCTAssertEqual(MenuBarIcon.describe(ratio(126)), "126% of the weekly refill rate")
+        XCTAssertEqual(MenuBarIcon.describe(ratio(126, lowerBound: true)),
+                       "≥126% of the weekly refill rate",
                        "a floor was read out as if it were the figure")
-        XCTAssertFalse(MenuBarIcon.describe(rates(126)).contains("quota"),
+        XCTAssertFalse(MenuBarIcon.describe(ratio(126)).contains("quota"),
                        "the description still calls the ratio a quota")
+        XCTAssertEqual(MenuBarIcon.describe(ratio(126)),
+                       UsagePopoverView.ratioLabel(for: ratio(126)) + " "
+                       + UsagePopoverView.ratioCaption, """
+            the two surfaces name the same figure differently, so the reader who hears it and \
+            the reader who sees it are told about two quantities
+            """)
         // Where the drawing caps, this does not.
-        XCTAssertEqual(MenuBarIcon.label(for: rates(1240)).string, "999%")
-        XCTAssertEqual(MenuBarIcon.describe(rates(1240)), "1240% of the sustainable spend rate")
+        XCTAssertEqual(MenuBarIcon.label(for: ratio(1240)).string, "999%")
+        XCTAssertEqual(MenuBarIcon.describe(ratio(1240)), "1240% of the weekly refill rate")
     }
 
     /// And it names the same reading the picture draws, at every figure either
@@ -3240,7 +3245,7 @@ final class MenuBarIconTests: XCTestCase {
     /// the picture prints, the description contains, capping aside.
     func testTheDescriptionAndThePictureNameOneNumber() throws {
         for percent in [0.0, 1, 60, 99.999, 100, 130, 300, 999] {
-            let figure = rates(percent)
+            let figure = ratio(percent)
             let printed = MenuBarIcon.label(for: figure).string
             XCTAssertTrue(MenuBarIcon.describe(figure).hasPrefix(printed),
                           "the picture prints \(printed) and the description says "
@@ -3248,44 +3253,57 @@ final class MenuBarIconTests: XCTestCase {
             XCTAssertFalse(try render(figure).rows(in: MenuBarIcon.numberRows).isEmpty,
                            "at \(percent)% the description names a number the picture never drew")
         }
-        // With no rates neither says anything, which is the other half: a
+        // With no ratio neither says anything, which is the other half: a
         // description that named a figure over a dashed empty bar would be the
         // reverse of what describing a picture is for.
-        XCTAssertEqual(MenuBarIcon.describe(nil), "Spend rate: no data")
+        XCTAssertEqual(MenuBarIcon.describe(nil), "Weekly burn: no data")
         XCTAssertTrue(try render(nil).rows(in: MenuBarIcon.numberRows).isEmpty)
     }
 
-    /// What the owner of the picture redraws on: the pair of rates, and both
-    /// halves of it, because either can move without the other.
-    func testThePictureIsRedrawnOnEitherHalfOfThePair() throws {
+    /// What the owner of the picture redraws on, and what it refuses to draw at
+    /// all.
+    ///
+    /// **It used to be a pair**, and the redraw had to watch both halves: a live
+    /// token rate arriving every minute over an allowance arriving every ten, so
+    /// a picture deduped on one of them held a stale ramp over a fleet that had
+    /// gone past what it may spend. Both sides of the figure are now measured in
+    /// the same pass out of the same series, so there is one thing to watch — and
+    /// the `≥` beside it, which moves without the number and changes what the
+    /// picture is allowed to claim.
+    func testThePictureIsRedrawnWhenTheFigureMoves() throws {
         var snapshot = UsageSnapshot.empty
-        // 12.6M/h against an allowance of 10M/h, which is the 126% the picture
-        // then draws and is coloured at.
-        snapshot.fleetTokenRate = 12_600_000
-        snapshot.sustainable = UsagePopoverLabelTests.allowance(10_000_000)
+        snapshot.fleetBurn = UsagePopoverLabelTests.burn(126)
         // With its arrival, which is half of what the picture asks of a figure —
         // see `testAFigureNobodyHasConfirmedForTwoIntervalsIsNotDrawnOnEitherSurface`.
-        snapshot.allowanceFetchedAt = Date()
-        let loaded = try XCTUnwrap(MenuBarIcon.rates(for: snapshot))
+        snapshot.historiesFetchedAt = Date()
+        let loaded = try XCTUnwrap(MenuBarIcon.ratio(for: snapshot))
         XCTAssertEqual(loaded.percent, 126)
 
-        // The numerator moves on the minute poll, the denominator every ten
-        // minutes, and a picture deduped on one of them would hold a stale ramp
-        // over a fleet that has gone past what it may spend.
         var faster = snapshot
-        faster.fleetTokenRate = 20_000_000
-        XCTAssertNotEqual(MenuBarIcon.rates(for: faster), loaded)
-        var poorer = snapshot
-        poorer.sustainable = UsagePopoverLabelTests.allowance(5_000_000)
-        XCTAssertNotEqual(MenuBarIcon.rates(for: poorer), loaded)
+        faster.fleetBurn = UsagePopoverLabelTests.burn(200)
+        XCTAssertNotEqual(MenuBarIcon.ratio(for: faster), loaded)
+        var floored = snapshot
+        floored.fleetBurn = UsagePopoverLabelTests.burn(126, lowerBound: true)
+        XCTAssertNotEqual(MenuBarIcon.ratio(for: floored), loaded, """
+            the same number over a blocked fleet is the same picture, so a fleet whose figure \
+            became a floor keeps a status item that states it exactly
+            """)
 
-        // And its own half's failure takes the whole picture away, while the
-        // other half's does not: the refusals are the endpoints', one each.
+        // And the live token rate is not in it at all any more, which is the
+        // other half of the same change: it is a supporting reading on the
+        // popover and colours nothing.
+        var spending = snapshot
+        spending.fleetTokenRate = 20_000_000
+        XCTAssertEqual(MenuBarIcon.ratio(for: spending), loaded,
+                       "the five-minute token rate moved the menu bar's picture again")
+
+        // Its own half's failure takes the whole picture away, while the other
+        // halves' do not: the refusals are the endpoints', one each.
         snapshot.sessionsFailure = "/gw/sessions: unreachable"
-        XCTAssertEqual(MenuBarIcon.rates(for: snapshot)?.percent, 126,
+        XCTAssertEqual(MenuBarIcon.ratio(for: snapshot)?.percent, 126,
                        "the sessions endpoint knows nothing about the histories")
-        snapshot.allowanceFailure = "/gw/usage/<label>/history: unreachable"
-        XCTAssertNil(MenuBarIcon.rates(for: snapshot),
+        snapshot.historiesFailure = "/gw/usage/<label>/history: unreachable"
+        XCTAssertNil(MenuBarIcon.ratio(for: snapshot),
                      "a reading outlived the figures behind it, with no room up here to say so")
     }
 }
@@ -4349,7 +4367,7 @@ final class UsageHistoryTests: XCTestCase {
                                                      seriesPeriod: history.seriesPeriod,
                                                      period: history.period,
                                                      chartFailed: false,
-                                                     allowanceFailed: false,
+                                                     historiesFailed: false,
                                                      now: history.now.addingTimeInterval(600)),
                       "the footer dated the previous window's lines under the new tab")
 
@@ -5014,55 +5032,74 @@ final class UsagePopoverLabelTests: XCTestCase {
         XCTAssertEqual(UsagePopoverView.percentLabel(nil), "—")
     }
 
-    /// A spend ratio as the surfaces read it, given as a per cent of the
-    /// allowance. The two rates are chosen so the ratio comes out at `percent`.
-    private func rates(_ percent: Double,
-                       lowerBound: Bool = false) -> UsagePopoverView.HeadlineRates {
-        UsagePopoverView.HeadlineRates(current: percent, allowance: 100, isLowerBound: lowerBound)
+    /// A burn ratio as the surfaces read it, in per cent of the week's refill
+    /// rate.
+    private func ratio(_ percent: Double,
+                       lowerBound: Bool = false) -> UsagePopoverView.HeadlineRatio {
+        UsagePopoverView.HeadlineRatio(percent: percent, isLowerBound: lowerBound)
     }
 
-    /// What the fleet may spend an hour, as the poll hands it over. Only
-    /// `tokensPerHour` and the lower-bound flag reach a surface; the rest is what
-    /// `--dump` prints, filled in with the live figures of 2026-08-24 so the
-    /// fixture is a fleet that existed.
+    /// The fleet's burn against its refill, as the poll hands it over. Only
+    /// `percent` and the lower-bound flag reach a surface; the rest is what
+    /// `--dump` prints, and it is built to be **an object production can
+    /// produce** rather than copied off a probe: `refillRate` is the expression
+    /// `burnAgainstRefill` computes for three contributors, `3 x 100 / 168` =
+    /// 1.7857 pp/h, and `burnRate` is derived back from whatever `percent` the
+    /// caller passes, so the three agree by construction.
+    ///
+    /// **The docblock used to describe a different pair of numbers than the code
+    /// beside it builds**, and both halves were wrong. It called these "the live
+    /// figures of 2026-09-05 02:50Z — three accounts over 48 h, 0.6714 pp/h
+    /// burned against the 0.5952 pp/h three weeks refill": that pair is **per
+    /// account** — 0.5952 is `100 / 168`, one account's share — while
+    /// `FleetBurn.refillRate` is by its own docstring the fleet's. And
+    /// `measuredHours: 47.9` was never that probe's either: at 02:50Z the spans
+    /// were 48.0 / 34.0 / 48.0 h and the field holds the shortest, 34.0. Of the
+    /// citation only `percent = 112.8` belonged to 02:50Z, and `percent` is a
+    /// parameter here. So the depth below is a plausible fixture depth and is not
+    /// claimed as a measurement.
     ///
     /// `static` and internal because the menu bar's own tests build the same
-    /// fixture: the two surfaces now read one rule, so they had better be handed
-    /// one allowance rather than two that can drift.
-    static func allowance(_ tokensPerHour: Double,
-                          lowerBound: Bool = false) -> FleetCapacity.SustainableRate {
-        FleetCapacity.SustainableRate(tokensPerHour: tokensPerHour, tokensPerPoint: 7_019_000,
-                                      allowedWorkRate: 2.824, workHoursPerDay: 15,
-                                      sleepRate: 0.056, accounts: 3, measuredHours: 47.9,
-                                      isLowerBound: lowerBound)
+    /// fixture: the two surfaces read one rule, so they had better be handed one
+    /// figure rather than two that can drift.
+    static func burn(_ percent: Double,
+                     lowerBound: Bool = false) -> FleetCapacity.FleetBurn {
+        FleetCapacity.FleetBurn(percent: percent,
+                                burnRate: percent / 100 * 3 * 100 / 168,
+                                refillRate: 3 * 100 / 168, accounts: 3, measuredHours: 47.9,
+                                isLowerBound: lowerBound)
     }
 
-    /// A snapshot the lead block can actually be drawn from: histories fresh
-    /// enough to colour it, a live rate, and an allowance to state that rate
-    /// against. Three sources, and the lead needs all three — which is what the
-    /// tests below take away one at a time.
+    /// A snapshot the lead block can actually be drawn from: a ratio, and
+    /// histories fresh enough to state it by. Two sources rather than the three
+    /// the lead needed while it was a live rate over an allowance — which is what
+    /// the tests below take away one at a time.
+    ///
+    /// The live token rate comes along because the block prints it as a
+    /// supporting reading, and it is *not* what the lead is made of: taking it
+    /// away leaves the lead exactly where it was.
     private func leading(lowerBound: Bool = false,
-                         current: Double = 23_800_000,
-                         sustainable: Double = 19_500_000) -> UsageSnapshot {
+                         percent: Double = 126,
+                         current: Double? = 23_800_000) -> UsageSnapshot {
         var snapshot = UsageSnapshot.empty
         snapshot.fleetSevenDayMean = 58.667
-        snapshot.allowanceFetchedAt = Date()
+        snapshot.historiesFetchedAt = Date()
         snapshot.fleetTokenRate = current
-        snapshot.sustainable = Self.allowance(sustainable, lowerBound: lowerBound)
+        snapshot.fleetBurn = Self.burn(percent, lowerBound: lowerBound)
         return snapshot
     }
 
     /// A figure that is only a floor says so, in the symbol this app already
     /// uses for one (§2.7): an account sat at its ceiling while it was measured,
     /// so the points it was blocked from burning never reached the series, the
-    /// allowance came out too generous, and the ratio drawn against it is at
-    /// least this — with no saying by how much.
+    /// burn came out too small against a refill share that account still brings,
+    /// and the ratio is at least this — with no saying by how much.
     func testTheRatioLabelSaysWhenItIsOnlyAFloor() {
-        XCTAssertEqual(UsagePopoverView.ratioLabel(for: rates(126)), "126%")
-        XCTAssertEqual(UsagePopoverView.ratioLabel(for: rates(126, lowerBound: true)), "≥126%")
-        XCTAssertEqual(UsagePopoverView.ratioLabel(for: rates(125.6)), "126%", "rounded, like every "
+        XCTAssertEqual(UsagePopoverView.ratioLabel(for: ratio(126)), "126%")
+        XCTAssertEqual(UsagePopoverView.ratioLabel(for: ratio(126, lowerBound: true)), "≥126%")
+        XCTAssertEqual(UsagePopoverView.ratioLabel(for: ratio(125.6)), "126%", "rounded, like every "
                        + "other percentage this popover writes")
-        XCTAssertEqual(UsagePopoverView.ratioLabel(for: rates(0)), "0%",
+        XCTAssertEqual(UsagePopoverView.ratioLabel(for: ratio(0)), "0%",
                        "a fleet at rest has a figure, and it is not a dash")
     }
 
@@ -5071,85 +5108,92 @@ final class UsagePopoverLabelTests: XCTestCase {
     ///
     /// Every way the lead can be missing arrives here as one state — the gateway
     /// silent, no account with enough history, every account pinned at its
-    /// ceiling, no allowance to be worked out, no live rate published — and none
-    /// of them may be turned into a number. So the fallback is the old figure,
-    /// and where there is no old figure either it is the dash that has always
-    /// stood there.
-    func testTheHeadlineFallsBackToTheMeanWhenThereAreNoRates() {
+    /// ceiling, a fall the reset schedule cannot explain, histories nobody has
+    /// confirmed for two intervals — and none of them may be turned into a
+    /// number. So the fallback is the old figure, and where there is no old
+    /// figure either it is the dash that has always stood there.
+    func testTheHeadlineFallsBackToTheMeanWhenThereIsNoRatio() {
         var snapshot = UsageSnapshot.empty
         XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot), "—",
                        "nothing polled yet is a dash, not a zero")
 
         snapshot.fleetSevenDayMean = 58.667
         XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot), "59%",
-                       "with no rates the headline is the mean it has always been")
+                       "with no ratio the headline is the mean it has always been")
 
         // The arrival stamp goes with the figure, here and everywhere below: it
         // is half of what `historiesAreFresh` asks (a figure nobody has confirmed for
         // twenty minutes is not drawn), and a pass that produces a figure always
-        // stamps it in the same breath — so a load without one is a fixture and
+        // stamps it in the same breath — so a ratio without one is a fixture and
         // not a state the app can be in.
         XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: leading(lowerBound: true)),
-                       "23.8M/h", "the spend is what the headline is for once there is a pair")
+                       "≥126%", """
+            the burn against the refill is what the headline is for once there is one — and it \
+            carries the floor mark, which the lead used to leave to the menu bar because it \
+            printed a different quantity from the one the floor was a floor on
+            """)
     }
 
-    /// **The lead is the spend and the caption is what may be spent**, both in
-    /// tokens an hour, and the bar is their ratio. No per cent in the block: a
-    /// per cent of a seven-day window is not something the five minutes it would
-    /// be held against can be compared with in the head.
-    func testTheLeadStatesTheSpendAgainstItsAllowance() throws {
+    /// **The lead is the burn against the refill, and the caption names what the
+    /// hundred means.** One quantity and one division, which is the change: the
+    /// block used to print a five-minute token rate as its figure and what the
+    /// fleet might sustainably spend as its caption, and the bar underneath was
+    /// the only place the two were ever compared. Now the figure *is* the
+    /// comparison, so the colour over it cannot be describing something else.
+    func testTheLeadStatesTheBurnAgainstTheWeeksRefill() throws {
         let snapshot = leading()
-        let pair = try XCTUnwrap(UsagePopoverView.headlineRates(for: snapshot))
-        XCTAssertEqual(pair.current, 23_800_000)
-        XCTAssertEqual(pair.allowance, 19_500_000)
-        XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot), "23.8M/h")
-        XCTAssertEqual(UsagePopoverView.sustainableCaption(pair.allowance), "of 19.5M/h sustainable")
-        XCTAssertFalse(UsagePopoverView.sustainableCaption(pair.allowance).contains("%"),
-                       "the lead block states two rates and no percentage of anything")
-        XCTAssertEqual(pair.ratio, 23.8 / 19.5, accuracy: 0.001,
-                       "the bar is the one drawn statement of how the two compare")
+        let figure = try XCTUnwrap(UsagePopoverView.headlineRatio(for: snapshot))
+        XCTAssertEqual(figure.percent, 126)
+        XCTAssertFalse(figure.isLowerBound)
+        XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot), "126%")
+        XCTAssertEqual(UsagePopoverView.ratioCaption, "of the weekly refill rate")
+        XCTAssertFalse(UsagePopoverView.ratioCaption.contains("token"), """
+            the caption names tokens under a figure that is percentage points of a week, which \
+            is the mismatch the whole metric was changed to remove
+            """)
+        XCTAssertEqual(figure.ratio, 1.26, accuracy: 0.001,
+                       "the bar is the one drawn statement of how far past the refill it is")
     }
 
-    /// The ratio the bar is drawn from is the spend over its allowance, and it is
-    /// not rounded down on the way: how far past the allowance a fleet is is
-    /// exactly the thing this reading exists to carry, and the clamp belongs to
-    /// the drawing rather than to the number (measured there —
-    /// `testTheLeadBarFillsWithTheRatioAndStopsAtTheAllowance`).
-    func testTheLeadRatioIsTheSpendOverItsAllowance() throws {
-        let over = try XCTUnwrap(UsagePopoverView.headlineRates(for: leading(current: 60_000_000)))
-        XCTAssertEqual(over.ratio, 60.0 / 19.5, accuracy: 0.001,
-                       "a fleet three times over its allowance said so, and the reading kept it")
+    /// The ratio the bar is drawn from is not rounded down on the way: how far
+    /// past its refill a fleet is is exactly the thing this reading exists to
+    /// carry, and the clamp belongs to the drawing rather than to the number
+    /// (measured there — `testTheLeadBarFillsWithTheRatioAndStopsAtTheRefillRate`).
+    func testTheLeadRatioIsKeptUnclamped() throws {
+        let over = try XCTUnwrap(UsagePopoverView.headlineRatio(for: leading(percent: 300)))
+        XCTAssertEqual(over.ratio, 3, accuracy: 0.001,
+                       "a fleet burning three weeks a week said so, and the reading kept it")
 
-        let under = try XCTUnwrap(UsagePopoverView.headlineRates(for: leading(current: 9_750_000)))
+        let under = try XCTUnwrap(UsagePopoverView.headlineRatio(for: leading(percent: 50)))
         XCTAssertEqual(under.ratio, 0.5, accuracy: 0.0001)
 
-        let idle = try XCTUnwrap(UsagePopoverView.headlineRates(for: leading(current: 0)))
-        XCTAssertEqual(idle.ratio, 0, "a fleet spending nothing draws no bar, and that is a reading")
+        let idle = try XCTUnwrap(UsagePopoverView.headlineRatio(for: leading(percent: 0)))
+        XCTAssertEqual(idle.ratio, 0, "a fleet burning nothing draws no bar, and that is a reading")
     }
 
-    /// Both halves of the pair are needed, and the surface says so by falling
-    /// back rather than by drawing half of it.
+    /// The lead needs the ratio and nothing else, and the surface says so by
+    /// falling back when it is missing — and by *not* falling back when the
+    /// supporting reading beside it is.
     ///
-    /// The two go missing for different reasons and on different schedules: the
-    /// live rate is absent when the gateway publishes no `tokens` block at all
-    /// (an older gateway, or statistics turned off), and the allowance is absent
-    /// for every reason `FleetCapacity.sustainable` refuses on. Either one alone
-    /// leaves a lead that states a rate against nothing, or nothing against a
-    /// rate.
-    func testEitherRateMissingTakesTheHeadlineBackToTheMean() {
-        var noLiveRate = leading()
-        noLiveRate.fleetTokenRate = nil
-        XCTAssertNil(UsagePopoverView.headlineRates(for: noLiveRate))
+    /// **That second half is the change.** The lead used to be a pair, and the
+    /// live token rate was one of its halves: no `tokens` block from the gateway
+    /// (an older gateway, or statistics turned off) and the whole lead went back
+    /// to the mean. The token rate is a supporting reading now, printed with no
+    /// bar and colouring nothing, so its absence costs the lead nothing at all.
+    func testOnlyTheRatioGoingMissingTakesTheHeadlineBackToTheMean() {
+        var noLiveRate = leading(current: nil)
+        XCTAssertNotNil(UsagePopoverView.headlineRatio(for: noLiveRate), """
+            the lead went back to the mean because a reading it no longer states was missing
+            """)
+        XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: noLiveRate), "126%")
+        XCTAssertNil(noLiveRate.fleetTokenRate, "the fixture publishes the rate after all")
+
+        noLiveRate.fleetBurn = nil
+        XCTAssertNil(UsagePopoverView.headlineRatio(for: noLiveRate))
         XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: noLiveRate), "59%",
-                       "a spend nobody measured is not a spend this line may state")
+                       "a burn nobody measured is not a burn this line may state")
         XCTAssertEqual(UsagePopoverView.headlineFigureColor(for: noLiveRate, on: .dark), .primary,
                        "and the fallback is the whole block, colour included")
-
-        var noAllowance = leading()
-        noAllowance.sustainable = nil
-        XCTAssertNil(UsagePopoverView.headlineRates(for: noAllowance))
-        XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: noAllowance), "59%",
-                       "a rate with nothing to hold it against says nothing at all")
     }
 
     /// The magnitude letter steps with the number, and zero keeps its own shape.
@@ -5167,8 +5211,8 @@ final class UsagePopoverLabelTests: XCTestCase {
         XCTAssertEqual(UsagePopoverView.rateLabel(1_000), "1.0k/h")
     }
 
-    /// A load whose own half is failing is not a load this line may state, and
-    /// the fallback is the same one it uses when there has never been a figure.
+    /// A figure whose own half is failing is not a figure this line may state,
+    /// and the fallback is the same one it uses when there has never been one.
     ///
     /// Measured with `/gw/usage` and `/gw/sessions` answering while `/history`
     /// returned HTTP 500: the menu bar dropped its colour and this line went on
@@ -5183,28 +5227,28 @@ final class UsagePopoverLabelTests: XCTestCase {
     /// answer, so all four are asked here rather than the string alone.
     func testAFailingHistoryHalfTakesTheHeadlineBackToTheMean() {
         var snapshot = leading()
-        XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot), "23.8M/h")
+        XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot), "126%")
         XCTAssertEqual(UsagePopoverView.headlineFigureColor(for: snapshot, on: .dark),
-                       UsagePopoverView.ratioColor(atPercent: 23.8 / 19.5 * 100, on: .dark),
+                       UsagePopoverView.ratioColor(atPercent: 126, on: .dark),
                        "the colour is the ratio the block states and not a second figure")
         XCTAssertTrue(UsagePopoverView.historiesAreFresh(for: snapshot))
 
-        snapshot.allowanceFailure = "/gw/usage/<label>/history: HTTP 500"
+        snapshot.historiesFailure = "/gw/usage/<label>/history: HTTP 500"
         XCTAssertFalse(UsagePopoverView.historiesAreFresh(for: snapshot),
                      "a figure nobody has confirmed since the outage began was still the headline")
-        XCTAssertNil(UsagePopoverView.headlineRates(for: snapshot),
-                     "the allowance comes from that same failed half and goes with it")
+        XCTAssertNil(UsagePopoverView.headlineRatio(for: snapshot),
+                     "the ratio comes from that same failed half and goes with it")
         XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot), "59%")
         XCTAssertEqual(UsagePopoverView.headlineFigureColor(for: snapshot, on: .dark), .primary)
 
-        // And the other halves' failures move none of it: the load comes from
-        // the histories and from nowhere else. The live rate arrives with the
-        // quota half, and this surface keeps a stale figure rather than blanking
-        // one — the same rule the account rows below it have always followed.
-        snapshot.allowanceFailure = nil
+        // And the other halves' failures move none of it: the ratio comes from
+        // the histories and from nowhere else. This surface keeps a stale figure
+        // rather than blanking one — the same rule the account rows below it have
+        // always followed.
+        snapshot.historiesFailure = nil
         snapshot.quotaFailure = "/gw/usage: unreachable"
         snapshot.sessionsFailure = "/gw/sessions: unreachable"
-        XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot), "23.8M/h",
+        XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot), "126%",
                        "an endpoint that knows nothing about the histories blanked the lead")
     }
 
@@ -5212,9 +5256,10 @@ final class UsagePopoverLabelTests: XCTestCase {
     /// figure either surface may state, and no failure is set when that happens.
     ///
     /// The state is reachable with everything nominally healthy: a `/gw/usage`
-    /// outage skips the load block whole (`UsageStore.poll` will not measure a
-    /// fleet whose membership nobody just confirmed), so `allowanceFailure` stays
-    /// `nil`, neither stamp moves, and both surfaces guarded on the blame alone.
+    /// outage skips the histories half whole (`UsageStore.poll` will not measure
+    /// a fleet whose membership nobody just confirmed), so `historiesFailure`
+    /// stays `nil`, neither stamp moves, and both surfaces guarded on the blame
+    /// alone.
     /// Two hours of that presented a two-hour-old figure as current — under a
     /// caption that says "capacity" here, and as a red frame with nothing to
     /// clear it up in the menu bar.
@@ -5225,20 +5270,20 @@ final class UsagePopoverLabelTests: XCTestCase {
     /// reading.
     func testAFigureNobodyHasConfirmedForTwoIntervalsIsNotDrawnOnEitherSurface() {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
-        let ceiling = UsagePopoverView.allowanceStaleSeconds
+        let ceiling = UsagePopoverView.historyStaleSeconds
         var snapshot = leading()
 
-        snapshot.allowanceFetchedAt = now.addingTimeInterval(-ceiling + 1)
-        XCTAssertEqual(UsagePopoverView.headlineRates(for: snapshot, now: now)?.current, 23_800_000,
+        snapshot.historiesFetchedAt = now.addingTimeInterval(-ceiling + 1)
+        XCTAssertEqual(UsagePopoverView.headlineRatio(for: snapshot, now: now)?.percent, 126,
                        "a figure inside its own schedule was dropped: the ceiling is the "
                        + "slow cadence running, not staleness")
-        XCTAssertNotNil(MenuBarIcon.rates(for: snapshot, now: now))
+        XCTAssertNotNil(MenuBarIcon.ratio(for: snapshot, now: now))
 
-        snapshot.allowanceFetchedAt = now.addingTimeInterval(-ceiling)
-        XCTAssertNil(UsagePopoverView.headlineRates(for: snapshot, now: now),
+        snapshot.historiesFetchedAt = now.addingTimeInterval(-ceiling)
+        XCTAssertNil(UsagePopoverView.headlineRatio(for: snapshot, now: now),
                      "nothing has refreshed the figure for two of its intervals and it is "
                      + "still the headline")
-        XCTAssertNil(MenuBarIcon.rates(for: snapshot, now: now),
+        XCTAssertNil(MenuBarIcon.ratio(for: snapshot, now: now),
                      "the menu bar kept a colour whose reading nobody has confirmed")
         // And the fallback is the same one a failure gets: the mean, in ink.
         XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot, now: now), "59%")
@@ -5247,13 +5292,13 @@ final class UsagePopoverLabelTests: XCTestCase {
 
         // A figure with no arrival stamp at all is in the same position: no pass
         // can produce one, and drawing it would be trusting a number with no age.
-        snapshot.allowanceFetchedAt = nil
-        XCTAssertNil(UsagePopoverView.headlineRates(for: snapshot, now: now))
-        XCTAssertNil(MenuBarIcon.rates(for: snapshot, now: now))
+        snapshot.historiesFetchedAt = nil
+        XCTAssertNil(UsagePopoverView.headlineRatio(for: snapshot, now: now))
+        XCTAssertNil(MenuBarIcon.ratio(for: snapshot, now: now))
 
         // The ceiling is two of the interval the histories are actually fetched
         // on — not a number of its own that could drift away from the schedule.
-        XCTAssertEqual(ceiling, 2 * UsageStore.allowanceIntervalSeconds)
+        XCTAssertEqual(ceiling, 2 * UsageStore.historyIntervalSeconds)
     }
 
     /// The headline's colour is the load's colour, and ink when the headline is
@@ -5278,11 +5323,14 @@ final class UsagePopoverLabelTests: XCTestCase {
 
         for plate in [UsagePopoverView.RampBackground.light, .dark] {
             for percent in rampSamples {
-                // The ramp reads the ratio this very block states — the spend the
-                // figure names over the allowance its caption names — so the
-                // snapshot is built to *make* that ratio rather than to carry a
-                // second figure the colour could be taken from instead.
-                snapshot = leading(current: 19_500_000 * percent / 100)
+                // The ramp reads the ratio this very block states — the burn the
+                // figure names against the refill its caption names — so the
+                // snapshot carries that ratio and no second figure the colour
+                // could be taken from instead. The spend rate stays at its
+                // fixture value on purpose: it is drawn on this surface, it does
+                // not move with the ramp, and a ramp that had been wired to it
+                // would come out flat across every sample here.
+                snapshot = leading(percent: percent)
                 XCTAssertEqual(UsagePopoverView.headlineFigureColor(for: snapshot, on: plate),
                                UsagePopoverView.ratioColor(atPercent: percent, on: plate),
                                "at \(percent)% on \(plate) the figure and the bar under it are two "
@@ -5375,14 +5423,14 @@ final class UsagePopoverLabelTests: XCTestCase {
         // The old form of this line compared the constant with `FleetLoad`'s own
         // copy of it and became a tautology the day that type went, which is what
         // a name-for-a-name rename does to an assertion. Asked through
-        // `isOverAllowance` there is a rule on the other side of the `==`.
-        let anchorRates = UsagePopoverView.HeadlineRates(
-            current: UsagePopoverView.greenRatioPercent, allowance: 100, isLowerBound: false)
-        XCTAssertTrue(anchorRates.isOverAllowance,
+        // `isOverRefill` there is a rule on the other side of the `==`.
+        let anchorRatio = UsagePopoverView.HeadlineRatio(
+            percent: UsagePopoverView.greenRatioPercent, isLowerBound: false)
+        XCTAssertTrue(anchorRatio.isOverRefill,
                       "at the ramp's green anchor the picture is already warning")
-        let justUnder = UsagePopoverView.HeadlineRates(
-            current: UsagePopoverView.greenRatioPercent - 0.001, allowance: 100, isLowerBound: false)
-        XCTAssertFalse(justUnder.isOverAllowance,
+        let justUnder = UsagePopoverView.HeadlineRatio(
+            percent: UsagePopoverView.greenRatioPercent - 0.001, isLowerBound: false)
+        XCTAssertFalse(justUnder.isOverRefill,
                        "a thousandth under the green anchor is still the calm picture")
 
         for plate in [UsagePopoverView.RampBackground.light, .dark] {
@@ -5583,8 +5631,8 @@ final class UsagePopoverLabelTests: XCTestCase {
     func testNoStringOnScreenNamesTheMetricByItsInternalWord() {
         var strings = [UsagePopoverView.headlineCaption,
                        UsagePopoverView.ratioCaption,
-                       UsagePopoverView.ratioLabel(for: rates(126, lowerBound: true))]
-        strings.append(MenuBarIcon.describe(rates(126)))
+                       UsagePopoverView.ratioLabel(for: ratio(126, lowerBound: true))]
+        strings.append(MenuBarIcon.describe(ratio(126)))
         strings.append(MenuBarIcon.describe(nil))
         for text in strings {
             XCTAssertFalse(text.lowercased().contains("fleet"),
@@ -5787,7 +5835,7 @@ final class UsagePopoverLabelTests: XCTestCase {
                                             seriesPeriod: chart == nil ? nil : .day,
                                             period: .day,
                                             chartFailed: chartFailed,
-                                            allowanceFailed: false,
+                                            historiesFailed: false,
                                             now: now)
         }
         // Fresh: the poll is simply running.
@@ -5815,7 +5863,7 @@ final class UsagePopoverLabelTests: XCTestCase {
                                             seriesPeriod: seriesPeriod,
                                             period: .day,
                                             chartFailed: false,
-                                            allowanceFailed: false,
+                                            historiesFailed: false,
                                             now: now)
         }
         // A stale half is enough on its own, whichever one it is, and it is the
@@ -5842,58 +5890,58 @@ final class UsagePopoverLabelTests: XCTestCase {
     /// for the first two minutes of every outage.
     func testAFailedCheckBreaksTheSilence() {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
-        func label(quotaFailed: Bool, chartFailed: Bool, allowanceFailed: Bool = false) -> String? {
+        func label(quotaFailed: Bool, chartFailed: Bool, historiesFailed: Bool = false) -> String? {
             UsagePopoverView.footerAgeLabel(quotaFetchedAt: now.addingTimeInterval(-30),
                                             quotaFailed: quotaFailed,
                                             chartFetchedAt: now.addingTimeInterval(-30),
                                             seriesPeriod: .day,
                                             period: .day,
                                             chartFailed: chartFailed,
-                                            allowanceFailed: allowanceFailed,
+                                            historiesFailed: historiesFailed,
                                             now: now)
         }
         XCTAssertNil(label(quotaFailed: false, chartFailed: false))
         XCTAssertEqual(label(quotaFailed: true, chartFailed: false), "as of less than a minute ago")
         XCTAssertEqual(label(quotaFailed: false, chartFailed: true), "as of less than a minute ago")
-        XCTAssertEqual(label(quotaFailed: false, chartFailed: false, allowanceFailed: true),
+        XCTAssertEqual(label(quotaFailed: false, chartFailed: false, historiesFailed: true),
                        "as of less than a minute ago",
                        "one of the three halves went quiet and the footer said nothing at all")
     }
 
-    /// The allowance is never dated by this footer, and the age it prints is
+    /// The burn ratio is never dated by this footer, and the age it prints is
     /// the age of what is drawn.
     ///
     /// This test asserted the opposite, and it enshrined the defect: with a quota
-    /// 20 s old and the allowance half failing it expected `as of 5m ago`, the age
-    /// of an allowance stamp — over a popover where the same failure had already
-    /// taken the allowance off the screen (`historiesAreFresh`), so every drawn
-    /// value was seconds old and the line overstated them by as much as the
-    /// process had been running. What the fold was reaching for is now impossible
-    /// instead of wrong: an allowance older than `allowanceStaleSeconds` is not
-    /// shown, so an allowance worth dating is never on screen to date.
+    /// 20 s old and the histories half failing it expected `as of 5m ago`, the age
+    /// of a histories stamp — over a popover where the same failure had already
+    /// taken the ratio off the screen (`historiesAreFresh`), so every drawn value
+    /// was seconds old and the line overstated them by as much as the process had
+    /// been running. What the fold was reaching for is now impossible instead of
+    /// wrong: a ratio older than `historyStaleSeconds` is not shown, so a ratio
+    /// worth dating is never on screen to date.
     ///
     /// The failure still breaks the silence — but over the halves that *are*
     /// drawn, which is what the second half of this test holds.
-    func testTheFooterDatesWhatIsDrawnAndTheAllowanceIsNotIt() {
+    func testTheFooterDatesWhatIsDrawnAndTheRatioIsNotIt() {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
-        func label(quota: TimeInterval, allowanceFailed: Bool = false) -> String? {
+        func label(quota: TimeInterval, historiesFailed: Bool = false) -> String? {
             UsagePopoverView.footerAgeLabel(quotaFetchedAt: now.addingTimeInterval(-quota),
                                             quotaFailed: false,
                                             chartFetchedAt: now.addingTimeInterval(-quota),
                                             seriesPeriod: .day,
                                             period: .day,
                                             chartFailed: false,
-                                            allowanceFailed: allowanceFailed,
+                                            historiesFailed: historiesFailed,
                                             now: now)
         }
-        // The state that used to print an unbounded overstatement: the allowance
+        // The state that used to print an unbounded overstatement: the histories
         // half has been failing for two hours, the quota and the chart are 20 s
         // old, and the only figures on screen are those 20 s old ones.
-        XCTAssertEqual(label(quota: 20, allowanceFailed: true), "as of less than a minute ago",
+        XCTAssertEqual(label(quota: 20, historiesFailed: true), "as of less than a minute ago",
                        "the footer dated the screen by a figure the same failure had removed")
         // The stale-quota case is untouched: the age of a screen is the age of
         // the oldest thing on it.
-        XCTAssertEqual(label(quota: 3600, allowanceFailed: true), "as of 1h ago")
+        XCTAssertEqual(label(quota: 3600, historiesFailed: true), "as of 1h ago")
         XCTAssertEqual(label(quota: 3600), "as of 1h ago")
         XCTAssertNil(label(quota: 20))
     }
@@ -5959,7 +6007,7 @@ final class UsagePopoverLabelTests: XCTestCase {
 
         // And the menu bar has nothing to draw from this snapshot at all: the
         // quota is not a figure it falls back to.
-        XCTAssertNil(MenuBarIcon.rates(for: snapshot))
+        XCTAssertNil(MenuBarIcon.ratio(for: snapshot))
 
         // A reading nobody ever took is a dash.
         XCTAssertNil(UsagePopoverView.headlinePercent(for: .empty))
@@ -6068,24 +6116,24 @@ final class UsagePopoverLabelTests: XCTestCase {
     /// surface at all. Standing first, it explained a number the user cannot see
     /// while the empty chart beside it had its own reason shown nowhere.
     func testTheFooterExplainsTheHalvesThisViewDraws() {
-        XCTAssertNil(UsagePopoverView.failureText(quota: nil, history: nil, allowance: nil))
+        XCTAssertNil(UsagePopoverView.failureText(quota: nil, chart: nil, histories: nil))
         XCTAssertEqual(UsagePopoverView.failureText(quota: "/gw/usage: HTTP 500",
-                                                    history: nil, allowance: nil),
+                                                    chart: nil, histories: nil),
                        "/gw/usage: HTTP 500")
-        XCTAssertEqual(UsagePopoverView.failureText(quota: nil, history: "acc2: unreachable",
-                                                    allowance: nil),
+        XCTAssertEqual(UsagePopoverView.failureText(quota: nil, chart: "acc2: unreachable",
+                                                    histories: nil),
                        "acc2: unreachable")
         // The third half, and the one this footer was silent about: its figure
         // is the biggest thing on the surface, so the same test that keeps
         // `/gw/sessions` out is what puts this one in.
-        XCTAssertEqual(UsagePopoverView.failureText(quota: nil, history: nil,
-                                                    allowance: "/gw/usage/<label>/history: HTTP 500"),
-                       "/gw/usage/<label>/history: HTTP 500",
+        XCTAssertEqual(UsagePopoverView.failureText(quota: nil, chart: nil,
+                                                    histories: "/gw/usage/<label>/chart: HTTP 500"),
+                       "/gw/usage/<label>/chart: HTTP 500",
                        "the headline stated a figure whose endpoint was failing, unexplained")
         XCTAssertEqual(UsagePopoverView.failureText(quota: "/gw/usage: HTTP 500",
-                                                    history: "acc2: unreachable",
-                                                    allowance: "/gw/usage/<label>/history: HTTP 500"),
-                       "/gw/usage: HTTP 500; acc2: unreachable; /gw/usage/<label>/history: HTTP 500",
+                                                    chart: "acc2: unreachable",
+                                                    histories: "/gw/usage/<label>/chart: HTTP 500"),
+                       "/gw/usage: HTTP 500; acc2: unreachable; /gw/usage/<label>/chart: HTTP 500",
                        "one reason stood in for the others")
 
         // The endpoint this view has no figure from is not in it at all — while
@@ -6094,8 +6142,8 @@ final class UsagePopoverLabelTests: XCTestCase {
         snapshot.sessionsFailure = "/gw/sessions: HTTP 502"
         XCTAssertEqual(snapshot.failureText, "/gw/sessions: HTTP 502")
         XCTAssertNil(UsagePopoverView.failureText(quota: snapshot.quotaFailure,
-                                                  history: nil,
-                                                  allowance: snapshot.allowanceFailure))
+                                                  chart: nil,
+                                                  histories: snapshot.historiesFailure))
     }
 
 }
@@ -6436,25 +6484,25 @@ final class UsagePopoverPaintTests: XCTestCase {
         // (`UsagePopoverView.historiesAreFresh`). Without it a test that sets a
         // spend rate would be rendering the fallback picture and measuring the
         // wrong thing.
-        value.allowanceFetchedAt = fetched
-        // The lead reading needs two figures and the stamp above: the live rate
-        // arrives with the quota half, the allowance with the histories. Both are
-        // seeded here so that a test asking about the lead block gets one —
-        // without them it would be rendering the fallback, which is the trap the
-        // stamp already documents.
+        value.historiesFetchedAt = fetched
+        // The lead reading needs the ratio and the stamp above, and it is seeded
+        // here so that a test asking about the lead block gets one — without it
+        // the rendering is the fallback, which is the trap the stamp already
+        // documents.
+        value.fleetBurn = UsagePopoverLabelTests.burn(Self.leadPercent)
+        // The third reading of the block, which is not part of the lead at all:
+        // no bar, no colour, and its absence would cost the block one reading
+        // rather than sending it back to the fallback.
         value.fleetTokenRate = Self.currentRate
-        value.sustainable = FleetCapacity.SustainableRate(
-            tokensPerHour: Self.sustainableRate, tokensPerPoint: 7_019_000,
-            allowedWorkRate: 2.824, workHoursPerDay: 15, sleepRate: 0.056,
-            accounts: 3, measuredHours: 47.9, isLowerBound: false)
         return value
     }
 
-    /// What the lead states in every rendering here: the live fleet's own two
-    /// rates on 2026-08-24, which the surface writes `23.8M/h` and
-    /// `of 19.5M/h sustainable`.
+    /// What the lead states in every rendering here: the live fleet's own burn
+    /// against its refill at 2026-09-05 02:50Z, which the surface writes `113%` over
+    /// `of the weekly refill rate`.
+    private static let leadPercent = 112.8
+    /// And the supporting rate under it, from 2026-08-24: `23.8M/h`.
     private static let currentRate = 23_800_000.0
-    private static let sustainableRate = 19_500_000.0
 
     /// A store whose quota poll has already landed, naming these accounts.
     ///
@@ -6520,19 +6568,19 @@ final class UsagePopoverPaintTests: XCTestCase {
     func testTheHeadlineCaptionIsDrawnOnOneLine() async throws {
         let content = Double(UsagePopoverView.width - 2 * UsagePopoverView.padding)
 
-        // Both captions and the widest figure each can stand over. The lead's
-        // caption is a different string of a different length and it carries a
-        // measurement inside it, so the widest allowance this fleet could name is
-        // asked for as well as the ordinary one — a headline that fitted on one
-        // line at `100%` proves nothing about either.
-        let cases: [(caption: String, mean: Double?, rate: Double?)] = [
+        // Both captions, and under the lead's the widest figure it can stand
+        // over. The lead's caption is a fixed string of its own length, so what
+        // is varied under it is the figure: `≥9999%` is the widest reading a
+        // fleet in real trouble writes, and a caption that fitted under `113%`
+        // proves nothing about the row that has to hold both.
+        let cases: [(caption: String, mean: Double?, ratio: Double?)] = [
             (UsagePopoverView.headlineCaption, nil, nil),
             (UsagePopoverView.headlineCaption, 100, nil),
-            (UsagePopoverView.sustainableCaption(Self.sustainableRate), 100, Self.currentRate),
-            (UsagePopoverView.sustainableCaption(999_900_000_000), 100, 999_900_000_000),
+            (UsagePopoverView.ratioCaption, 100, 112.8),
+            (UsagePopoverView.ratioCaption, 100, 9999),
         ]
 
-        for (text, mean, rate) in cases {
+        for (text, mean, ratio) in cases {
             let alone = inkBands(in: try canvas(Text(text)
                 .font(.system(size: UsagePopoverView.headlineCaptionSize))))
             XCTAssertEqual(alone.count, 1, "the caption \"\(text)\" drew \(alone.count) lines on its own")
@@ -6540,16 +6588,9 @@ final class UsagePopoverPaintTests: XCTestCase {
 
             var snapshot = try snapshot(labels: ["acc1"])
             snapshot.fleetSevenDayMean = mean
-            // A rate in the case is a lead block; no rate is the fallback, and
-            // the allowance goes with it or the block would be half drawn.
-            snapshot.fleetTokenRate = rate
-            snapshot.sustainable = rate.map {
-                FleetCapacity.SustainableRate(tokensPerHour: $0 == Self.currentRate
-                                                ? Self.sustainableRate : 999_900_000_000,
-                                              tokensPerPoint: 7_019_000, allowedWorkRate: 2.824,
-                                              workHoursPerDay: 15, sleepRate: 0.056,
-                                              accounts: 3, measuredHours: 47.9, isLowerBound: false)
-            }
+            // A ratio in the case is the lead reading; no ratio is the fallback,
+            // where the quota takes the big figure back and the caption with it.
+            snapshot.fleetBurn = ratio.map { UsagePopoverLabelTests.burn($0, lowerBound: $0 > 1000) }
             let cache = UsageCache()
             cache.store(snapshot)
             let history = UsageHistoryModel(client: flatHistoryClient(readings: ["acc1": 90],
@@ -6569,8 +6610,7 @@ final class UsagePopoverPaintTests: XCTestCase {
             // end and the third band came out 289.00 pt instead of 292.00).
             let bands = Array(inkBands(in: try canvas(view)).prefix(3))
             let widths = bands.map { String(format: "%.2f", $0) }.joined(separator: ", ")
-            let drawn = rate.map(UsagePopoverView.rateLabel)
-                ?? (mean.map { "\(Int($0))%" } ?? "—")
+            let drawn = UsagePopoverView.headlineFigureLabel(for: snapshot)
             XCTAssertEqual(bands.count, 3,
                            "with the figure at \(drawn) the top of the popover is \(bands.count) "
                            + "lines of ink (\(widths) pt wide) rather than figure, caption and bar")
@@ -6691,37 +6731,38 @@ final class UsagePopoverPaintTests: XCTestCase {
         return Double(hue)
     }
 
-    /// **The lead bar is the two rates compared, and it stops at the allowance.**
+    /// **The lead bar is the burn against the refill, and it stops at the refill
+    /// rate.**
     ///
-    /// A scale stretched to fit three times the allowance would make the
-    /// allowance itself — the point the whole reading turns on — a mark a third
-    /// of the way along. So the bar is read off the drawing at half the
-    /// allowance, at exactly the allowance and at three times it, and the last
-    /// two have to be the same full bar.
+    /// A scale stretched to fit three times the refill would make the refill
+    /// itself — the point the whole reading turns on — a mark a third of the way
+    /// along. So the bar is read off the drawing at half the refill rate, at
+    /// exactly it and at three times it, and the last two have to be the same
+    /// full bar.
     ///
     /// Measured rather than reasoned about, because the fill is a claim about
     /// pixels: the ratio no longer clamps itself, so what holds this is the
     /// drawing and nothing else.
-    func testTheLeadBarFillsWithTheRatioAndStopsAtTheAllowance() async throws {
+    func testTheLeadBarFillsWithTheRatioAndStopsAtTheRefillRate() async throws {
         let content = Double(UsagePopoverView.width - 2 * UsagePopoverView.padding)
-        let half = try await headlineBarFill(current: Self.sustainableRate / 2)
-        let level = try await headlineBarFill(current: Self.sustainableRate)
-        let over = try await headlineBarFill(current: 3 * Self.sustainableRate)
+        let half = try await headlineBarFill(ratioPercent: 50)
+        let level = try await headlineBarFill(ratioPercent: 100)
+        let over = try await headlineBarFill(ratioPercent: 300)
 
         XCTAssertEqual(half, content / 2, accuracy: 1.5,
-                       "half the allowance is not half the bar (\(half) pt of \(content))")
+                       "half the refill rate is not half the bar (\(half) pt of \(content))")
         XCTAssertEqual(level, content, accuracy: 1.5,
-                       "spending exactly the allowance is a full bar (\(level) pt of \(content))")
+                       "burning exactly the refill is a full bar (\(level) pt of \(content))")
         XCTAssertEqual(over, level, accuracy: 0.5, """
-            three times the allowance drew \(over) pt against \(level) at the allowance itself: a \
+            three times the refill drew \(over) pt against \(level) at the refill rate itself: a \
             bar that goes on growing puts the point the reading turns on a third of the way along
             """)
     }
 
-    /// The width of the coloured part of the headline's lead bar, at one spend.
-    private func headlineBarFill(current: Double) async throws -> Double {
+    /// The width of the coloured part of the headline's lead bar, at one ratio.
+    private func headlineBarFill(ratioPercent percent: Double) async throws -> Double {
         var snapshot = try snapshot(labels: ["acc1"])
-        snapshot.fleetTokenRate = current
+        snapshot.fleetBurn = UsagePopoverLabelTests.burn(percent)
         let cache = UsageCache()
         cache.store(snapshot)
         let history = UsageHistoryModel(client: flatHistoryClient(readings: ["acc1": 90],
@@ -6739,12 +6780,11 @@ final class UsagePopoverPaintTests: XCTestCase {
         return Double(try XCTUnwrap(bars.first).width) / picture.scale
     }
 
-    /// The hue of the headline's bar at one spend ratio, given as a per cent of
-    /// the allowance. The spend is what is moved, because the spend over the
-    /// allowance is what the ramp reads.
+    /// The hue of the headline's bar at one burn ratio, in per cent of the
+    /// week's refill rate — the quantity the ramp reads.
     private func headlineBarHue(ratioPercent percent: Double) async throws -> Double {
         var snapshot = try snapshot(labels: ["acc1"])
-        snapshot.fleetTokenRate = Self.sustainableRate * percent / 100
+        snapshot.fleetBurn = UsagePopoverLabelTests.burn(percent)
         let cache = UsageCache()
         cache.store(snapshot)
         let history = UsageHistoryModel(client: flatHistoryClient(readings: ["acc1": 90],
@@ -6803,39 +6843,44 @@ final class UsagePopoverPaintTests: XCTestCase {
                        "the quota was painted on some scale of its own (hue \(mean.hue))")
     }
 
-    /// Both readings are on screen at once: the load leading, the weekly quota
-    /// under it with its own figure, its own words and its own bar.
+    /// All three readings are on screen at once: the burn ratio leading, the
+    /// weekly quota under it with its own figure, its own words and its own bar,
+    /// and the spend rate under that with a figure and words but no bar.
     ///
-    /// Which is the correction — the branch that put the load in the headline
+    /// Which is the correction — the branch that put the ratio in the headline
     /// took the quota off the screen rather than adding a reading beside it, and
-    /// the owner asked for both.
+    /// the owner asked for all of them.
     ///
     /// Measured the way the caption's own test measures: every string is drawn a
     /// second time on its own and the popover's lines of ink are compared against
-    /// those widths. Six lines above the first rule, in order — load figure, load
-    /// caption, load bar, quota figure, quota caption, quota bar — and each named
-    /// one asserted, so a layout that dropped a line or drew the same reading
-    /// twice fails on the count *and* on the widths.
+    /// those widths. Eight lines above the first rule, in order — ratio figure,
+    /// ratio caption, ratio bar, quota figure, quota caption, quota bar, rate
+    /// figure, rate caption — and each named one asserted, so a layout that
+    /// dropped a line or drew the same reading twice fails on the count *and* on
+    /// the widths.
     ///
-    /// The two figures are deliberately different strings at different sizes
-    /// (`23.8M/h` at `headlineFigureSize`, `52%` at `supportingFigureSize`): were
-    /// they the same string at the same size, a headline that drew one reading
-    /// twice would pass every assertion here.
-    func testTheHeadlineDrawsTheSpendAndTheWeeklyQuotaAtOnce() async throws {
+    /// The eighth line is the one that says the rate has no bar of its own: a
+    /// `QuotaBar(fraction: nil)` under it would draw an empty track, which reads
+    /// as a reading of zero, and it would land here as a ninth full-width line.
+    ///
+    /// The three figures are deliberately different strings, and the lead is at a
+    /// different size (`126%` at `headlineFigureSize`, `52%` and `23.8M/h` at
+    /// `supportingFigureSize`): were any two the same string at the same size, a
+    /// headline that drew one reading twice would pass the assertions on them.
+    func testTheHeadlineDrawsAllThreeReadingsAtOnce() async throws {
         let content = Double(UsagePopoverView.width - 2 * UsagePopoverView.padding)
         let lines = try await headlineInkBands(ratioPercent: 126, mean: 52)
-        XCTAssertEqual(lines.count, 6, """
-            the headline is \(lines.count) lines of ink rather than the six of two readings \
+        XCTAssertEqual(lines.count, 8, """
+            the headline is \(lines.count) lines of ink rather than the eight of three readings \
             (\(lines.map { String(format: "%.2f", $0) }.joined(separator: ", ")) pt wide)
             """)
-        guard lines.count == 6 else { return }
+        guard lines.count == 8 else { return }
 
-        XCTAssertEqual(lines[0], try figureWidth(UsagePopoverView.rateLabel(Self.currentRate),
+        XCTAssertEqual(lines[0], try figureWidth("126%",
                                                  size: UsagePopoverView.headlineFigureSize),
-                       accuracy: 0.5, "the lead figure is not the spend at its own size")
-        XCTAssertEqual(lines[1],
-                       try captionWidth(UsagePopoverView.sustainableCaption(Self.sustainableRate)),
-                       accuracy: 0.5, "the line under the lead figure is not the allowance")
+                       accuracy: 0.5, "the lead figure is not the burn ratio at its own size")
+        XCTAssertEqual(lines[1], try captionWidth(UsagePopoverView.ratioCaption), accuracy: 0.5,
+                       "the line under the lead figure is not the refill caption")
         XCTAssertEqual(lines[2], content, accuracy: 0.5, "the lead bar is not full width")
         XCTAssertEqual(lines[3], try figureWidth("52%", size: UsagePopoverView.supportingFigureSize),
                        accuracy: 0.5,
@@ -6843,9 +6888,14 @@ final class UsagePopoverPaintTests: XCTestCase {
         XCTAssertEqual(lines[4], try captionWidth(UsagePopoverView.headlineCaption), accuracy: 0.5,
                        "the weekly quota lost the caption it has always had")
         XCTAssertEqual(lines[5], content, accuracy: 0.5, "the quota's own bar is not full width")
+        XCTAssertEqual(lines[6], try figureWidth(UsagePopoverView.rateLabel(Self.currentRate),
+                                                 size: UsagePopoverView.supportingFigureSize),
+                       accuracy: 0.5, "the third figure is not the spend rate at the supporting size")
+        XCTAssertEqual(lines[7], try captionWidth(UsagePopoverView.spendRateCaption), accuracy: 0.5,
+                       "the spend rate lost its caption, or grew a bar it has no ceiling for")
 
-        // And the supporting figure is smaller than the lead, which is what makes
-        // the pair a lead and a second reading rather than twins.
+        // And the supporting figures are smaller than the lead, which is what
+        // makes the three a lead and two second readings rather than triplets.
         XCTAssertLessThan(UsagePopoverView.supportingFigureSize, UsagePopoverView.headlineFigureSize)
     }
 
@@ -6856,20 +6906,29 @@ final class UsagePopoverPaintTests: XCTestCase {
     /// supporting block is not drawn at all. Drawn anyway it would be the same
     /// percentage twice on one surface, which is the failure this half is here to
     /// catch: the count is the assertion.
-    func testWithNoRatesTheQuotaIsTheLeadAndIsNotDrawnTwice() async throws {
+    func testWithNoRatioTheQuotaIsTheLeadAndIsNotDrawnTwice() async throws {
         let lines = try await headlineInkBands(ratioPercent: nil, mean: 52)
-        XCTAssertEqual(lines.count, 3, """
-            with no load the headline is \(lines.count) lines of ink rather than three: the quota \
+        XCTAssertEqual(lines.count, 5, """
+            with no ratio the headline is \(lines.count) lines of ink rather than five: the quota \
             is drawn twice, or the supporting block outlived the figure it supports \
             (\(lines.map { String(format: "%.2f", $0) }.joined(separator: ", ")) pt wide)
             """)
-        guard lines.count == 3 else { return }
+        guard lines.count == 5 else { return }
         XCTAssertEqual(lines[0], try figureWidth("52%", size: UsagePopoverView.headlineFigureSize),
                        accuracy: 0.5, "the quota is not the lead figure, at the lead's size")
         XCTAssertEqual(lines[1], try captionWidth(UsagePopoverView.headlineCaption), accuracy: 0.5,
                        "the caption under the lead is not the quota's")
         XCTAssertEqual(lines[2],
                        Double(UsagePopoverView.width - 2 * UsagePopoverView.padding), accuracy: 0.5)
+        // The spend rate is not gated on the ratio: it is measured, it duplicates
+        // nothing, and it stays. Its two lines are the fourth and fifth, and
+        // asserting them is what keeps the count above from being satisfied by
+        // the quota having been drawn twice after all.
+        XCTAssertEqual(lines[3], try figureWidth(UsagePopoverView.rateLabel(Self.currentRate),
+                                                 size: UsagePopoverView.supportingFigureSize),
+                       accuracy: 0.5, "the spend rate went with the ratio it does not depend on")
+        XCTAssertEqual(lines[4], try captionWidth(UsagePopoverView.spendRateCaption), accuracy: 0.5,
+                       "the caption under the spend rate is not the spend rate's")
     }
 
     /// The quota's bar keeps the quota's own scale, and the lead's keeps the
@@ -6898,15 +6957,14 @@ final class UsagePopoverPaintTests: XCTestCase {
 
     /// The hue of the two headline bars: the lead's, and the supporting reading's
     /// under it. Found as the third and sixth lines of ink above the first rule,
-    /// which is the order `testTheHeadlineDrawsTheSpendAndTheWeeklyQuotaAtOnce`
-    /// holds.
+    /// which is the order `testTheHeadlineDrawsAllThreeReadingsAtOnce` holds.
     private func headlineBarHues(load percent: Double,
                                  mean: Double) async throws -> (lead: Double, supporting: Double) {
         let picture = try await headlinePicture(ratioPercent: percent, mean: mean)
         let firstRule = try XCTUnwrap(rules(in: picture).first, "the popover drew no rule at all")
         let bands = inkBandRows(in: picture).filter { $0.upperBound <= firstRule }
-        guard bands.count == 6 else {
-            XCTFail("the headline is \(bands.count) lines of ink rather than six")
+        guard bands.count == 8 else {
+            XCTFail("the headline is \(bands.count) lines of ink rather than eight")
             return (-1, -1)
         }
         return (try chromaticHue(in: picture, rows: bands[2]),
@@ -6965,10 +7023,9 @@ final class UsagePopoverPaintTests: XCTestCase {
                                  scheme: ColorScheme = .light) async throws -> Canvas {
         var snapshot = try snapshot(labels: ["acc1"])
         snapshot.fleetSevenDayMean = mean
-        // `nil` is the fallback picture, and both of the lead's sources go with
-        // it: half a lead block is not a state the surface can be in.
-        snapshot.fleetTokenRate = percent.map { Self.sustainableRate * $0 / 100 }
-        if percent == nil { snapshot.sustainable = nil }
+        // `nil` is the fallback picture: no ratio at all, which is the one thing
+        // that takes the lead back to the mean.
+        snapshot.fleetBurn = percent.map { UsagePopoverLabelTests.burn($0) }
         let cache = UsageCache()
         cache.store(snapshot)
         let history = UsageHistoryModel(client: flatHistoryClient(readings: ["acc1": 90],
@@ -6986,7 +7043,7 @@ final class UsagePopoverPaintTests: XCTestCase {
     /// popover is drawn on, at one load in one scheme.
     ///
     /// The two are the first and third lines of ink above the popover's first
-    /// rule, which is the order `testTheHeadlineDrawsTheSpendAndTheWeeklyQuotaAtOnce`
+    /// rule, which is the order `testTheHeadlineDrawsAllThreeReadingsAtOnce`
     /// holds. Composited over the plate for the reason the menu bar's own
     /// measurement composites: the rendering is on transparency, and what a
     /// reader sees is the popover's material through it.
@@ -6997,8 +7054,8 @@ final class UsagePopoverPaintTests: XCTestCase {
         let picture = try await headlinePicture(ratioPercent: percent, mean: 52, scheme: scheme)
         let firstRule = try XCTUnwrap(rules(in: picture).first, "the popover drew no rule at all")
         let bands = inkBandRows(in: picture).filter { $0.upperBound <= firstRule }
-        guard bands.count == 6 else {
-            XCTFail("the headline is \(bands.count) lines of ink rather than six")
+        guard bands.count == 8 else {
+            XCTFail("the headline is \(bands.count) lines of ink rather than eight")
             return ((0, 0, 0, 0), (0, 0, 0, 0))
         }
         func measure(_ rows: Range<Int>) throws
@@ -7048,8 +7105,7 @@ final class UsagePopoverPaintTests: XCTestCase {
         var snapshot = try snapshot(labels: ["acc1"])
         // A mean as well, so the `nil` case still has a figure to draw.
         snapshot.fleetSevenDayMean = 52
-        snapshot.fleetTokenRate = percent.map { Self.sustainableRate * $0 / 100 }
-        if percent == nil { snapshot.sustainable = nil }
+        snapshot.fleetBurn = percent.map { UsagePopoverLabelTests.burn($0) }
         let cache = UsageCache()
         cache.store(snapshot)
         let history = UsageHistoryModel(client: flatHistoryClient(readings: ["acc1": 90],
@@ -7350,7 +7406,7 @@ final class UsagePopoverPaintTests: XCTestCase {
                                         seriesPeriod: history.seriesPeriod,
                                         period: history.period,
                                         chartFailed: history.failure != nil,
-                                        allowanceFailed: store.snapshot.allowanceFailure != nil,
+                                        historiesFailed: store.snapshot.historiesFailure != nil,
                                         now: history.now)
     }
 }

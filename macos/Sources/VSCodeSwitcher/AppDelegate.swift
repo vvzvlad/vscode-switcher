@@ -99,7 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Utilisation over time for the popover's chart. **This object** fetches
     /// only while the popover is open — the endpoint behind it is not that
     /// exclusive, `usage` above reads the same histories every ten minutes for
-    /// the allowance (`UsageClient.history`).
+    /// the burn ratio (`UsageClient.history`).
     private let history: UsageHistoryModel
     private let trigger: EdgeTrigger
     private let panel: PanelController
@@ -256,11 +256,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Draws the status item's picture for what it is showing right now.
     ///
-    /// `MenuBarIcon.rates` rather than a remembered value: the picture is a
+    /// `MenuBarIcon.ratio` rather than a remembered value: the picture is a
     /// pure function of the snapshot and the clock, so asking again cannot
     /// disagree with what `observeUsage` last drew.
     private func redrawStatusItemImage() {
-        statusItem?.button?.image = MenuBarIcon.image(for: MenuBarIcon.rates(for: usage.snapshot),
+        statusItem?.button?.image = MenuBarIcon.image(for: MenuBarIcon.ratio(for: usage.snapshot),
                                                       appearance: iconAppearance)
     }
 
@@ -272,7 +272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Status item
 
-    /// The status item: a picture that carries the fleet's spend ratio, a left
+    /// The status item: a picture that carries the fleet's burn ratio, a left
     /// click that opens the popover and a right click that opens the menu.
     ///
     /// The menu is deliberately *not* left sitting on `item.menu`. A status item
@@ -332,24 +332,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// `removeDuplicates` over the whole reason for the drawing, not over the
     /// snapshot: a poll lands once a minute and mostly says the same thing, and
-    /// the picture is a pure function of one pair of rates, so two equal values
-    /// cannot produce two different pictures. No timer of its own — the store's
-    /// poll is the whole schedule.
+    /// the picture is a pure function of one ratio, so two equal values cannot
+    /// produce two different pictures. No timer of its own — the store's poll is
+    /// the whole schedule.
     ///
-    /// The reading is a pair of rates, and its second half moves on a schedule
-    /// of its own: the allowance is refetched every ten minutes, so most passes
-    /// leave it exactly where it was and only the numerator moves. It also has an
-    /// age ceiling, which is why the pair is worked out here rather than carried
-    /// in the snapshot — an allowance nobody has confirmed for twenty minutes
+    /// The reading moves on a schedule of its own: the histories are refetched
+    /// every ten minutes, so most passes leave the ratio exactly where it was. It
+    /// also has an age ceiling, which is why it is worked out here rather than
+    /// carried in the snapshot — a ratio nobody has confirmed for twenty minutes
     /// drops out of the picture on the next pass that publishes anything, and the
     /// poll publishes every minute whatever the gateway says.
     private func observeUsage() {
         usage.$snapshot
-            .map { MenuBarIcon.rates(for: $0) }
+            .map { MenuBarIcon.ratio(for: $0) }
             .removeDuplicates()
-            .sink { [weak self] rates in
+            .sink { [weak self] ratio in
                 guard let self else { return }
-                self.statusItem?.button?.image = MenuBarIcon.image(for: rates,
+                self.statusItem?.button?.image = MenuBarIcon.image(for: ratio,
                                                                    appearance: self.iconAppearance)
             }
             .store(in: &cancellables)

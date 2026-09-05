@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// The status item's picture: one bar for the ratio the popover leads with —
-/// the measured spend rate over what may be spent — and that ratio as a number
-/// under it.
+/// percentage points of quota burned over the last two days against the points
+/// the week refills over the same two days — and that ratio as a number under it.
 ///
 /// Stacked rather than side by side, and that is the user's call: side by side
 /// the item was 57 points wide and took a visible slice of a menu bar it shares
@@ -31,9 +31,9 @@ import SwiftUI
 /// **What it says is a ramp and not two states.** Green while the week holds and
 /// red once it does not was the first rule here, and it made a fleet at 40% look
 /// like a fleet at 95%; the colour is now one continuous scale — cold blue, cyan,
-/// green where the fleet is spending exactly what it may, then yellow, orange,
-/// red — written once in `UsagePopoverView.ratioColor` and used by this picture
-/// and the popover both.
+/// green where the fleet is burning exactly what its week refills, then yellow,
+/// orange, red — written once in `UsagePopoverView.ratioColor` and used by this
+/// picture and the popover both.
 ///
 /// **The number, the fill and the colour are one quantity, and that is this
 /// round.** They were two: the number and the fill's length were the weekly
@@ -56,13 +56,13 @@ import SwiftUI
 /// popover called red. One reading is now painted in one place, and printed
 /// there too.
 ///
-/// **Past the allowance the frame and the number are coloured as well**, which
+/// **Past the refill rate the frame and the number are coloured as well**, which
 /// survives the change but not the argument it used to stand on. That argument
 /// was about a fill that might not be there to colour: the length was the mean,
 /// and a mean near zero is what the fleet looks like just after its windows turn
 /// over — exactly when a 300% burn is worth knowing — so the colour had to go on
 /// what is always drawn. With the length now the ratio itself that case is gone
-/// by construction: the fill is clamped at the allowance, so anything the
+/// by construction: the fill is clamped at the refill rate, so anything the
 /// boundary calls a warning has a *full* bar under it.
 ///
 /// **What they buy instead is the crossing, and only a rendering can say so.**
@@ -92,7 +92,7 @@ import SwiftUI
 /// either, and the frame and the number are the only parts of the picture that
 /// change across it. Which is also why the boundary is a step about whether to
 /// paint and not about what to paint with (`warningColor`).
-/// Inside the allowance the frame and the number stay `labelColor` — the loud
+/// Inside the refill rate the frame and the number stay `labelColor` — the loud
 /// state has to be the one that means something, and a picture that changed
 /// colour on every reading would be saying nothing with all of them.
 ///
@@ -141,10 +141,10 @@ enum MenuBarIcon {
     /// **What "the widest string" is came out of a measurement and not out of the
     /// old constant.** It used to be `100%`, and that was a fact about the quota:
     /// the figure had a top and the top was three digits. A ratio has none — the
-    /// allowance goes to zero as the week runs out (`FleetCapacity.sustainable`
-    /// refuses only at zero), so the quotient is unbounded — and a fixed column
-    /// with an unbounded figure in it is not a layout question but a correctness
-    /// one. Measured 2026-08-24 in this font: a digit advances 5.9729 pt and `%`
+    /// burn is a difference of percentage points over a span the gateway's own
+    /// stamps set, so a short enough span makes it arbitrarily large — and a fixed
+    /// column with an unbounded figure in it is not a layout question but a
+    /// correctness one. Measured 2026-08-24 in this font: a digit advances 5.9729 pt and `%`
     /// 8.8588, so `999%` is 26.7776 pt and `1000%` is 32.7505. Drawn flush right
     /// in a 27 pt picture the four-digit string starts at −5.75 and the leading
     /// digit is clipped off by the image bounds — and what lands is, pixel for
@@ -198,19 +198,20 @@ enum MenuBarIcon {
 
     /// How wide the fill comes out for a reading — nought when there is none.
     ///
-    /// **The bar stops at the allowance**, exactly as the popover's lead bar does
-    /// and for the reason written over that one: a scale stretched to three
-    /// allowances would put the point everything turns on a third of the way
+    /// **The bar stops at the refill rate**, exactly as the popover's lead bar
+    /// does and for the reason written over that one: a scale stretched to three
+    /// times the refill would put the point everything turns on a third of the way
     /// along. Past it the length says nothing more and the figure printed under
     /// it says the rest.
     ///
-    /// The clamp is here rather than in `HeadlineRates.ratio`, which is
+    /// The clamp is here rather than in `HeadlineRatio.ratio`, which is
     /// deliberately unclamped so the surfaces can still say by how much the
-    /// allowance was passed. That makes this the second clamp of the same kind in
-    /// the app — `QuotaBar` holds the other — and both are facts about a drawing.
-    static func fillWidth(for rates: UsagePopoverView.HeadlineRates?) -> CGFloat {
-        guard let rates else { return 0 }
-        return barFillBounds.width * CGFloat(min(1, max(0, rates.ratio)))
+    /// refill rate was passed. That makes this the second clamp of the same kind
+    /// in the app — `QuotaBar` holds the other — and both are facts about a
+    /// drawing.
+    static func fillWidth(for ratio: UsagePopoverView.HeadlineRatio?) -> CGFloat {
+        guard let ratio else { return 0 }
+        return barFillBounds.width * CGFloat(min(1, max(0, ratio.ratio)))
     }
 
     /// The narrowest fill worth drawing: a quarter of a point, which is half a
@@ -284,7 +285,8 @@ enum MenuBarIcon {
     /// figure survives **uncapped** — not exact — in the accessibility
     /// description, which has no width to run out of, and in `--dump`. Both of
     /// those round to a whole per cent, exactly as this column does; what is
-    /// exact is the pair of rates the popover prints beside it.
+    /// exact is the pair of rates `--dump` prints beside it, points an hour
+    /// burned against points an hour refilled.
     static let ceilingPercent = 999
 
     /// The widest string the number can be, laid out once: what the column is
@@ -325,33 +327,32 @@ enum MenuBarIcon {
     /// comparison that had to be between the two paths that existed.
     ///
     /// The clamp is done in `Double` and before the conversion, which is not
-    /// tidiness: `Int(1e300)` traps. Where such a number comes from is not the
-    /// allowance approaching zero this comment used to name — that needs
-    /// `capacity - sleepingWeek` within a few ULPs of nothing — but the gateway's
-    /// own body, which needs nothing unusual; the arithmetic is written out over
-    /// `UsagePopoverView.ratioLabel`, which meets the same hazard on the
-    /// description's path and cannot clamp its way out of it.
+    /// tidiness: `Int(1e300)` traps. Where such a number comes from is a span the
+    /// gateway's own stamps made short — a burn per hour divides by it — and the
+    /// arithmetic is written out over `UsagePopoverView.ratioLabel`, which meets
+    /// the same hazard on the description's path and cannot clamp its way out of
+    /// it.
     ///
     /// `≥` is not printed here, though the ratio can be a floor
-    /// (`HeadlineRates.isLowerBound`) — see `describe`, which does print it.
-    static func label(for rates: UsagePopoverView.HeadlineRates,
+    /// (`HeadlineRatio.isLowerBound`) — see `describe`, which does print it.
+    static func label(for ratio: UsagePopoverView.HeadlineRatio,
                       in colour: NSColor? = nil) -> NSAttributedString {
-        let value = Int(min(Double(ceilingPercent), max(0, rates.percent.rounded())))
+        let value = Int(min(Double(ceilingPercent), max(0, ratio.percent.rounded())))
         return NSAttributedString(string: "\(value)%",
                                   attributes: colour.map { attributes(in: $0) } ?? attributes)
     }
 
     // MARK: - Value
 
-    /// The pair of rates the whole picture is drawn from, or `nil` for a bar
-    /// with nothing to say at all.
+    /// The ratio the whole picture is drawn from, or `nil` for a bar with nothing
+    /// to say at all.
     ///
     /// One rule for both surfaces, asked of the popover rather than written out
     /// again — the same arrangement as `fillColor` below and for the same
     /// reason: two surfaces deciding separately when a figure has stopped
     /// standing for now would drift the day one of them was tuned. What the rule
     /// is, and why it has an age in it, is spelled out over
-    /// `UsagePopoverView.headlineRates`.
+    /// `UsagePopoverView.headlineRatio`.
     ///
     /// **This is now the whole of the picture and not only its colour, and the
     /// state where it answers `nil` is where the two surfaces part.** The popover
@@ -362,22 +363,23 @@ enum MenuBarIcon {
     /// for one in 27 points. A `54%` that is sometimes the ratio and sometimes
     /// the quota, with nothing on screen to say which, is read as whatever the
     /// item usually shows — and the wrong reading of the two is the calm one,
-    /// since a week 92% spent would be wearing the colour of a fleet spending 92%
-    /// of what it may. The quota is one click away, captioned, in the popover.
+    /// since a week 92% spent would be wearing the colour of a fleet burning 92%
+    /// of what its week refills. The quota is one click away, captioned, in the
+    /// popover.
     ///
     /// The age half is not ceremony up here, and the argument that used to stand
     /// in this comment — "the figure is an average over two days, refreshed
     /// every ten minutes on purpose, and ten minutes cannot move it enough to
     /// matter" — assumed the refreshing. A `/gw/usage` outage skips the whole
     /// histories block (`UsageStore.poll`), so nothing is refreshed at all, no
-    /// `allowanceFailure` is set, and a guard on the failure alone left this
+    /// `historiesFailure` is set, and a guard on the failure alone left this
     /// picture with a red frame nothing could clear over a figure last confirmed
     /// hours ago. Up here there is no room to write "as of a while ago", so the
     /// reading has to go rather than get a caveat — and since the reading is now
     /// the whole picture, what goes is the whole picture.
-    static func rates(for snapshot: UsageSnapshot,
-                      now: Date = Date()) -> UsagePopoverView.HeadlineRates? {
-        UsagePopoverView.headlineRates(for: snapshot, now: now)
+    static func ratio(for snapshot: UsageSnapshot,
+                      now: Date = Date()) -> UsagePopoverView.HeadlineRatio? {
+        UsagePopoverView.headlineRatio(for: snapshot, now: now)
     }
 
     /// The bar's fill colour.
@@ -392,21 +394,21 @@ enum MenuBarIcon {
     /// saturation are the same on both, and how dark the colour has to be drawn
     /// is a fact about what it sits on
     /// (`UsagePopoverView.ratioColor(atPercent:on:)`).
-    static func fillColor(for rates: UsagePopoverView.HeadlineRates?,
+    static func fillColor(for ratio: UsagePopoverView.HeadlineRatio?,
                           on background: UsagePopoverView.RampBackground) -> NSColor {
-        guard let rates else { return .labelColor }
-        return NSColor(UsagePopoverView.ratioColor(atPercent: rates.percent, on: background))
+        guard let ratio else { return .labelColor }
+        return NSColor(UsagePopoverView.ratioColor(atPercent: ratio.percent, on: background))
     }
 
     /// The ramp's colour for a reading the picture has to warn about, or `nil`
     /// while it does not — which is what the frame and the number are drawn in
-    /// past the allowance, and the one place a colour rule here is still a step.
+    /// past the refill rate, and the one place a colour rule here is still a step.
     ///
     /// **It is a step about whether to paint rather than about what to paint
     /// with.** Everything else on both surfaces takes the ramp at any figure
     /// (§4); this cannot, because the calm state has to stay calm — a menu bar
     /// that changed colour on every reading would be saying nothing with all of
-    /// them. So the boundary stays where `HeadlineRates.isOverAllowance` puts it,
+    /// them. So the boundary stays where `HeadlineRatio.isOverRefill` puts it,
     /// which is the ramp's own green anchor, and the colour on the far side of it
     /// comes out of the ramp, where before it was one red the moment it was
     /// anything.
@@ -436,10 +438,10 @@ enum MenuBarIcon {
     /// through `showsRatio`, back when the ratio reached the picture as colour
     /// and nothing else. The description no longer has to ask — the number it
     /// names is the number on screen, whatever colour that number is drawn in.
-    private static func warningColor(for rates: UsagePopoverView.HeadlineRates?,
+    private static func warningColor(for ratio: UsagePopoverView.HeadlineRatio?,
                                      on background: UsagePopoverView.RampBackground) -> NSColor? {
-        guard let rates, rates.isOverAllowance else { return nil }
-        return NSColor(UsagePopoverView.ratioColor(atPercent: rates.percent, on: background))
+        guard let ratio, ratio.isOverRefill else { return nil }
+        return NSColor(UsagePopoverView.ratioColor(atPercent: ratio.percent, on: background))
     }
 
     // MARK: - Drawing
@@ -508,7 +510,7 @@ enum MenuBarIcon {
     /// default is evaluated at the call site and `NSApplication.shared` is
     /// main-actor isolated: written there it would put the isolation on every
     /// caller.
-    static func image(for rates: UsagePopoverView.HeadlineRates?,
+    static func image(for ratio: UsagePopoverView.HeadlineRatio?,
                       appearance: NSAppearance? = nil) -> NSImage {
         let appearance = appearance ?? NSApplication.shared.effectiveAppearance
         let size = NSSize(width: width, height: height)
@@ -521,13 +523,13 @@ enum MenuBarIcon {
         // happened to be current on this thread.
         appearance.performAsCurrentDrawingAppearance {
             NSGraphicsContext.current?.imageInterpolation = .high
-            draw(rates, on: background(for: appearance))
+            draw(ratio, on: background(for: appearance))
         }
         image.unlockFocus()
         // Not a template any more: the fill's colour is the reading (see the
         // note at the top of this file), and the system would tint it away.
         image.isTemplate = false
-        image.accessibilityDescription = describe(rates)
+        image.accessibilityDescription = describe(ratio)
         return image
     }
 
@@ -538,26 +540,26 @@ enum MenuBarIcon {
     /// else, this had to agree with the drawing about a fill too narrow to see
     /// and about a mean of nought — `showsRatio` was that agreement, and it is
     /// gone with the quota: the ratio is now the number, and the number is drawn
-    /// whenever there are rates at all. One `nil` check answers for the whole
+    /// whenever there is a ratio at all. One `nil` check answers for the whole
     /// picture.
     ///
     /// Two things are said here that the drawing cannot say, and both are the
     /// same fact about a description having no width. `≥` — the ratio is a floor
-    /// when the allowance was measured over a partly blocked fleet, and a picture
+    /// when the burn was measured over a partly blocked fleet, and a picture
     /// 27 points wide has no glyph to spare for it (`ceilingPercent`, and §4
     /// refuses a new mark on a surface without measured need). And the figure
     /// itself is uncapped, so where the drawing prints its `999%` this reads out
     /// the number that was measured.
-    static func describe(_ rates: UsagePopoverView.HeadlineRates?) -> String {
-        guard let rates else { return "Spend rate: no data" }
-        return UsagePopoverView.ratioLabel(for: rates) + " " + UsagePopoverView.ratioCaption
+    static func describe(_ ratio: UsagePopoverView.HeadlineRatio?) -> String {
+        guard let ratio else { return "Weekly burn: no data" }
+        return UsagePopoverView.ratioLabel(for: ratio) + " " + UsagePopoverView.ratioCaption
     }
 
-    private static func draw(_ rates: UsagePopoverView.HeadlineRates?,
+    private static func draw(_ ratio: UsagePopoverView.HeadlineRatio?,
                              on background: UsagePopoverView.RampBackground) {
-        drawBar(rates, on: background)
-        guard let rates else { return }
-        let label = label(for: rates, in: warningColor(for: rates, on: background))
+        drawBar(ratio, on: background)
+        guard let ratio else { return }
+        let label = label(for: ratio, in: warningColor(for: ratio, on: background))
         let size = label.size()
         // Flush with the right edge of the picture, which is the right edge of
         // the column: the digits grow leftwards and the `%` never moves. And on
@@ -568,14 +570,14 @@ enum MenuBarIcon {
     /// The bar. Filled in proportion when there is a reading, empty and dashed
     /// when there is not — a shape that reads as "nothing measured" rather than
     /// as a fleet that is spending nothing.
-    private static func drawBar(_ rates: UsagePopoverView.HeadlineRates?,
+    private static func drawBar(_ ratio: UsagePopoverView.HeadlineRatio?,
                                 on background: UsagePopoverView.RampBackground) {
         let rect = barRect
         let radius = barHeight / 2
         let outline = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
                                    xRadius: radius, yRadius: radius)
         outline.lineWidth = 1
-        if rates == nil { outline.setLineDash([2, 2], count: 2, phase: 0) }
+        if ratio == nil { outline.setLineDash([2, 2], count: 2, phase: 0) }
         // Ink below capacity: the frame is the shape of the reading rather than
         // the reading, and a coloured outline around an empty bar would be saying
         // something about a fleet nobody measured. Above it the frame is the
@@ -597,18 +599,18 @@ enum MenuBarIcon {
         // from (`UsagePopoverView.contrastFloor`). Two copies of it would let the
         // rule and the drawing disagree about what the warning is being compared
         // against.
-        (warningColor(for: rates, on: background)
+        (warningColor(for: ratio, on: background)
             ?? NSColor.labelColor.withAlphaComponent(UsagePopoverView.calmFrameOpacity)).setStroke()
         outline.stroke()
 
         let inner = barFillBounds
-        let filled = fillWidth(for: rates)
+        let filled = fillWidth(for: ratio)
         // Narrower than a pixel is not a smaller reading, it is a mark nobody
         // can see. It costs nothing that has to be said elsewhere: the figure is
         // printed under the bar at any width, and a fleet whose fill is this
-        // narrow is spending one per cent of what it may.
+        // narrow is burning one per cent of what its week refills.
         guard filled >= minimumVisibleFillWidth else { return }
-        fillColor(for: rates, on: background).setFill()
+        fillColor(for: ratio, on: background).setFill()
         NSBezierPath(roundedRect: NSRect(x: inner.minX, y: inner.minY,
                                          width: filled, height: inner.height),
                      xRadius: inner.height / 2, yRadius: inner.height / 2).fill()

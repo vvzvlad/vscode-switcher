@@ -1,7 +1,7 @@
 import Foundation
 
-/// What a week of quota may be spent at, and everything the figure is built
-/// from.
+/// How fast the fleet is burning its weekly quota, against how fast that quota
+/// refills.
 ///
 /// Utilisation per account does not answer "will the quota last". The gateway
 /// routes across several accounts, and each account's seven-day window resets on
@@ -9,30 +9,42 @@ import Foundation
 /// over. So "89% spent" says only where one account stands inside a window that
 /// may end in an hour or in six days.
 ///
-/// **Demand is no longer estimated here, and that is the whole shape of this
-/// file.** It used to be, two ways at once — an average burn over the window
-/// stretched to a week, and a projection off the recent work hours — and the
-/// answer was compared against a supply of `100 pp x accounts`. Both are gone,
-/// because the gateway now *measures* the demand: `GET /gw/usage` publishes a
-/// live token rate over its own five-minute window (`TokenRate`), which is the
-/// same quantity without an estimator in front of it. What is left here is the
-/// other side of the comparison — what that rate may be, in the same unit:
+/// **Both sides of the comparison are percentage points of a week, and that is
+/// the whole shape of this file.** The question the figure answers is "am I
+/// spending faster than the quota comes back", and `util_7d` is already
+/// denominated in exactly what the question is about — the supplier computes it,
+/// and it already prices Opus above Sonnet. So:
 ///
-///     price of a point  = tokens spent over the window / points burned over it
-///     allowed work rate = (capacity - a week of sleeping) / a week of work hours
-///     allowance         = allowed work rate x price of a point   [tokens/hour]
+///     burn rate,   per account = points burned over the window / hours of it
+///     refill rate, per account = quotaPerAccount / hoursPerWeek
+///     percent = (sum of the burn rates) / (contributors x refill rate) x 100
 ///
-/// The machinery the two estimators were built on is still here, because the
-/// allowance is built on the same machinery: the burn rule and its guards, the
-/// hour-by-hour decomposition, and the split of the day into working and
-/// sleeping hours. What went with the estimators is the arithmetic that turned
-/// them into a week's demand, and the setting that chose between the two.
+/// A per cent over a per cent: the model mix cancels out of the question, and
+/// nothing is converted on the way to the answer.
+///
+/// **This is not a new estimator.** It is `windowAverage`, which lived in this
+/// file until 2026-08-24 and was deleted in `787c972` as "an estimate of
+/// something the gateway now measures". That reasoning was wrong in one specific
+/// way worth writing down: the `tokens` block of `GET /gw/usage` measures a
+/// *five-minute token rate*, which is a different quantity from *the burn rate
+/// against the refill rate over two days*. Two questions, not two answers to
+/// one. The token rate is still measured and still drawn — as a second reading
+/// that is the numerator of nothing and colours nothing (§4).
+///
+/// What went instead is the allowance that replaced it, and everything it was
+/// built from: the hour-by-hour decomposition, the split of the day into working
+/// and sleeping hours, and the price of a point in tokens. Each of them was a
+/// conversion between the question and the unit it was being answered in, and
+/// each of them moved — a five-minute numerator that jumps, a day split whose
+/// hours cross the threshold in blocks (one hour was worth 10 to 20 points of
+/// the answer, measured 2026-08-18), and an exchange rate that depends on which
+/// models happened to run in the window.
 ///
 /// Nothing here fetches anything: it reads the series `UsageClient` already
 /// brought back.
 
-/// The arithmetic of the allowance. Stateless, and deliberately not isolated to
-/// any actor: it is pure arithmetic over values already in hand, and a
+/// The arithmetic of the fleet figure. Stateless, and deliberately not isolated
+/// to any actor: it is pure arithmetic over values already in hand, and a
 /// `@MainActor` annotation here would drag every `nonisolated async` caller onto
 /// the main thread the moment it read one of the constants below (see the note
 /// on `UsageStore.windowSeconds`).
@@ -58,108 +70,23 @@ enum FleetCapacity {
     /// its quota, and its burn comes out negative.
     static let resetDropThreshold: Double = 5
 
-    /// The shortest interval `measure` will answer over.
+    /// The shortest interval `measure` will answer over, and it is back on the
+    /// app's path with the justification it was originally chosen for.
     ///
-    /// It was chosen for an estimator that no longer exists: the measured rate
-    /// was multiplied by `168 / span` to reach a week, so a short span was a
-    /// large multiplier over a small measurement — at two hours of history a
-    /// single percentage point, the exact size of the sawtooth, became 84 pp/week
-    /// and four fifths of an account's whole quota. Six hours held the multiplier
-    /// at 28.
+    /// The rate this function produces is compared against a *week* of refill, so
+    /// a short span is a large multiplier over a small measurement. At two hours
+    /// of history a single percentage point — the exact width of the sawtooth
+    /// (§4) — is 84 pp/week per account, four fifths of a whole quota; six hours
+    /// hold that at 28.
     ///
-    /// **Nothing on the app's path reaches it now.** The allowance goes through
-    /// `measureHourly`, whose own floor is a whole day (`minimumProjectionHours`),
-    /// and a day is four times this. It stays because `measure` stays, and
-    /// `measure` stays because the hour-by-hour decomposition is checked against
-    /// it — see the note there.
+    /// It is what refuses the 6 h row of the table over
+    /// `UsageStore.historyWindowSeconds`: a series asked for six hours comes back
+    /// 5.99 h long, every account falls under this floor, and the fleet has no
+    /// figure at all. While the allowance existed nothing on the app's path
+    /// reached this line — the day split refused a whole day first, four times
+    /// this — and the comment here said as much. The allowance is gone and this
+    /// is the floor again.
     static let minimumMeasuredHours: Double = 6
-
-    /// The shortest history an account's day may be split from, which is the
-    /// floor everything the app computes actually stands on.
-    ///
-    /// A day, because the split sorts the hours of the day into working and
-    /// sleeping ones and a series shorter than a day has not seen every hour of
-    /// the day even once. An hour nobody watched is not a sleeping hour, it is an
-    /// unknown one, and unknown is not zero (§2.7). An account below this
-    /// contributes neither its spending nor its 100 pp of capacity.
-    private static let minimumProjectionHours: Double = 24
-
-    /// An hour of the day counts as a work hour when the fleet burns at least
-    /// this share of its overall hourly rate in it.
-    ///
-    /// **The plateau this number was chosen for does not exist, and the figure
-    /// the file used to quote for it was wrong.** What stood here said 15 work
-    /// hours for every fraction in [0.41, 0.66]. Re-measured 2026-08-18 on the
-    /// live history (three accounts, 46 h of overlap), the steps of the count are
-    /// 0.01 → 20 hours, 0.10 → 19, 0.22 → 17, 0.37 → 16, 0.44 → 14, 0.88 → 12:
-    /// **no fraction answers 15 at all**, and 0.45 answers 14. Over the 48 h the
-    /// app actually fetches the steps are 0.01 → 20, 0.09 → 19, 0.22 → 17,
-    /// 0.36 → 16, 0.43 → 14, 0.85 → 12 — the same shape, and 0.45 is two
-    /// hundredths from the edge of its own plateau. The mechanism is worth
-    /// naming: the hourly rates are whole percentage points over two or three
-    /// observations of each hour of the day, so several hours land on exactly the
-    /// same value and cross the threshold as a block. 05:00 and 14:00 both sit at
-    /// 1.000 pp/h today, which is why the count steps 16 → 14 and never through
-    /// 15.
-    ///
-    /// **It stays anyway, because every replacement measured is worse.** The
-    /// review's own suggestion — sort the rates and cut at the largest gap
-    /// between adjacent values — answers **2 work hours in 19 of 21 sub-windows**:
-    /// the widest gap in the profile is between the evening peak (7.757 pp/h) and
-    /// the hour below it (6.000), so it cuts the peak off rather than the sleeping
-    /// block. Method for all of them (2026-08-18): recompute the split over every
-    /// sub-window the history allows — each end offset from 0 to 24 h in steps of
-    /// 3 h, each length from 24 h to the whole depth — and group the results by
-    /// the instant the window *ends*. Inside a group the fleet's recent behaviour
-    /// is the same and only the classification depth moves, so the spread inside a
-    /// group is the rule's own unsteadiness rather than the fleet's. Mean spread
-    /// within one instant, in load points and in work hours:
-    ///
-    ///     fraction 0.45      4.0 points   0.43 h
-    ///     fraction 0.35      5.6          0.57
-    ///     fraction 0.55      5.8          0.71
-    ///     hours above the median rate     5.8   0.57
-    ///     Otsu (least within-class variance)    6.2   0.57
-    ///     largest gap between adjacent rates    18.8  2.57
-    ///
-    /// The fraction is the steadiest of the six on both columns. That the line
-    /// sits a hundredth from a step in *one* window does not make it unsteady
-    /// across windows: the step moves with the data, and proximity in one cut
-    /// predicts nothing about the next.
-    ///
-    /// **One hour moved between the classes costs about 10 points of load, not
-    /// the 3 this file used to claim.** Measured end to end at the newest instant
-    /// over 48 h of history with a 6 h recent window (2026-08-18): 20 work hours
-    /// answer 36%, 19 → 45%, 17 → 89%, 16 → 93%, 14 → 112%, 12 → 119%. So 17 → 16
-    /// is 4.6 points and 16 → 14 is 18.8, and the per-hour cost runs from 3.6 to
-    /// 21.9 depending on which hour crosses. The old figure treated the split as
-    /// if it only moved the two multipliers; it moves both *rates* as well, since
-    /// an hour leaving the work class takes its burn out of the recent rate and
-    /// puts it into the sleeping one.
-    ///
-    /// It is a share of the mean rather than an absolute rate on purpose: a
-    /// quiet fleet and a busy one have the same shape of day, and a fixed pp/h
-    /// threshold would call every hour of a quiet week a sleeping hour.
-    private static let workHourFraction: Double = 0.45
-
-    /// The days a week has, as the projection counts them: the same seven
-    /// `hoursPerWeek` is 168 of, spelled separately because the projection
-    /// multiplies hours-per-day by it rather than dividing into a week.
-    private static let daysPerWeek: Double = 7
-
-    /// The hours a day has, and the sum the two classes are held to.
-    private static let hoursPerDay: Int = 24
-
-    /// The whole width of the sawtooth, in percentage points.
-    ///
-    /// A reading is the truth or the truth minus one and never above it (§2.7,
-    /// re-measured 2026-08-18 over 5844 steps on three accounts: the deepest
-    /// fall that is not a reset is exactly −1.0 pp on all three), and the truth
-    /// inside a window cannot fall. So a fall past this with no reset to explain
-    /// it is something restoring the window, and that is the refusal both ways
-    /// of reading a series make — `measure` over the whole span, `hourBuckets`
-    /// over each step.
-    private static let sawtoothPP: Double = 1
 
     /// The reading at which an account is out of quota and its demand stops
     /// being visible. The gateway reports utilisation as per cent, 0…100, so
@@ -192,25 +119,27 @@ enum FleetCapacity {
     /// What one account's series says about it: the burn over a span, taken
     /// from the two ends.
     ///
-    /// **Nothing the app draws goes through this any more, and it is not dead
-    /// code.** It is the coarse method the fine one is held to. `hourBuckets`
-    /// cuts the same series into clock hours and `burn(over:)` adds them back up,
-    /// and the rule this project pays for in scars is that the two must agree —
-    /// the first prototype of the decomposition was wrong by a whole restored
-    /// window on the one account whose history crossed a reset, and nothing but
-    /// this comparison could have said so (§2.7). Its reader is
-    /// `testHourBucketsReconcileWithTheSpanMethod`, which asks this function for
-    /// a stretch and the buckets for the same one. Delete it and the invariant
-    /// has nothing to reconcile against.
-    ///
-    /// It carried a third field, `hitCeiling`, and that one *was* dead the moment
-    /// the demand estimators went: the flag reached a surface through the
-    /// window-average estimator alone, and the allowance raises its own from
-    /// `HourlyMeasurement` (`SustainableRate.isLowerBound`).
+    /// **It is the production path again**, which is what it was before the
+    /// allowance existed. For the round in between nothing the app drew went
+    /// through it and it survived as "the coarse method the fine one is held to"
+    /// — the hour-by-hour decomposition had to reconcile with it, and
+    /// `testHourBucketsReconcileWithTheSpanMethod` was its only reader. That
+    /// decomposition is gone with the allowance, and the fleet figure is this
+    /// function summed over the accounts (`burnAgainstRefill`).
     struct Measurement {
         /// Percentage points burned over `hours`, never negative.
         var burnPP: Double
         var hours: Double
+        /// At its ceiling at least once, and below it at least once — a series
+        /// that never left the ceiling is refused outright rather than flagged
+        /// (the guard below says why).
+        ///
+        /// The points such an account was blocked from burning never entered its
+        /// series at all, so its burn is understated and everything drawn from it
+        /// is a floor. The field lived here until 2026-08-24 and went when the
+        /// estimator that read it went; it is back because the figure that reads
+        /// it is back (`FleetBurn.isLowerBound`).
+        var hitCeiling: Bool
     }
 
     /// One account's burn and the span it was burned over, or `nil` when the
@@ -256,20 +185,121 @@ enum FleetCapacity {
     /// all three accounts, where a two-sided tooth would answer −2 as soon as the
     /// earlier reading sat high and the later one low.
     ///
-    /// `+ 100` per reset is the one approximation, and it errs upward on
-    /// purpose: it charges the stretch before a reset as if the window had been
-    /// spent to its ceiling. An account whose window turned over at 93 is
-    /// credited with the 7 pp it never got to spend. The error is bounded by
-    /// exactly that headroom — by the reading the window turned over at — and on
-    /// the live fleet that headroom is small: both resets the history has held
-    /// went from 100 (acc2) and from 99 (main), which is 0 pp and 1 pp
-    /// (2026-08-17; the 2026-08-18 re-measure over the full depth keeps the one
-    /// that survived retention, main's 99 → 0). The 7 is the example above, not
-    /// an observation. It overstates load,
-    /// which is the safe direction for a question that reads "will my tokens
-    /// last". The bound holds only for a reset the series showed: for one
-    /// inferred from `resetsAt` the pre-reset reading was never observed, so the
-    /// charge can be a whole window over an account that had spent little of it.
+    /// **A reset is charged the level it fell from, and not a flat window.** The
+    /// stretch before a turnover is worth the reading the window turned over at:
+    /// an account that fell from 66 had spent 66 points of that window, and no
+    /// more.
+    ///
+    /// A flat `+ 100` stood here until 2026-09-05, on the reasoning that the
+    /// window "had been spent to its ceiling" before turning over — an
+    /// approximation documented as erring upward, bounded by the headroom, and
+    /// observed at 0 pp and 1 pp on the two resets the history had ever held
+    /// (100 → 0 on acc2 and 99 → 0 on main, 2026-08-17). **That bound does not
+    /// hold on today's data and the error is no longer small.** Measured
+    /// 2026-09-05 02:50Z over the live 48 h histories:
+    ///
+    ///     acc2  09-04 20:05:38Z  66 → 0    flat 76 pp, level 42 pp, over by 34
+    ///     main  09-04 20:05:18Z  96 → 0    flat 46 pp, level 42 pp, over by  4
+    ///     acc3  no fall in this window     flat  9 pp, level  9 pp
+    ///
+    /// acc3 shows no fall to this probe because its series ended 14 h before it
+    /// (§2.7) and stopped short of its own turnover; read again on a week-long
+    /// request at 20:26Z it holds one, `50 → 0` — but **not on 09-04 and not
+    /// across an eight-minute hole**, which is what stood here until 2026-09-05.
+    /// The hole is **24.14 h** wide, 09-04 12:53:44Z → 09-05 13:01:51Z, and the
+    /// zero is recorded on **09-05**: the probe printed the date of the fall's
+    /// left end only and its width, 86887 s, on the same line, and the width was
+    /// read past. Its consequences are worked through under the clamp below and
+    /// in §2.7.
+    ///
+    /// The other two accounts turned over in the same minute, and **none of the
+    /// three falls matches its own `resetsAt`** — acc2's window is announced to
+    /// end 2026-09-05T21:00:00Z, 18.2 h after the probe, main's
+    /// 2026-09-06T15:00:00Z, and acc3's 2026-09-09T03:00:00Z, which puts its
+    /// current window's start at 09-02 03:00Z, running straight *through* the
+    /// 09-05 13:01 fall (measured 2026-09-05 20:26Z). So this is three falls in
+    /// two days that the announced schedule does not explain, rather than the
+    /// one-off "whatever caused it" this paragraph used to call the pair of
+    /// 09-04. **That mismatch is not a defect here**: an *observed* fall is
+    /// charged its level without consulting the schedule at all, and `resetsAt`
+    /// is asked exactly once — about a reset no reading saw. That is deliberate
+    /// and it stays.
+    ///
+    /// acc2 fell from **66**, and charging it a whole window invents 34 points of
+    /// spending that never happened. On the fleet figure the two rules answer
+    /// 157.2% and 112.8%: the difference between "burning half again as fast as
+    /// it refills" and "burning about as fast as it refills".
+    ///
+    /// **The flat window survives for exactly one case**, and it is the case with
+    /// no level to charge: a reset *inferred* from `resetsAt` inside a hole,
+    /// where the pre-fall reading was never observed. There the charge can be a
+    /// whole window over an account that had spent little of it — the old
+    /// approximation, kept where nothing better exists.
+    ///
+    /// One hazard documented rather than fixed, and **it has two cases, not
+    /// one**: the interval has two ends and either of them can land on the wrong
+    /// side of a flip-flop (the note beside the clamp).
+    ///
+    ///     [44, 66, 0, 66]      last on the pre-reset value   88 pp, truth 22
+    ///     [0, 66, 0, 10, 42]   first on the post-reset zero  108 pp, truth 42
+    ///
+    /// The first was written here from the start: `last - first + level` counts
+    /// that account's window twice. The mirror was written nowhere and is just as
+    /// reachable — the window's *first* reading landing on the post-reset zero
+    /// means the interval opened after the turnover, so the fall it sees belongs
+    /// to a window it does not cover, and the level is credited to an account
+    /// that had already been reset. `min(falls, 1)` reaches neither: it collapses
+    /// the falls, and what is wrong is which side of the one charged fall `first`
+    /// and `last` sit on.
+    ///
+    /// **How reachable, in numbers — and it is a range, not one figure.** The
+    /// width depends on how it is defined, so the definition is part of the
+    /// number: from the first post-reset reading to the last pre-reset one, the
+    /// stretch in which a window edge lands on the wrong side of the charged
+    /// fall. Over the reset of 2026-09-04 that is 20:05:38 → 20:06:01 on acc2,
+    /// about 23 s, and 20:05:18 → 20:06:23 on main, about 65 s (measured
+    /// 2026-09-05 17:15Z). The edges of the window sweep continuously, and the
+    /// histories are re-asked every `UsageStore.historyIntervalSeconds` = 600 s,
+    /// so **one** edge lands inside a given flip-flop with probability about
+    /// 23/600 to 65/600 — **4 to 11%**, per reset per account, once a week each.
+    /// **There are two edges and each sweeps the flip-flop once per reset**, so
+    /// "either edge caught it" is twice that: 46/600 to 130/600, **8 to 22%**.
+    /// (Both at once is impossible — a minute-wide flip-flop against a 48 h
+    /// interval.) Only the narrow end of the width stood here before; counting
+    /// one edge of two was the same understatement in the same direction,
+    /// because this estimate is the whole argument for *tolerating* the
+    /// over-charge rather than fixing it, and quoting the cheap half — of the
+    /// width or of the edge count — biases that decision toward "tolerable". The
+    /// flat rule had the same hazard one point worse. Both are pinned by
+    /// `FleetCapacityTests.testAWindowEdgeInsideAFlipFlopChargesTheWrongWindow`,
+    /// which asserts the over-charges rather than the truths, and says so.
+    ///
+    /// **The level rule has a blind spot of its own, mirroring the flat rule's,
+    /// and today's data instantiates it.** Charging the level the series fell
+    /// from assumes the last pre-fall reading is *current*. After a hole it is
+    /// stale and the charge comes out too small: acc3's last reading before its
+    /// 24.14 h hole is **50**, whatever the window climbed to during that day is
+    /// unknown, and the fall is charged 50. The undercharge is bounded by the
+    /// headroom at that reading — up to 50 pp here — exactly as the flat rule's
+    /// over-charge is bounded by the headroom at the ceiling. **The direction is
+    /// the difference and it is why this is not a footnote**: the flat rule errs
+    /// loud, inventing spend, and the level rule errs *quiet*, hiding it — and
+    /// quiet errs toward calm, which is the unsafe side. Measured 2026-09-05
+    /// 20:29Z over the 48 h the app asks for, acc2 and main unchanged: acc3
+    /// charged its level of 50 burns 6 pp over 44.48 h and the fleet reads
+    /// **199.1%**; the same fleet with acc3 charged a flat 100 burns 56 pp and
+    /// reads **262.0%** — 62.9 points of ratio apart, with the truth somewhere
+    /// between, since nothing says where inside the hole the window stood.
+    ///
+    /// **No `≥` is raised for it, and that is a decision rather than an
+    /// oversight.** The ceiling case can raise one because the series states the
+    /// evidence itself, in a single reading. Here there is no such reading: a
+    /// flag would need a rule for "the pre-fall reading is stale", i.e. a
+    /// threshold on its age, and nothing calibrates such a constant — the only
+    /// hole of this size on record is this one, and a threshold from one
+    /// observation is a number out of the air. §2.7 keeps that as a negative
+    /// result. Pinned by
+    /// `FleetCapacityTests.testAFallAfterAHoleIsChargedAStaleLevel`.
     ///
     /// Nothing is smoothed on the way in, and `UsageHistoryModel.withoutSourceLag`
     /// is declined even though it would leave these endpoints where they are — it
@@ -301,9 +331,23 @@ enum FleetCapacity {
     /// a schedule consulted on its own invents resets that never happened (the
     /// note beside the guard). The readings here carry no signature at all, so
     /// this one stands. It takes roughly four days of silence for the new window
-    /// to climb that far, and the longest gap between two readings in the live
-    /// history is 18.18 minutes (2026-08-17, over three accounts whose median
-    /// gap is 64 s).
+    /// to climb that far.
+    ///
+    /// **"Holes that big do not happen" is retracted, and the margin is fourfold
+    /// rather than three-hundredfold.** What followed here until 2026-09-05 was
+    /// "and the longest gap between two readings in the live history is 18.18
+    /// minutes", from which four days of silence read as out of reach. That
+    /// measurement stands *for its day* (2026-08-17, three accounts, median gap
+    /// 64 s) and is kept as dated history rather than as a property of the
+    /// gateway: on 2026-09-05 20:26Z acc3's week holds a **24.14 h** hole,
+    /// 09-04 12:53:44Z → 09-05 13:01:51Z, against a next-largest gap anywhere
+    /// that week of 0.17 h. Four days against 24.14 h is about **4x**, not 300x.
+    /// And a fall sits at the far end of that very hole — an *observed* one, so
+    /// this blind spot did not fire; the neighbouring one did, the level charged
+    /// from a stale reading (the header). What is left of "unreachable" is
+    /// "unobserved": holes of the needed width do happen now, and the
+    /// coincidence of a hole with a window climbing back to within a point has
+    /// still never been seen.
     static func measure(_ points: [HistoryPoint], resetsAt: Date?) -> Measurement? {
         // Only the seven-day window, and only the samples that carry a reading:
         // `util_7d: null` says the sample measured nothing, which is not a
@@ -316,15 +360,23 @@ enum FleetCapacity {
         let hours = last.at.timeIntervalSince(first.at) / 3600
         guard hours >= minimumMeasuredHours else { return nil }
 
-        var resets = 0
+        var falls = 0
+        // The reading the *first* fall started from, which is the level that
+        // window held when it turned over. Only the first, because only the
+        // first is charged (the clamp below).
+        var firstFallLevel = 0.0
+        var hitCeiling = first.value >= ceilingPercent
         var everBelowCeiling = first.value < ceilingPercent
         var previous = first.value
         for reading in readings.dropFirst() {
             // Consecutive *readings*: a hole is stepped over rather than treated
             // as a boundary, because a window that turned over while the gateway
             // was not looking turned over all the same.
-            if previous - reading.value > resetDropThreshold { resets += 1 }
-            if reading.value < ceilingPercent { everBelowCeiling = true }
+            if previous - reading.value > resetDropThreshold {
+                if falls == 0 { firstFallLevel = previous }
+                falls += 1
+            }
+            if reading.value < ceilingPercent { everBelowCeiling = true } else { hitCeiling = true }
             previous = reading.value
         }
 
@@ -342,29 +394,67 @@ enum FleetCapacity {
         // stays: that account still shows a rate, and it raises `isLowerBound`.
         guard everBelowCeiling else { return nil }
 
-        // At most one reset per interval, unconditionally. A seven-day window
-        // cannot turn over twice inside seven days, so a second fall over the
-        // threshold is a lagging sample beside a real reset rather than a second
-        // window, and charging it costs +100 pp of burn that never happened.
-        // Nothing live has shown such a sample: both resets the history holds
-        // are clean, `100, 100, 100, 100, 0, 0, 0, 0` on acc2 and `99, 99, 99,
-        // 99, 0, 0, 0, 0` on main, exactly one fall over the threshold in each.
+        // At most one reset per interval, unconditionally, and it is the *first*
+        // fall that is charged. A seven-day window cannot turn over twice inside
+        // seven days, so a second fall over the threshold is a lagging sample
+        // beside a real reset rather than a second window.
+        //
+        // **It is load-bearing on live data, and it was not when it was
+        // written.** The two measuring sources disagree for about a minute
+        // across a reset (§4), so the series flip-flops: over the reset of
+        // 2026-09-04 the live history shows **three** falls for each of acc2 and
+        // main, and from different levels — acc2 `66 → 0` at 20:05:38, 20:05:54
+        // and 20:06:04, main `96 → 0` at 20:05:18, 20:05:46 and 20:06:25
+        // (measured 2026-09-05 17:15Z). Unclamped, charging each fall the level
+        // it fell from credits acc2 198 pp where the truth is 66, and main
+        // 288 pp where it is 96.
+        //
+        // **acc3 says nothing about this reset: it has no reading across the
+        // event at all**, its series being silent for 24.14 h from
+        // 09-04 12:53:44Z to 09-05 13:01:51Z. "acc3 did not flip-flop that day"
+        // stood here until 2026-09-05 and is a claim that could not have come
+        // out false — there was no witness — so "two of three accounts on the
+        // same reset" does not follow and is withdrawn: acc3's own fall is a
+        // different event, some 17 h later, at the far end of that hole.
+        //
+        // The mechanism that stood beside it — that polling frequency is what
+        // decides — is **not shown by this data either** and is recorded as
+        // unestablished. A 24 h hole swallows any event whatever, so it says
+        // nothing about cadence; and outside the hole acc3 is polled much like
+        // the others: measured 2026-09-05 20:26Z over the week-long series, its
+        // median gap is 63 s against 60 s on acc2 and 61 s on main (32.9
+        // readings an hour against 42.6 and 45.7, counting only gaps of 600 s or
+        // less). A minute-wide disagreement has nowhere to fall between readings
+        // that close. The figure 13.2 readings an hour is an *average over a
+        // window* this very hole dilutes, and it survives only where the claim
+        // is about that average — the `max_points` note below.
+        //
+        // The two resets on record in 2026-08 were clean by contrast,
+        // `100, 100, 100, 100, 0, 0, 0, 0` on acc2 and `99, 99, 99, 99, 0, 0, 0,
+        // 0` on main with exactly one fall each, which is why this clamp spent
+        // its first round as a precaution.
         //
         // The clamp used to be conditional on `hours <= hoursPerWeek`, guarding
         // a span long enough to hold two real resets. No such span can reach
         // here, and that is a property of the source rather than of this
-        // function: measured 2026-08-17, `since` of 7 and 30 days returns the
-        // same points and the spans stop at 51.75 h on acc2, 52.43 h on acc3 and
-        // 65.85 h on main. Asking for *less* does shorten them — `since` of two
-        // days answers 1951 points over 47.96 h on acc2 against 2000 over
-        // 51.75 h — so `since` is honoured on the left edge; what it cannot do is
-        // reach further back than the gateway kept. Two independent ceilings hold
-        // that — `max_points` of 2000 against 24 to 39 readings an hour, which is
-        // what makes acc2 and acc3 come back `truncated`, and the gateway simply
-        // not retaining more, which is what main shows at 1581 points, not
-        // truncated and still stopping at 65.85 h. A whole week is two and a half
-        // times deeper than the deepest account reaches.
-        resets = min(resets, 1)
+        // function. `since` is honoured on the left edge — asking for *less* does
+        // shorten the answer — but asking for more runs into `max_points` of
+        // 2000 against a poll of 13 to 46 readings an hour. Asked for a whole
+        // week on 2026-09-05 15:35Z the three accounts answer 59.89, 86.83 and
+        // 43.09 h, all three `truncated`; the deepest is 86.83 h and a week is
+        // still nearly twice that.
+        //
+        // **Retention was named here as the second ceiling and it is not one.**
+        // The reading of 2026-08-17 — main at 1581 points, not truncated, still
+        // stopping at 65.85 h — said the gateway simply kept no more, and on that
+        // day nothing contradicted it. Today no account is held by retention at
+        // all: every one of them is stopped by the cap, and the account that used
+        // to be the deepest is now the shallowest, because it is the one the
+        // gateway polls hardest (46.4 readings an hour against acc3's 13.2). The
+        // cap counts points, not hours, which is the whole of it
+        // (`UsageStore.historyWindowSeconds` carries the table).
+        let resets = min(falls, 1)
+        var credit = firstFallLevel * Double(resets)
 
         let rawChange = last.value - first.value
         // A window's reading only ever goes up until it resets, so an interval
@@ -397,7 +487,11 @@ enum FleetCapacity {
         if resets == 0, rawChange < -1 {
             if let resetsAt, case let windowStart = resetsAt.addingTimeInterval(-hoursPerWeek * 3600),
                windowStart > first.at, windowStart < last.at {
-                resets = 1
+                // The one place the flat window survives: nothing observed the
+                // fall, so there is no level to charge and a whole window is
+                // what is left. It errs upward, over an account that may have
+                // spent little of it — the header says how far that can go.
+                credit = quotaPerAccount
             } else {
                 // The readings and the schedule contradict each other: the
                 // series fell past the sawtooth and no window began inside it to
@@ -423,612 +517,164 @@ enum FleetCapacity {
         // climbed back *above* the reading; the difference is only which side of
         // the reading the new window stopped on, and this side is the one the
         // clamp makes silent.
-        let burn = rawChange + quotaPerAccount * Double(resets)
-        return Measurement(burnPP: max(0, burn), hours: hours)
+        let burn = rawChange + credit
+        return Measurement(burnPP: max(0, burn), hours: hours, hitCeiling: hitCeiling)
     }
 
-    // MARK: - The projection
+    // MARK: - The fleet figure
 
-    /// One local clock hour of one account's series.
-    ///
-    /// **It carries the change and the resets apart, and that separation is the
-    /// whole correctness of the decomposition.** A bucket that carried a
-    /// finished burn would have to decide, inside itself, whether a window
-    /// turned over — and the first prototype of this did exactly that, taking
-    /// each hour's own first and last reading and adding 100 per reset it saw
-    /// between them. The arithmetic reconciled on two accounts out of three and
-    /// was wrong by a whole window on the third: 128 pp against the 27 the span
-    /// method answers on main, 231 against 132 over the fleet, measured
-    /// 2026-08-18 and reproduced here before anything was built on top of it.
-    /// The mechanism is worth naming because it is not obvious. A fall from 99
-    /// to 0 that lands between one hour's last reading and the next hour's first
-    /// is invisible to both hours' endpoints — neither pair straddles it — so the
-    /// −99 is never subtracted, while the reset is still counted across the
-    /// boundary and its +100 still charged. The hundred is not double-counted;
-    /// it is charged with nothing to cancel it.
-    ///
-    /// So a step is the unit, not an hour: `deltaPP` is a signed change that
-    /// telescopes, `resets` is a count, and `burn(over:)` puts them together the
-    /// same way `measure` does over a span. Sum any contiguous stretch of these
-    /// and the answer is the endpoint burn of that stretch — **exactly when the
-    /// stretch's own edges fall on readings**, and that is the rare case rather
-    /// than the ordinary one. Measured over the 48 h the app fetches
-    /// (2026-08-18): exactly **1** hour boundary out of 48, 45 and 48 landed on a
-    /// reading over `main`, `acc2` and `acc3`. Polling every minute or so does not
-    /// make boundaries land on samples — the interval is a median of 64 s with a
-    /// p90 of 303 s and no alignment to the clock at all — so an edge inside a
-    /// step is what normally happens.
-    ///
-    /// **Inside a step the two methods part, and they part two different ways.**
-    /// A *reset* step is charged whole to the hour its fall began in, so the
-    /// stretch holding that hour carries the entire −99 and 100 while the
-    /// endpoint method, stopping at the last reading before the edge, has not
-    /// seen the fall at all: the divergence is that step's whole burn. An
-    /// *ordinary* step is spread pro rata, so the stretch carries only the share
-    /// of the change that fell inside it and the divergence is that share.
-    /// Frequencies are the other way round from what the reset case suggests: of
-    /// the boundaries above, 46 / 44 / 47 fell inside an ordinary step and 1 —
-    /// `main`'s only reset — inside a reset step. Sizes are the same order: the
-    /// reset straddle is exactly 1 pp (the stretch ending at 18:00 local, which
-    /// is `TimeZone.current` and what production splits by), and the ordinary
-    /// straddles are 0 pp at almost every boundary because the reading did not
-    /// move across the step — non-zero at 3 / 2 / 4 of them, peaking at 0.94,
-    /// 0.97 and 0.47 pp.
-    ///
-    /// `testHourBucketsReconcileWithTheSpanMethod` asks all of it, over three
-    /// fixtures: a reset inside a bucket, a reset whose fall ends exactly on a
-    /// bucket boundary, and a reset step that straddles one — the last being the
-    /// only one of the three that can tell whole attribution from spreading, and
-    /// the one that holds the qualification above. All three are sampled on the
-    /// hour, so only the reset case ever straddles there; the ordinary straddle
-    /// is a live-data statement and not a fixture.
-    struct HourBucket: Sendable, Equatable {
-        /// Start of the local clock hour, so buckets order and the recent window
-        /// can be scanned back through them.
-        let start: Date
-        /// Which hour of the day it is, 0…23. Kept rather than recomputed
-        /// because the profile asks it of every bucket several times.
-        let hourOfDay: Int
-        /// The signed change of the reading over the part of the hour the
-        /// readings covered, with **no** reset charge in it. Negative is
-        /// ordinary: the sawtooth is one-sided downward.
-        let deltaPP: Double
-        /// Window turnovers charged to this hour: a fall is charged to the hour
-        /// it started in, together with the whole of its change.
-        let resets: Int
-        /// How much of the hour the readings actually covered. Under an hour at
-        /// the ends of a series, and under an hour in a gap; the profile divides
-        /// by it rather than by 1.
-        ///
-        /// **And over an hour when a reset step crossed the hour's end**, because
-        /// such a step is not spread: its whole span goes to the hour its fall
-        /// began in, boundary and all. On the live `main` series that bucket
-        /// carries 1.0117 h (2026-08-18; it is the only bucket over an hour on any
-        /// of the three accounts). It is the **17:00** bucket in local time, which
-        /// is what production splits by — `sustainable` defaults `timeZone` to
-        /// `.current`; "14:00" stood here for a round because the measuring script
-        /// labelled its hours in UTC, and this machine runs at UTC+3. The figure
-        /// itself re-measures unchanged, but only over a window that covers the
-        /// whole of that hour: today's 48 h fetch begins at 17:54 on the day of
-        /// the reset, so the same bucket reads 0.10 h from it. The
-        /// profile divides by what it is given, so the hour reads a rate over
-        /// slightly more than an hour — which is the honest reading of a fall
-        /// nobody watched the middle of.
-        let hours: Double
-    }
-
-    /// Percentage points burned over a set of buckets.
-    ///
-    /// The same shape `measure` uses over a span — the signed change plus a
-    /// window per reset, clamped to one — and it is the same clamp for the same
-    /// reason: a seven-day window cannot turn over twice inside the depth the
-    /// gateway keeps, so a second fall is a lagging sample beside a real reset
-    /// and charging it costs 100 pp that never happened.
-    ///
-    /// The clamp is a property of the set it is asked over, and that is a real
-    /// limit rather than a rounding: two falls landing one in a work hour and
-    /// one in a sleeping hour are charged once in each class, 200 pp where the
-    /// span says 100. It needs two falls in one series to happen at all, and the
-    /// live history has held one fall per account at most — 1 reset over 5844
-    /// steps across three accounts, measured 2026-08-18.
-    static func burn(over buckets: [HourBucket]) -> Double {
-        var change = 0.0
-        var resets = 0
-        for bucket in buckets {
-            change += bucket.deltaPP
-            resets += bucket.resets
-        }
-        return change + quotaPerAccount * Double(min(resets, 1))
-    }
-
-    /// Percentage points per hour over a set of buckets, never negative.
-    ///
-    /// The clamp is `measure`'s, moved to where the projection needs it: an
-    /// account whose reading wobbled down by a point has not un-burned anything,
-    /// and left signed it would make the rest of the fleet look cheaper.
-    private static func rate(over buckets: [HourBucket]) -> Double {
-        let hours = buckets.reduce(0.0) { $0 + $1.hours }
-        guard hours > 0 else { return 0 }
-        return max(0, burn(over: buckets)) / hours
-    }
-
-    /// One account's series cut into local clock hours, or `nil` when it cannot
-    /// be cut honestly.
-    ///
-    /// **A step's change is spread across the hours the step spans**, in
-    /// proportion to time. The readings are levels, not events: what happened
-    /// between two of them is a stretch of spending we cannot resolve, and
-    /// uniform is the only reading of it available. The alternative — charging
-    /// the whole step to one hour — turns an 18-minute gap into a spike and a
-    /// two-reading fixture into a series that touched one hour of the day, which
-    /// would then fail the day-coverage guard for a series that was watched
-    /// continuously.
-    ///
-    /// **A reset step is not spread.** Its change and its reset go together into
-    /// the hour the fall started in, because splitting them is exactly the
-    /// failure `HourBucket` documents: half a −99 in one hour and the whole +100
-    /// in the next. They move as a pair or not at all.
-    ///
-    /// **Two readings can share a timestamp, and such a step keeps its change
-    /// and contributes no time.** Not a hypothetical: in the 48 h the app
-    /// fetches there are 31, 13 and 12 of them over acc2, acc3 and main
-    /// (2026-08-18, over 2000 / 1487 / 1618 readings), and they are almost all a
-    /// `poll` sample and a `headers` sample landing on the same second — the two
-    /// measuring sources of §4, seen from the other side. Dropping them as
-    /// zero-length is the obvious thing and it is wrong: they carry −9, +3 and
-    /// −3 pp on those three series, and the −9 is a sixth of acc2's whole 58 pp
-    /// burn. A decomposition that drops them stops reconciling with the span
-    /// method, which is how this was found. The readings are never *backwards*,
-    /// on the other hand — 0 pairs out of all three series, in the 48 h window
-    /// and over the full depth alike — so the gateway's order is ascending in
-    /// the weak sense §2.7 assumes, and no more than that.
-    ///
-    /// **A fall past the sawtooth on such a step would refuse the account
-    /// outright**, and the two rules meet in a place worth naming. The refusal
-    /// below asks the schedule for a window that began *strictly inside* the
-    /// step — `windowStart > previous.at, windowStart < reading.at` — and a step
-    /// across no time at all has no inside for a boundary to fall in: the
-    /// condition cannot be satisfied by any schedule, so the guard returns `nil`
-    /// and the account loses its demand *and* its 100 pp of capacity.
-    ///
-    /// **Which way that moves the reading depends on who left, and "up" — what
-    /// stood here — is only half of it.** The load is `sum of demand / (N x 100)`,
-    /// so dropping an account pulls the figure towards the mean of the ones that
-    /// remain: up when the dropped account was below that mean, down when it was
-    /// above. In one line, `(S - d) / (N - 1) > S / N` is exactly `d < S / N`.
-    /// Demands of 40 / 40 / 200 pp read 93.3%, and without the 200 they read 40%
-    /// — fifty-three points *down*.
-    ///
-    /// The dangerous direction is that one, because **a refusal can hide an
-    /// overload**: what gets refused is not the quiet account but the one whose
-    /// readings fell unexplainably, and unexplained falls live where the spending
-    /// is. A fleet pushed over capacity by one account reads calm on the two that
-    /// are left, and nothing on screen says the figure is now about somebody
-    /// else. This is documentation and not a change, because the
-    /// shape does not occur: re-counted the same day over the same window there
-    /// are 26 / 13 / 13 such pairs (the count moves with the window, which is why
-    /// it differs from the figures above), their changes are only −1, 0 and +1 pp
-    /// — 10/14/2 on acc2, 1/8/4 on acc3, 6/5/2 on main — and not one of them
-    /// falls past the sawtooth at all. A reset landing exactly between two
-    /// same-second samples would be needed, and the two sources are both reading
-    /// the same window.
-    ///
-    /// The refusal is `measure`'s, asked of every step rather than of the span:
-    /// a fall past the sawtooth with no reset to explain it is something that
-    /// restored the window, and the schedule is consulted exactly as it is
-    /// there — over readings that already fell, never on its own. Asking it per
-    /// step is stricter than asking it per span, and deliberately: the span
-    /// method only ever sees the net change, so a 5 pp dip in the middle of a
-    /// rising series rides through it unnoticed while this refuses the account.
-    /// The cost of the strictness is measured and is currently zero — over the
-    /// live history the deepest fall that is not a reset is exactly −1.0 pp on
-    /// all three accounts (2026-08-18, 5844 steps), so no step reaches the
-    /// refusal at all.
-    static func hourBuckets(_ readings: [(at: Date, value: Double)],
-                            resetsAt: Date?,
-                            timeZone: TimeZone) -> [HourBucket]? {
-        var slices: [Date: (change: Double, resets: Int, hours: Double)] = [:]
-        func add(_ start: Date, change: Double, resets: Int, hours: Double) {
-            var slice = slices[start] ?? (0, 0, 0)
-            slice.change += change
-            slice.resets += resets
-            slice.hours += hours
-            slices[start] = slice
-        }
-        // The current window began a week before it ends, the window being
-        // exactly seven days (`hoursPerWeek`).
-        let windowStart = resetsAt?.addingTimeInterval(-hoursPerWeek * 3600)
-
-        for (previous, reading) in zip(readings, readings.dropFirst()) {
-            let change = reading.value - previous.value
-            var resets = previous.value - reading.value > resetDropThreshold ? 1 : 0
-            if resets == 0, change < -sawtoothPP {
-                // The readings fell further than the two measuring sources can
-                // disagree by, and nothing in them says a window turned over.
-                // The schedule answers only whether one began inside this step.
-                guard let windowStart, windowStart > previous.at, windowStart < reading.at else { return nil }
-                resets = 1
-            }
-            let span = reading.at.timeIntervalSince(previous.at)
-            // Two kinds of step go in whole rather than pro rata, and the branch
-            // serves both. A reset, because splitting it is the failure
-            // `HourBucket` documents — and into the hour the fall *started* in,
-            // which is where the spending the `+ 100` stands for happened, and
-            // which puts the step on the same side of an hour boundary as the
-            // endpoint method would. And a step across no time at all, which is
-            // two sources reporting the same instant: it has no time to be
-            // spread over, and it still carries a real change.
-            guard resets == 0, span > 0 else {
-                add(hourStart(of: previous.at, in: timeZone),
-                    change: change, resets: resets, hours: max(0, span) / 3600)
-                continue
-            }
-            var cursor = previous.at
-            while cursor < reading.at {
-                let start = hourStart(of: cursor, in: timeZone)
-                let next = min(start.addingTimeInterval(3600), reading.at)
-                // A time zone whose offset moved under us could otherwise leave
-                // the cursor where it was; the remainder goes into one bucket
-                // and the loop ends rather than spinning.
-                guard next > cursor else {
-                    add(start, change: change * (reading.at.timeIntervalSince(cursor) / span),
-                        resets: 0, hours: reading.at.timeIntervalSince(cursor) / 3600)
-                    break
-                }
-                let covered = next.timeIntervalSince(cursor)
-                add(start, change: change * (covered / span), resets: 0, hours: covered / 3600)
-                cursor = next
-            }
-        }
-
-        return slices
-            .map { HourBucket(start: $0.key,
-                              hourOfDay: hourOfDay(of: $0.key, in: timeZone),
-                              deltaPP: $0.value.change,
-                              resets: $0.value.resets,
-                              hours: $0.value.hours) }
-            .sorted { $0.start < $1.start }
-    }
-
-    /// The start of the local clock hour `date` falls in.
-    ///
-    /// Arithmetic rather than `Calendar`, because this is asked once or twice
-    /// per step and the live pass carries some six thousand of them. The offset
-    /// is queried at the instant rather than taken once, so a zone that changes
-    /// offset mid-series maps each instant by the rule in force then; a zone
-    /// offset by half an hour has its hours boundaried on the half hour, which
-    /// is where its wall clock puts them.
-    private static func hourStart(of date: Date, in timeZone: TimeZone) -> Date {
-        let offset = Double(timeZone.secondsFromGMT(for: date))
-        let local = date.timeIntervalSince1970 + offset
-        return Date(timeIntervalSince1970: (local / 3600).rounded(.down) * 3600 - offset)
-    }
-
-    /// Which hour of the local day `date` falls in, 0…23.
-    private static func hourOfDay(of date: Date, in timeZone: TimeZone) -> Int {
-        let local = date.timeIntervalSince1970 + Double(timeZone.secondsFromGMT(for: date))
-        let hours = Int((local / 3600).rounded(.down))
-        return ((hours % 24) + 24) % 24
-    }
-
-    /// One account's series, cut into hours and flagged, or `nil` when it cannot
-    /// carry a projection.
-    ///
-    /// Internal, like `Measurement` and for the same reason: the reconciliation
-    /// test asks this for the buckets and `measure` for the span, and the two
-    /// have to answer the same burn.
-    struct HourlyMeasurement {
-        var buckets: [HourBucket]
-        /// The whole span between the first and last reading, as `Measurement`
-        /// means it.
-        var hours: Double
-        /// At the ceiling at least once, and below it at least once.
-        var hitCeiling: Bool
-    }
-
-    static func measureHourly(_ points: [HistoryPoint],
-                              resetsAt: Date?,
-                              timeZone: TimeZone) -> HourlyMeasurement? {
-        // Same readings as `measure` reads, and for the same reasons: only the
-        // seven-day window, and `util_7d: null` is a sample that measured
-        // nothing rather than a reading of zero (§2.7).
-        let readings: [(at: Date, value: Double)] = points.compactMap { point in
-            point.sevenDay.map { (at: point.timestamp, value: $0) }
-        }
-        guard let first = readings.first, let last = readings.last else { return nil }
-        let hours = last.at.timeIntervalSince(first.at) / 3600
-        guard hours >= minimumProjectionHours else { return nil }
-
-        var hitCeiling = first.value >= ceilingPercent
-        var everBelowCeiling = first.value < ceilingPercent
-        for reading in readings.dropFirst() {
-            if reading.value >= ceilingPercent { hitCeiling = true } else { everBelowCeiling = true }
-        }
-        // An account that never left its ceiling was watched, not measured — the
-        // reason is written out in `measure`, and it is the same reason here.
-        guard everBelowCeiling else { return nil }
-
-        guard let buckets = hourBuckets(readings, resetsAt: resetsAt, timeZone: timeZone) else { return nil }
-        return HourlyMeasurement(buckets: buckets, hours: hours, hitCeiling: hitCeiling)
-    }
-
-    /// Which hours of the local day the fleet works in, 0…23.
-    ///
-    /// The fleet's rate is the sum of the accounts' own rates, here and in every
-    /// hour of the day — the same "per account, then summed" the window average
-    /// makes, and for the same reason: the accounts are watched over different
-    /// depths, so one total over one span would credit the shallow account with
-    /// hours nobody measured it over.
-    ///
-    /// **One reader, and there used to be two.** The demand estimator spread a
-    /// week's spending over it; that estimator is gone, and `sustainable` — which
-    /// uses it to work out what a working hour may cost — is all that is left. So
-    /// the split is computed exactly once per pass now, where before it was
-    /// computed twice over the same series in the same pass.
-    private static func workHoursOfDay(_ measured: [HourlyMeasurement]) -> Set<Int> {
-        let overall = measured.reduce(0.0) { $0 + rate(over: $1.buckets) }
-        let threshold = overall * workHourFraction
-        var workHours: Set<Int> = []
-        for hour in 0..<hoursPerDay {
-            let fleetRate = measured.reduce(0.0) { total, account in
-                total + rate(over: account.buckets.filter { $0.hourOfDay == hour })
-            }
-            if fleetRate > threshold { workHours.insert(hour) }
-        }
-        return workHours
-    }
-
-    // MARK: - The allowance
-
-    /// What the fleet may spend an hour of work and still have the week last,
-    /// in tokens an hour — and everything the figure was built from.
-    ///
-    /// The unit is the point: the gateway now says how fast tokens are going
-    /// (`TokenRate`), and a rate is only a warning against another rate. A per
-    /// cent of a seven-day window cannot be compared with five minutes of
-    /// spending without an arithmetic nobody can do in their head.
-    struct SustainableRate: Sendable, Equatable {
-        /// The allowance itself: input-equivalent tokens an hour.
-        let tokensPerHour: Double
-        /// What one percentage point of a window costs in input-equivalent
-        /// tokens — the conversion the whole figure turns on. Live on this fleet
-        /// it is 7.04 M (2026-08-24, 48 h window).
-        let tokensPerPoint: Double
-        /// Percentage points an hour a working hour may burn, which is the
-        /// allowance before it is priced in tokens.
-        let allowedWorkRate: Double
-        /// How many hours of the day the fleet was found to be working in, and
-        /// the rate the rest of them were measured at (`workHoursOfDay`).
-        let workHoursPerDay: Int
-        let sleepRate: Double
-        /// How many accounts stood behind it — which is exactly how many were
-        /// counted into capacity.
+    /// What one pass over the fleet found: how fast it is burning its quota,
+    /// against how fast that quota comes back.
+    struct FleetBurn: Sendable, Equatable {
+        /// The burn rate as a per cent of the refill rate. 100 is a fleet
+        /// spending exactly what comes back over the same hours; above that the
+        /// quota runs out before the windows turn over.
+        let percent: Double
+        /// The fleet's burn in percentage points of a week per hour — the sum of
+        /// the accounts' own rates, which is the numerator of `percent` and the
+        /// figure `--dump` prints beside it.
+        let burnRate: Double
+        /// What the same accounts refill at, in the same unit:
+        /// `contributors x quotaPerAccount / hoursPerWeek`. Named rather than
+        /// derived at each use so the two sides of the division are one
+        /// statement, and printed beside the burn for the same reason.
+        let refillRate: Double
+        /// How many accounts actually contributed a rate — which is exactly how
+        /// many the refill rate counts. Not how many the gateway knows about.
         let accounts: Int
-        /// The shortest per-account history that went in: how much watching
-        /// stands behind the answer. The answer is only as well measured as its
-        /// worst-measured contributor, and the depths differ — 2.16 / 2.18 / 2.74
-        /// days over acc2 / acc3 / main, measured 2026-08-17.
+        /// The shortest per-account span that went in: how much watching stands
+        /// behind the answer. The answer is only as well measured as its
+        /// worst-measured contributor, and the depths differ — 43.09 / 47.88 /
+        /// 47.91 h over main / acc3 / acc2, measured 2026-09-05 15:35Z over the
+        /// 48 h the app asks for. Earlier the same day, at 02:50Z, the same three
+        /// read 48.0 / 34.0 / 48.0 h: acc3's series was stale by 14 h that
+        /// morning and was fresh to the second by the afternoon (§2.7). Two
+        /// measurements of a moving thing, not a contradiction — which is why
+        /// both carry a time and not just a date.
         ///
-        /// The gateway's `max_points` cap is not what makes the shallowest
-        /// shallow, and the obvious reading of those three numbers is the wrong
-        /// one: *two* of the accounts come back `truncated` at 2000 points, and
-        /// the one that does not — main, at 1581 — is the deepest of the three.
-        /// What separates them is how hard the gateway watches each account: 38.6
-        /// and 38.1 readings an hour on acc2 and acc3 against main's 24.0. The cap
-        /// counts points, not hours.
+        /// **The mechanism is the `max_points` cap, and the illustration of it
+        /// flipped between August and September.** The cap counts points, not
+        /// hours, so the same 2000 points cover the fewer hours the harder the
+        /// gateway polls an account: 46.4, 38.7 and 13.2 readings an hour over
+        /// main, acc2 and acc3 at 2026-09-05 15:35Z — 47.1, 40.8 and 14.1 at
+        /// 17:01Z the same day, which is why the time is part of the citation —
+        /// and main, the most watched, is
+        /// both the `truncated` one and the shallowest. On 2026-08-17 it was the
+        /// other way round: main came back at 1581 points, *not* truncated, and
+        /// was the deepest of the three, against 38.6 and 38.1 readings an hour
+        /// on acc2 and acc3. That dated shape is kept here as the counter-example
+        /// it now is: the rule is the cap against the polling rate, never the
+        /// ordering of the three accounts, which is a property of the day.
         let measuredHours: Double
         /// An account sat at its ceiling while it was measured, so the points it
-        /// was blocked from burning never entered its series at all.
+        /// was blocked from burning never entered its series at all: the real
+        /// figure is at least this one, and the surface that prints it owes the
+        /// reader a `≥`.
         ///
-        /// **It makes the allowance too generous, which is the direction that
-        /// matters**, and it does so three ways at once — all three pushing the
-        /// allowance up and the ratio drawn against it down.
-        ///
-        /// Suppressed points are missing from the denominator of
-        /// `tokensPerPoint`, so a point reads dearer than it is, and the
-        /// allowance is that price times a rate. They are missing from
-        /// `sleepRate` too, so the week of nights costs less than it did and
-        /// leaves more behind. **And the third is the largest: a blocked account
-        /// brings its whole 100 pp into `capacity` whatever it managed to spend**
-        /// — capacity counts contributors, not what they were allowed to burn —
-        /// so an account blocked for most of the window adds a full week's quota
-        /// to the supply while adding almost nothing to the demand it is netted
-        /// against. Whatever is drawn against the allowance is therefore a floor.
-        /// Live example: acc2 spent 34 samples at 100 during a 48 h window,
-        /// 2026-08-17.
-        ///
-        /// **Where the `≥` actually reaches, and where it does not.** The mark
-        /// belongs to `UsagePopoverView.ratioLabel`, which since the lead became
-        /// a pair of rates has exactly one caller: the menu bar's accessibility
-        /// description (`MenuBarIcon.describe`). `--dump` carries the same flag
-        /// but writes its own ASCII `>=` inline, so it is a second reader of the
-        /// flag and not of this string. A sighted reader of the popover gets
-        /// neither — the
-        /// quantity the popover prints is `of 19.9M/h sustainable`, which is the
-        /// inflated one and carries no mark at all. That is deliberate and it is
-        /// the trade §4 records: the caption is a measurement in tokens, and a
-        /// `≥` in front of a budget reads as "at least this much is allowed",
-        /// which is the opposite of what the flag means.
+        /// **The reason is shorter than it used to be, and it points the other
+        /// way.** While the figure was a token rate over an allowance, a blocked
+        /// account inflated the *denominator* three ways at once and the ratio
+        /// drawn against it read low. Here it is the numerator that is
+        /// suppressed: burn that could not happen is burn that never entered the
+        /// series, so the burn rate is understated and the ratio with it.
         ///
         /// What it carries is that measurement was suppressed, and nothing about
         /// how much: the requests an exhausted account turned away leave no trace
         /// to count, so the gap between this figure and the truth is unbounded —
         /// an account blocked for an hour and one blocked for two days raise the
         /// same flag. It is a warning that the number is a floor, not a margin on
-        /// it. The sleeping rate moves the same way for the same reason, and the
-        /// exchange rate is the larger of the two terms.
+        /// it. Live example: acc2 spent 34 samples at 100 during a 48 h window,
+        /// 2026-08-17.
         ///
-        /// An account that spent the *whole* window at the ceiling does not raise
-        /// it, because it is not counted at all (`measureHourly` refuses it, for
-        /// the reason given there); that fleet is smaller by one in `accounts`
+        /// An account that spent the *whole* span at the ceiling does not raise
+        /// it, because it is not counted at all (`measure` refuses it, for the
+        /// reason given there); that fleet is smaller by one in `accounts`
         /// instead.
+        ///
+        /// **And it must not raise it, which is the asymmetry worth spelling
+        /// out**, because the obvious symmetry — "blocked is blocked, mark it
+        /// either way" — is wrong. For an account that is *included* with a
+        /// partial ceiling, suppressed burn is missing from the numerator while
+        /// its full refill share stays in the denominator, so the quotient can
+        /// only be too low and `≥` is a fact. For an *excluded* account the
+        /// numerator loses a term **and** the denominator loses that account's
+        /// refill share, and the mean moves whichever way that account's true
+        /// rate sat relative to the others'. Worked out: three accounts refilling
+        /// 0.5952 pp/h each, two burning 1.0 pp/h and one pinned throughout.
+        /// Excluded, the fleet reads 2.0 / (2 x 0.5952) = 168%. Had the pinned
+        /// account been measurable at 0.7 pp/h the answer would be
+        /// 2.7 / (3 x 0.5952) = 151%; at 1.5 pp/h it would be 196%. The direction
+        /// is unknown, so there is nothing to assert, and a `≥` that may point
+        /// the wrong way is worse than none (§2.7).
+        ///
+        /// The boundary between the two is a single reading — `everBelowCeiling`
+        /// is a one-sample probe — and what that reading is worth is measured:
+        /// `[100, 99, 100, 100, 100]` beside a spending account answers 87.5%
+        /// with the mark, the same series without the 99 answers 175% without it.
+        /// Both sides are held together in one place, by
+        /// `testOneReadingBelowTheCeilingIsTheWholeDifferenceBetweenMeasuredAndRefused`.
+        /// Whether the sawtooth actually
+        /// carries a pinned account across that boundary is **not decidable from
+        /// today's data**, and §2.7 records the negative result rather than a
+        /// threshold nothing could calibrate.
         let isLowerBound: Bool
-
-        /// The rest of the day. Named rather than derived at each use, because
-        /// the two halves have to add up to 24 in every reader.
-        var sleepHoursPerDay: Int { 24 - workHoursPerDay }
     }
 
-    /// The allowance, or `nil` when the fleet cannot say what it may spend.
+    /// The fleet's burn against its refill, or `nil` when there is nobody to
+    /// measure.
     ///
     /// ```
-    /// tokens per point = tokens spent over the window / points burned over it
-    /// allowed work rate = (capacity - a week of sleeping) / a week of work hours
-    /// allowance         = allowed work rate x tokens per point
+    /// burn rate,   per account = burnPP / hours                   [pp/h]
+    /// refill rate, per account = quotaPerAccount / hoursPerWeek    [pp/h]
+    /// percent = sum of the burn rates / (contributors x refill rate) x 100
     /// ```
     ///
-    /// **It has to be the working rate and not the flat weekly average**, and
-    /// that is the whole reason this function is not one division. What it is
-    /// compared against is measured over five minutes — that is to say, while
-    /// somebody is working. Spread the same capacity over all 168 hours of the
-    /// week instead and every working hour of every healthy week reads as an
-    /// overrun; this project already threw the gateway's own `pace` away for
-    /// exactly that (§2.7). So the sleeping hours are paid at the rate they were
-    /// measured at, and what is left of the week is spread over the hours
-    /// somebody is actually at the keyboard.
+    /// **The summing form is per account, then summed** — the unweighted mean of
+    /// the per-account rates, which is what `windowAverage` did before it. Not
+    /// `sum of burn / sum of refill`: the accounts are watched over different
+    /// depths, and pooling credits the shallow account's missing hours to the
+    /// others. Measured 2026-09-05 02:50Z over spans of 48.0 / 34.0 / 48.0 h the
+    /// two forms answer 112.8% and 120.2%, and the whole of the difference is
+    /// acc3, whose series stopped 14 h before the other two **that morning** —
+    /// by 15:35Z the same three read 43.09 / 47.88 / 47.91 h and acc3 was the
+    /// freshest of them. The spread is what the form is for, and the spread does
+    /// not go away: it was 14 h of staleness then and it is 4.8 h of `max_points`
+    /// now (`measuredHours`).
     ///
-    /// **The two measurements must span the same window.** The points come from
-    /// the histories this pass fetched and the tokens from `/gw/sessions` asked
-    /// with the same `since`, which the gateway honours: 22, 32, 38 and 46
-    /// sessions came back for windows of 6, 12, 24 and 48 h (2026-08-24). What
-    /// they do not span *exactly* is measured rather than waved at — the series
-    /// begins where the gateway's retention lets it, which on that day was 0.2 to
-    /// 1.1 minutes after the `since` asked for, or 0.04% of a 48 h window.
+    /// Contributors are the accounts `measure` could answer for, and the refill
+    /// counts them and nobody else: an account we could not measure must never
+    /// widen a denominator its own burn is missing from (§2.7).
     ///
-    /// **A long window is both safer and cheaper here.** The exchange rate barely
-    /// moves with it — 6.934, 7.047 and 7.044 M tokens per point over windows of
-    /// 12, 24 and 48 h (2026-08-24, three accounts), a spread of 1.6% — while the
-    /// points it divides by are whole numbers, so a short window divides by very
-    /// few of them. At 6 h there is no figure at all on that fleet, and not
-    /// because of noise: `measure` refuses a span under `minimumMeasuredHours`,
-    /// and a series asked for 6 h comes back 5.99 h long. The window is the one
-    /// the histories were fetched over (`UsageStore.historyWindowSeconds`), which is
-    /// 48 h unless the setting takes it higher.
-    ///
-    /// **Its contributors are the accounts whose day could be split**, which is
-    /// the `measureHourly` set — a day of history, and not pinned at the ceiling
-    /// throughout. Capacity counts them and nobody else, exactly as both
-    /// estimators do: an account we could not measure must never widen a
-    /// denominator its own spending is missing from (§2.7).
-    ///
-    /// The tokens, on the other hand, are the fleet's whole spend over the
-    /// window, because `/gw/sessions` reports per session and a session is not
-    /// an account. **The mismatch is real and it errs towards the warning**: a
-    /// refused account's tokens stay in the numerator of the exchange rate while
-    /// its points leave the denominator, so the rate reads high, the allowance
-    /// reads high — and a high allowance makes the fleet look *safer*, which is
-    /// the unsafe direction. It is bounded by how much of the fleet's spend the
-    /// refused account served and it is not observable from here. On the live
-    /// fleet no account has been refused (2026-08-24, three accounts, all three
-    /// contributing).
-    ///
-    /// **Refusals, and what each one answers.** No account with a splittable day
-    /// — the same "unknown is not zero" both estimators make. No points burned
-    /// over the window, which is at once a fleet with nothing to price a token by
-    /// and a fleet at rest with no working hours to spread a week over: there is
-    /// no working rate to allow, and answering the flat weekly average instead
-    /// would be the very comparison the second paragraph refuses. No tokens spent
-    /// over the window — then there is no exchange rate either, and inventing one
-    /// would price every future hour off two numbers that never happened. And a
-    /// week whose sleeping hours already spend the whole capacity, which leaves
-    /// nothing for a working hour to be allowed: the answer there is not "zero
-    /// an hour", because the arithmetic that produced it has gone negative and a
-    /// floor would hide it.
-    ///
-    /// Note which of these is *not* a refusal: a current rate of zero. An idle
-    /// fleet genuinely spends nothing, that is a reading, and it is the caller's
-    /// figure rather than this one's.
-    ///
-    /// **It is the whole cost of the pass now, and it used to be half of it.**
-    /// While the demand estimators existed, this function ran `measureHourly` and
-    /// the split a second time over the same series in the same pass, because the
-    /// figure the estimator produced carried a field meaning "which estimator
-    /// ran" and filling it on the other path would have made that field lie. With
-    /// one reader left there is nothing to duplicate, and the duplication was
-    /// nearly the whole bill: measured 2026-08-24 on this machine over the live
-    /// fleet's own bodies (three accounts, 1616 / 1145 / 1020 readings, release
-    /// build, best of twenty over four runs) this function costs **0.697 to
-    /// 0.741 ms**, of which `measureHourly` over the three series is **0.676 to
-    /// 0.696 ms**. That decomposition is what ran twice, so the pass on the
-    /// projection path cost about twice this and now costs this.
-    ///
-    /// It runs once every ten minutes and off the main thread, so the figures are
-    /// named to save the next reader the measurement rather than because anything
-    /// has to be done about it. Note what they are *not* comparable with: the
-    /// 0.639 ms this comment used to quote was taken by another method on another
-    /// day, and a first cold run of the bench above answered 1.239 ms before
-    /// settling — a number from a different harness is not a baseline.
-    static func sustainable(histories: [String: HistorySeries],
-                            accounts: [AccountUsage],
-                            spentTokens: Double,
-                            timeZone: TimeZone = .current) -> SustainableRate? {
-        var measured: [HourlyMeasurement] = []
+    /// **One statement guards one division.** With no contributor the refill rate
+    /// is zero and the answer would be `0 / 0` — a published `NaN` rather than a
+    /// missing figure, and every surface would draw that as a reading. A fleet
+    /// the gateway named no accounts for and a fleet whose every history was too
+    /// short reach it by the same path, which is why the guard counts
+    /// contributors rather than accounts.
+    static func burnAgainstRefill(histories: [String: HistorySeries],
+                                  accounts: [AccountUsage]) -> FleetBurn? {
+        var burnPerHour = 0.0
+        var contributors = 0
         var shortestHours = Double.greatestFiniteMagnitude
         var blocked = false
+
         for account in accounts {
             guard let series = histories[account.label],
-                  let hourly = measureHourly(series.points,
-                                             resetsAt: account.sevenDay?.resetsAt,
-                                             timeZone: timeZone) else { continue }
-            measured.append(hourly)
-            shortestHours = min(shortestHours, hourly.hours)
-            blocked = blocked || hourly.hitCeiling
+                  let measured = measure(series.points,
+                                         resetsAt: account.sevenDay?.resetsAt) else { continue }
+            burnPerHour += measured.burnPP / measured.hours
+            contributors += 1
+            shortestHours = min(shortestHours, measured.hours)
+            blocked = blocked || measured.hitCeiling
         }
 
-        // **Nothing asks whether anybody was measured**, and that is the same
-        // omission the statement below documents rather than a second one. The
-        // burn is a sum over the contributors, so a fleet where nobody could be
-        // measured sums nothing and the price of a point refuses it three lines
-        // on. A `!measured.isEmpty` stood here and decided nothing on any input;
-        // it has been taken out, and what stands in its place is
-        // `testThePriceOfAPointDividesByTheContributorsAndNothingElse`, which
-        // pins the link the removal rests on — that the burn is that sum and
-        // only that sum.
-        //
-        // The same burn `measure` takes over the span, asked of the buckets so
-        // that one decomposition serves the whole file: over a whole series the
-        // stretch's edges *are* the first and last readings, which is the case
-        // the two methods agree on exactly (`HourBucket`). Clamped for
-        // `rate(over:)`'s reason — an account whose reading wobbled down by a
-        // point has not un-burned anything.
-        let burned = measured.reduce(0.0) { $0 + max(0, burn(over: $1.buckets)) }
-        // **One statement, and it stands in front of both divisions below.** A
-        // fleet that burned nothing over the window has no points to price a
-        // token by, *and* no work hours to spread a week over: the fleet's rate
-        // is what the threshold is a fraction of, so an hour clears 0.45 of it
-        // whenever that rate is above zero — and the rate is above zero exactly
-        // when the burn is, both being the same clamped sum over the same
-        // buckets. Asking the second half separately was tried and taken back
-        // out: no series reaches it, and a guard nothing can fire is a branch
-        // that cannot execute. What keeps `workHours.count` safe to divide by is
-        // therefore this line plus the test that pins the invariant,
-        // `testAnAnswerAlwaysHasWorkHoursToSpreadTheWeekOver`.
-        //
-        // A fleet at rest is the shape that reaches it, and refusing is the
-        // right answer: what is asked here is what an hour of work may cost, and
-        // a fleet that has not worked has not said. The lead figure it would have
-        // been drawn against is a measured zero, which the surface states on its
-        // own — a rate needs an allowance to be a ratio, and there is none.
-        guard burned > 0, spentTokens > 0 else { return nil }
-        let tokensPerPoint = spentTokens / burned
-
-        let workHours = workHoursOfDay(measured)
-        let sleepRate = measured.reduce(0.0) { total, account in
-            total + rate(over: account.buckets.filter { !workHours.contains($0.hourOfDay) })
-        }
-
-        let capacity = Double(measured.count) * quotaPerAccount
-        let sleepingWeek = sleepRate * Double(hoursPerDay - workHours.count) * daysPerWeek
-        let workingWeek = Double(workHours.count) * daysPerWeek
-        guard capacity - sleepingWeek > 0 else { return nil }
-        let allowedWorkRate = (capacity - sleepingWeek) / workingWeek
-        return SustainableRate(tokensPerHour: allowedWorkRate * tokensPerPoint,
-                               tokensPerPoint: tokensPerPoint,
-                               allowedWorkRate: allowedWorkRate,
-                               workHoursPerDay: workHours.count,
-                               sleepRate: sleepRate,
-                               accounts: measured.count,
-                               measuredHours: shortestHours,
-                               isLowerBound: blocked)
+        guard contributors > 0 else { return nil }
+        let refillPerHour = Double(contributors) * quotaPerAccount / hoursPerWeek
+        return FleetBurn(percent: burnPerHour / refillPerHour * 100,
+                         burnRate: burnPerHour,
+                         refillRate: refillPerHour,
+                         accounts: contributors,
+                         measuredHours: shortestHours,
+                         isLowerBound: blocked)
     }
 }
