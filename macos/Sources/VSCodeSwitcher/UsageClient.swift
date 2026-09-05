@@ -65,7 +65,7 @@ struct UsageClient: Sendable {
     /// and runs only while the popover is open, on its own minute cadence; it
     /// smooths what comes back (`withoutSourceLag`) because the chart wants the
     /// sawtooth gone. `UsageStore.histories` feeds `FleetCapacity` from `poll`,
-    /// once every `UsageStore.allowanceIntervalSeconds`, and needs the **raw**
+    /// once every `UsageStore.historyIntervalSeconds`, and needs the **raw**
     /// points — that filter deletes exactly the lone below-ceiling reading that
     /// keeps a pinned account inside the measurement.
     ///

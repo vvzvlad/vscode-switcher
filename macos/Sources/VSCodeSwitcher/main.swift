@@ -225,8 +225,8 @@ enum ConsoleDump {
                 + (usage.truncated ? ", truncated by the gateway's cap" : ""))
         }
         lines.append("  " + label("fleet 7d:") + percent(usage.fleetSevenDayMean))
-        lines.append("  " + label("spend rate:")
-            + rateLine(now: usage.fleetTokenRate, allowance: usage.sustainable))
+        lines.append("  " + label("burn vs refill:") + burnLine(usage.fleetBurn))
+        lines.append("  " + label("spend rate:") + spendRateLine(usage.fleetTokenRate))
         let accounts = usage.accounts.map {
             "\($0.label) 5h \(percent($0.fiveHour?.utilization)) 7d \(percent($0.sevenDay?.utilization))"
         }
@@ -328,44 +328,45 @@ enum ConsoleDump {
         value.map { String(format: "%.0f%%", $0) } ?? "-"
     }
 
-    /// The pair of rates the popover leads with, and everything the second of
-    /// them was built from.
+    /// The figure the popover and the menu bar lead with, with both sides of its
+    /// division and everything that qualifies it.
     ///
-    /// The two halves are printed apart because they can be missing apart: the
-    /// current rate arrives with the quota once a minute and needs no estimating
-    /// at all, the allowance arrives with the histories once every ten minutes
-    /// and is a chain of four measurements. `-` on either side is the state the
-    /// popover falls back to the weekly quota in, and the tail says which link
-    /// of the chain is the one that moved.
+    /// `-` is the state the popover falls back to the weekly quota in: no account
+    /// with six hours of series, every account pinned at its ceiling, a fall the
+    /// reset schedule cannot explain (`FleetCapacity.burnAgainstRefill`).
+    ///
+    /// **Both rates are printed and not only the quotient**, because a per cent
+    /// is not checkable by hand and a pair of pp/h is: the burn is a difference
+    /// of readings the gateway published, and the refill is
+    /// `accounts × 100 / 168`. A quotient alone would be a number nobody outside
+    /// this file could reproduce, which is the whole use this section is put to.
+    ///
+    /// The qualification is the same one the retired `weekly load:` line carried:
+    /// a ratio is only as good as how many accounts stood behind it and how deep
+    /// the shallowest of their histories went, so both are printed, and `>=`
+    /// marks a figure that is only a floor — the panel's `≥` spelled for a
+    /// terminal, as the token columns already are.
+    private static func burnLine(_ burn: FleetCapacity.FleetBurn?) -> String {
+        guard let burn else { return "-" }
+        return String(format: "%.0f%%", burn.percent.rounded())
+            + (burn.isLowerBound ? " (>=)" : "")
+            + String(format: ", %d accounts over %.1f h", burn.accounts, burn.measuredHours)
+            + String(format: ", %.3f pp/h burned vs %.3f pp/h refilled",
+                     burn.burnRate, burn.refillRate)
+    }
+
+    /// What the fleet is spending right now, as the gateway measured it over its
+    /// own five minutes — the supporting reading under the popover's lead.
+    ///
+    /// It is the numerator of nothing since the lead became a burn against a
+    /// refill, and it is still printed because it is the only measurement in this
+    /// section that is about *now* rather than about the last two days.
     ///
     /// Raw digits rather than the `23.8M/h` the surface writes: this line exists
     /// to be checked against the gateway by hand, and a rounded million cannot
-    /// be. The exchange rate is the one figure here that no other line carries,
-    /// and it is the whole conversion — points into tokens.
-    ///
-    /// **The tail is the whole of what used to be a second line.** A `weekly
-    /// load:` line stood above this one and printed a week's *estimated* demand
-    /// against a supply, naming which of two estimators had produced it; both
-    /// estimators are gone, because the gateway measures the demand and the first
-    /// figure on this line is that measurement. What the old line carried that
-    /// this one has to keep is the qualification: a ratio is only as good as how
-    /// many accounts stood behind it and how deep the shallowest of their
-    /// histories went, so both are printed, and `>=` marks a figure that is only
-    /// a floor — the panel's `≥` spelled for a terminal, as the token columns
-    /// already are.
-    private static func rateLine(now: Double?, allowance: FleetCapacity.SustainableRate?) -> String {
-        let current = now.map { String(format: "%.0f tokens/h ie", $0) } ?? "-"
-        guard let allowance else { return current + " of - sustainable" }
-        let ratio = now.map {
-            String(format: " (%@%.0f%%)", allowance.isLowerBound ? ">=" : "",
-                   $0 / allowance.tokensPerHour * 100)
-        } ?? ""
-        return current
-            + String(format: " of %.0f tokens/h ie sustainable", allowance.tokensPerHour) + ratio
-            + String(format: ", %.3fM tokens/pp", allowance.tokensPerPoint / 1e6)
-            + String(format: ", %.3f pp/h over %d work h/day", allowance.allowedWorkRate, allowance.workHoursPerDay)
-            + String(format: " + %d sleeping h at %.3f pp/h", allowance.sleepHoursPerDay, allowance.sleepRate)
-            + String(format: ", %d accounts over %.1f h", allowance.accounts, allowance.measuredHours)
+    /// be.
+    private static func spendRateLine(_ tokensPerHour: Double?) -> String {
+        tokensPerHour.map { String(format: "%.0f tokens/h ie", $0) } ?? "-"
     }
 
     /// One set of counters: the input-equivalent total, then the four raw

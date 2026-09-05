@@ -156,9 +156,13 @@ struct GatewaySession: Sendable, Decodable, Equatable {
 
 /// The body of `GET /gw/sessions`.
 struct SessionsReport: Sendable, Decodable {
-    /// The window the gateway *applied*, which is not the one that was asked
-    /// for: it clamps `since` to the retention boundary (30 days at the time of
-    /// writing). This is the number to show.
+    /// The window the gateway *applied*, which need not be the one that was
+    /// asked for. This is the number to show, because the answer is the
+    /// authority on what it covers — not because of any clamping: "it clamps
+    /// `since` to the retention boundary (30 days)" stood here as fact and has
+    /// **never been observed**. Re-probed 2026-09-05 20:27Z, this endpoint
+    /// returns the `since` it was sent at 30 and at 90 days, and the history
+    /// endpoint does the same at 30, 60 and 90 (§2.7).
     let since: Date
     /// The gateway keeps the 200 largest consumers and drops the cheapest tail.
     let truncated: Bool
@@ -452,10 +456,10 @@ struct HistorySeries: Sendable, Decodable {
 /// line §4 removed: with both halves polled once a minute the two sentences moved
 /// together and said the same thing twice.
 ///
-/// There is one attempt stamp left, `allowanceCheckedAt`, and it is the exception
+/// There is one attempt stamp left, `historiesCheckedAt`, and it is the exception
 /// that proves the rule: nothing draws it, its single reader is the schedule that
 /// decides whether this pass fetches the histories, and it exists precisely so
-/// that `allowanceFetchedAt` may go on meaning "when the figure arrived" while
+/// that `historiesFetchedAt` may go on meaning "when the figure arrived" while
 /// the retry moves without it. That is the same shape as the popover's own
 /// `UsageHistoryModel.checkedAt` — a live reader, no line on screen — and the
 /// same distinction: a stamp that moves on a failed attempt must never be the one
@@ -476,7 +480,7 @@ struct UsageSnapshot: Sendable {
     /// over its own short window (`TokenRate`). The headline's lead figure.
     ///
     /// It arrives with the quota half and is as of `quotaFetchedAt`, which is why
-    /// it lives beside the mean rather than beside `sustainable`: nothing here
+    /// it lives beside the mean rather than beside `fleetBurn`: nothing here
     /// estimates it, and the ten-minute cadence of the histories has no hold on
     /// it. `nil` when the gateway named no rate — an older gateway with no
     /// `tokens` block, statistics turned off, or a window of zero.
@@ -551,33 +555,31 @@ struct UsageSnapshot: Sendable {
     /// non-empty: that is the state in which nobody can see it.
     var hourlyUnmatched: TokenCounts = .zero
     var hourlyUnmatchedSessions: Int = 0
-    /// What the fleet may spend an hour and still last the week
-    /// (`FleetCapacity.sustainable`) — the allowance the lead figure is stated
-    /// against, and the denominator of the ratio both surfaces are coloured by.
+    /// How fast the fleet is burning its quota against how fast it refills
+    /// (`FleetCapacity.burnAgainstRefill`) — the lead figure both surfaces print,
+    /// and the one they are coloured by.
     ///
     /// `nil` while nothing has been worked out yet, and `nil` again when a pass
-    /// asked and found no figure: the allowance refuses for several different
-    /// reasons and none of them is a number (see the popover's headline, which
-    /// has to draw all of them the same).
+    /// asked and found no figure: not one account had a long enough history that
+    /// left its ceiling and whose falls the schedule could explain (see the
+    /// popover's headline, which has to draw all of those the same).
     ///
-    /// It used to sit beside a second figure, the week's estimated *load*, on the
-    /// same two stamps and the same blame. That figure is gone — the gateway
-    /// measures the demand directly (`fleetTokenRate`), so estimating it was
-    /// estimating something already known — and this one kept the stamps, being
-    /// the same half of the pass and the same two requests.
-    var sustainable: FleetCapacity.SustainableRate?
-    /// When `sustainable` last *arrived*, which is not when it was last asked
-    /// for. Its own stamp because it is on its own schedule: the histories are
-    /// fetched once every `UsageStore.allowanceIntervalSeconds`, not once a
-    /// minute with the rest, so this figure is ordinarily the oldest thing the
-    /// popover holds.
+    /// It replaced an allowance in tokens an hour, which replaced a week's
+    /// estimated load. Both of those needed the same two requests this one needs
+    /// one of, and it kept their stamps and their blame — the half of the pass is
+    /// the same half.
+    var fleetBurn: FleetCapacity.FleetBurn?
+    /// When `fleetBurn` last *arrived*, which is not when it was last asked for.
+    /// Its own stamp because it is on its own schedule: the histories are fetched
+    /// once every `UsageStore.historyIntervalSeconds`, not once a minute with the
+    /// rest, so this figure is ordinarily the oldest thing the popover holds.
     ///
     /// What reads it is the age ceiling both surfaces apply
     /// (`UsagePopoverView.historiesAreFresh`): past two of those intervals the figure
     /// is not drawn at all. It is deliberately not what the footer dates the
     /// screen by — a stamp may only date something on screen, and by the time
     /// this one would be worth a line the figure it belongs to is gone.
-    var allowanceFetchedAt: Date?
+    var historiesFetchedAt: Date?
     /// When the histories were last *asked for*, answered or not. The schedule
     /// is decided on this one and nothing else reads it.
     ///
@@ -590,12 +592,11 @@ struct UsageSnapshot: Sendable {
     /// not move, or a frozen number passes for a fresh one — which is the defect
     /// that took the app's last attempt stamp away, and here it would keep a
     /// figure past the ceiling that is supposed to drop it.
-    var allowanceCheckedAt: Date?
-    /// Why `/gw/usage/<label>/history` — or the `/gw/sessions` call beside it —
-    /// did not answer on the last pass that tried. Same rule as the other two
-    /// halves: the previous `sustainable` stays where it is and only the blame
-    /// changes.
-    var allowanceFailure: String?
+    var historiesCheckedAt: Date?
+    /// Why `/gw/usage/<label>/history` did not answer on the last pass that
+    /// tried. Same rule as the other two halves: the previous `fleetBurn` stays
+    /// where it is and only the blame changes.
+    var historiesFailure: String?
     /// Why `/gw/usage` did not answer on the last pass. The account figures next
     /// to it are the previous ones, kept on purpose: slightly stale beats blank.
     var quotaFailure: String?
@@ -615,10 +616,10 @@ struct UsageSnapshot: Sendable {
                                      hourlyContested: [],
                                      unmatched: .zero,
                                      unmatchedSessions: 0,
-                                     sustainable: nil,
-                                     allowanceFetchedAt: nil,
-                                     allowanceCheckedAt: nil,
-                                     allowanceFailure: nil,
+                                     fleetBurn: nil,
+                                     historiesFetchedAt: nil,
+                                     historiesCheckedAt: nil,
+                                     historiesFailure: nil,
                                      quotaFailure: nil,
                                      sessionsFailure: nil)
 
@@ -643,11 +644,11 @@ struct UsageSnapshot: Sendable {
     /// perfectly fresh quota figure.
     ///
     /// All three halves, because its one reader is `--dump`, and a half that
-    /// fails without saying so there is a half nobody can debug: the allowance
-    /// half's own requests are the only ones the app makes that no surface blames
+    /// fails without saying so there is a half nobody can debug: the histories
+    /// half's own request is the only one the app makes that no surface blames
     /// out loud.
     var failureText: String? {
-        let all = [quotaFailure, sessionsFailure, allowanceFailure].compactMap { $0 }
+        let all = [quotaFailure, sessionsFailure, historiesFailure].compactMap { $0 }
         return all.isEmpty ? nil : all.joined(separator: "; ")
     }
 
