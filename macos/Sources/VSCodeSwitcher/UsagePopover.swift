@@ -556,8 +556,28 @@ final class UsageHistoryModel: ObservableObject {
         schedule()
     }
 
-    /// The accounts changed under an open popover. Nothing to do when they did
-    /// not: this is called from the view on every rebuild.
+    /// The accounts changed under an open popover. Off the view's `onChange` on
+    /// the label list, so it arrives on a change to that list rather than on
+    /// every rebuild.
+    ///
+    /// **What arrives around a shut popover is turned away by `isOpen`, not by
+    /// the comparison beside it.** The hosted view outlives the sitting —
+    /// `NSPopover` keeps its content view controller — so it goes on being handed
+    /// `onChange` with the popover down. Probed with an offscreen `NSPopover`
+    /// over a hosted SwiftUI view, three runs alike (2026-09-06 22:11Z, load
+    /// average 7.8–8.3): a change while shut is delivered 0.5–1.3 ms later with
+    /// `isOpen` false; a reopen delivers nothing at all, the view having already
+    /// seen that value; and a change and a reopen in the same runloop turn are
+    /// delivered **inside** `popover.show(…)`, 1.5–1.7 ms before the line after
+    /// it tells this model it is open. All three are refused on `isOpen`, and no
+    /// arrangement was found in which the second half of the guard fires at all.
+    ///
+    /// It stays because what keeps it out of reach is one line's ordering in
+    /// another file: `AppDelegate` calls `popover.show(…)` first and
+    /// `history.open(labels:)` second, which is what puts that same-turn delivery
+    /// ahead of `isOpen`. Swapped, the change lands after `open` has written
+    /// `self.labels`, carrying a list equal to it, and the comparison is the only
+    /// thing between that and a pass repeating the one `open` has just fired.
     func update(labels: [String]) {
         guard isOpen, labels != self.labels else { return }
         self.labels = labels
@@ -580,6 +600,66 @@ final class UsageHistoryModel: ObservableObject {
     // MARK: Fetching
 
     /// One pass over every account, if the popover is open.
+    ///
+    /// **The two halves land separately, and the rotation lands first.** They are
+    /// two questions on two endpoints, and one of them is small: on the probes
+    /// below `/gw/status` was 6210 bytes and answered on its own, against 168 and
+    /// 165 KiB of history across the three accounts — twenty-seven times its size
+    /// (27.7 and 27.3), and what carries the argument is that ratio rather than
+    /// either number, since both walk with the fleet's own reasons and its
+    /// history's depth.
+    /// Awaited together — which is how this was written until
+    /// 2026-09-06 — every checkbox stayed clear and inert and the note beside a
+    /// switched-off account did not exist until the *last* history came back, and
+    /// then the boxes ticked and the note appeared under the pointer.
+    ///
+    /// Probed with plain GETs, ten day passes issued exactly as this client issues
+    /// them against ten bare `/gw/status` calls in the same run, load average read
+    /// inside the run because a range without one belongs to nobody. Idle machine,
+    /// 2026-09-06 21:07Z, load average 4.05: passes 0.052–0.251 s (median 0.063),
+    /// bare status 0.014–0.018 s (median 0.017), bodies 6210 of status against
+    /// 44 629 / 17 128 / 110 346 of history, 178 313 in all. Under a build twelve
+    /// minutes earlier, load average 8.8: passes 0.057–0.153 s (median 0.089),
+    /// bare status 0.016–0.064 s (median 0.025), 175 633 bytes in all. Both totals
+    /// are **in all, status included** — the idle one adds up to that from its own
+    /// three histories, and the paragraph above wants the histories, which are the
+    /// difference: 172 103 and 169 423 bytes, 168 and 165 KiB. Spelled out because
+    /// the shorter line said only "6210 against 175 633" and was read once as
+    /// status against histories, which would make that half 171.5 KiB and 28.3
+    /// times the status rather than 165 and 27.3.
+    ///
+    /// What load does to the two is **widen the gap, not the ratio**: the pass
+    /// stands 0.046 s clear of the status when the machine is idle and 0.064 s
+    /// clear under the build, while the ratio of the medians barely moves and
+    /// moves the *wrong* way for a claim about them parting — 3.7× idle, 3.6×
+    /// busy, which is two quantities scaling all but proportionally. It is the
+    /// absolute distance that is waited out, and the single 0.251 s pass on the
+    /// idle machine is the point as much as any median is: the rotation waited on
+    /// the slowest of three histories, and it does not need a byte of them, nor
+    /// any of them a byte of it.
+    ///
+    /// Both halves go out at once, as before — `async let` starts them together —
+    /// and what changed is only where each is awaited. Ordering is untouched by
+    /// that: `applyRotation` weighs a pass by `Rotation.askedAt`, taken where the
+    /// request goes out and not where it lands, so a rotation applied earlier is
+    /// weighed exactly as it was when it was applied later.
+    ///
+    /// **A pass cancelled before its rotation landed applies nothing**, and it is
+    /// the same guard doing it, now asked twice. `fetch` cancels the task in
+    /// flight before starting the next, and both this method and the resumption of
+    /// that task are main-actor work, so they cannot interleave: a pass either
+    /// applied its rotation before the cancelling `fetch` ran, or it wakes
+    /// cancelled and applies nothing.
+    ///
+    /// Which is weaker than what stood here before the halves were split, and the
+    /// heading says so on purpose: until then a cancelled pass applied *neither*
+    /// half, because it had one place to apply them and the guard stood in front
+    /// of it. Now a pass whose rotation landed in the window before the cancel did
+    /// leaves that half behind — legitimately, since at the moment it wrote, it was
+    /// the newest news anybody had. The promise is about the halves a cancelled
+    /// pass has **not** applied yet, and both guards are held by
+    /// `testAPassCancelledBeforeItsRotationLandedAppliesNeitherHalf`, one assertion
+    /// each: dropping either copy reddens it and nothing else.
     func fetch() {
         guard isOpen else { return }
         let client = client
@@ -591,22 +671,33 @@ final class UsageHistoryModel: ObservableObject {
         let since = Date().addingTimeInterval(-period.seconds)
         fetchTask?.cancel()
         fetchTask = Task { [weak self] in
-            // `load` is `nonisolated`, so the requests do not inherit the main
-            // actor and only the finished value hops back — the same rule, and
+            // Both are `nonisolated`, so the requests do not inherit the main
+            // actor and only the finished values hop back — the same rule, and
             // for the same reason, as `UsageStore.poll` (SPEC §6).
-            let loaded = await UsageHistoryModel.load(client: client, labels: labels, since: since)
+            async let rotation = UsageHistoryModel.fetchRotation(client: client)
+            async let histories = UsageHistoryModel.load(client: client,
+                                                         labels: labels,
+                                                         since: since)
+            let answered = await rotation
+            if let self, !Task.isCancelled { self.applyRotation(answered) }
+            let loaded = await histories
             guard let self, !Task.isCancelled else { return }
             self.apply(loaded, period: period)
         }
     }
 
-    /// What one pass produced. A `Sendable` value so it can cross back to the
-    /// main actor whole.
+    /// What the history half of one pass produced. A `Sendable` value so it can
+    /// cross back to the main actor whole.
+    ///
+    /// The rotation is **not** in here, and that is the whole of what makes it
+    /// land early: a value carries one arrival, and these two arrive apart. Its
+    /// failure is kept apart for the same reason it always was — `failure` here
+    /// is a list of accounts whose *history* is missing, and a reader who cannot
+    /// tell the chart's silence from the rotation's has been told nothing.
     struct Loaded: Sendable {
         var series: [AccountSeries]
         var fleet: FleetSeries
         var failure: String?
-        var rotation: Rotation
     }
 
     /// The rotation half of one pass: what `/gw/status` said, what it cost the
@@ -644,15 +735,15 @@ final class UsageHistoryModel: ObservableObject {
     /// redraw of an open popover, which is once every tick for as long as it is
     /// up.
     ///
-    /// The rotation rides **beside** the group rather than inside it, and that is
-    /// a fact about the group's type: its element is one account's history, so a
-    /// fifth member answering something else would have to be dressed as one.
-    /// `async let` costs the same in wall time — one more request in parallel with
-    /// the rest — and keeps the two questions apart, blame and all.
+    /// The rotation is asked for **beside** this, from `fetch`, and not from
+    /// inside it. Two reasons, and the second is the one that moved it: the
+    /// group's element is one account's history, so a member answering something
+    /// else would have to be dressed as one — and the rotation answers in a
+    /// fraction of what the histories take, so a caller that has it in hand can
+    /// put the checkboxes on screen while these are still in the air (`fetch`).
     nonisolated static func load(client: UsageClient,
                                  labels: [String],
                                  since: Date) async -> Loaded {
-        async let rotation = fetchRotation(client: client)
         struct Fetched: Sendable {
             var label: String
             var points: [HistoryPoint]
@@ -695,8 +786,7 @@ final class UsageHistoryModel: ObservableObject {
         failures.sort()
         return Loaded(series: answered.map { AccountSeries.make(label: $0.label, points: $0.points) },
                       fleet: FleetSeries.make(from: answered.map(\.points)),
-                      failure: failures.isEmpty ? nil : failures.joined(separator: "; "),
-                      rotation: await rotation)
+                      failure: failures.isEmpty ? nil : failures.joined(separator: "; "))
     }
 
     /// One `/gw/status`, as a state or as a reason there is none.
@@ -704,7 +794,14 @@ final class UsageHistoryModel: ObservableObject {
     /// The failure is turned into text here, off the main actor, for the reason
     /// every other failure on this path is: an `Error` is not `Sendable` and the
     /// only thing anybody does with this one is print it.
-    private nonisolated static func fetchRotation(client: UsageClient) async -> Rotation {
+    ///
+    /// Not private, for `switchAccount`'s reason: `nonisolated` here is
+    /// load-bearing and nothing warns when it is lost. `fetch` starts this from a
+    /// `Task` inside a `@MainActor` method, so that task inherits the main actor
+    /// and only this declaration keeps the request off it — and a test can only
+    /// ask that question from a detached task, and only if it can reach this
+    /// (`testLoadDoesNotNeedTheMainThread`).
+    nonisolated static func fetchRotation(client: UsageClient) async -> Rotation {
         // Read before the request goes out, and that is the whole of its job:
         // `applyRotation` weighs this pass against answers that landed while it
         // was in the air, so the moment it needs is the one it stopped knowing
@@ -864,8 +961,17 @@ final class UsageHistoryModel: ObservableObject {
             seriesPeriod = nil
             fetchedAt = nil
         }
-        applyRotation(loaded.rotation)
         failure = loaded.failure
+        // The attempt's clock, and the attempt is the whole pass: the rotation
+        // half landed earlier (`fetch`), and an attempt is over when the pass is,
+        // not when its cheap half is. Nothing about appearances rides on this one
+        // — `checkedAt` is drawn nowhere, its single reader is `tick`, and a
+        // gateway that answers `/gw/status` and nothing else moves it either way,
+        // just later by at most `UsageClient.timeoutSeconds` against a
+        // `refreshSeconds` of 60. The stamp that may not be taken from the cheap
+        // half is `fetchedAt` above, and the assertion holding that is
+        // `testTheRotationIsDrawnBeforeTheHistoriesHaveLanded`'s "the pass dated
+        // itself from its cheap half".
         checkedAt = moment
         now = moment
     }
@@ -1649,32 +1755,7 @@ struct UsagePopoverView: View {
             } else {
                 let labels = usage.snapshot.accounts.map(\.label)
                 ForEach(usage.snapshot.accounts, id: \.label) { account in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 5) {
-                            // This account's line on the chart below, which is
-                            // why the chart has no legend of its own: a row of
-                            // swatches under the plot said the same thing twice
-                            // as far from the names as it could be put.
-                            Circle()
-                                .fill(Self.accountColor(for: account.label, in: labels))
-                                .frame(width: Self.accountDotSize, height: Self.accountDotSize)
-                            Text(account.label)
-                                .font(.system(size: 12, weight: .semibold))
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer(minLength: 4)
-                            rotationSwitch(for: account.label)
-                        }
-                        if let state = history.switches?[account.label], state.disabled {
-                            Text(Self.switchNote(state, now: history.now))
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                        windowRow("5h", account.fiveHour)
-                        windowRow("7d", account.sevenDay)
-                    }
+                    accountRow(account, in: labels)
                 }
             }
             // Once for the list rather than once per row: all three lines are
@@ -1707,6 +1788,68 @@ struct UsagePopoverView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    /// One account: its name and switch on the first line, then its two quota
+    /// windows.
+    ///
+    /// **The note about a switched-off account rides on the name line and costs
+    /// no row of its own.** It had one until 2026-09-06, and a `Text` between the
+    /// name and the windows moved the whole list down by a line the moment
+    /// somebody switched an account off — under the pointer, since the state it
+    /// draws is the one a click here produces. The name line has the room: the
+    /// labels of a fleet are short (`acc2`, `acc3`, `main`) and the width between
+    /// them and the checkbox was a bare `Spacer`.
+    ///
+    /// The name is given the priority and the note takes what is left, because the
+    /// name is the row's identity and the note is a detail about it — a reason can
+    /// run to 62 characters (`operator: 22h, switched over from the temporary
+    /// quota cooldown`, standing on the live gateway on 2026-09-06 and drawn
+    /// nowhere: it is `acc3`'s, and `acc3` is in the rotation, so that row shows no
+    /// note at all — a `disabled_reason` outlives the switch it was written for)
+    /// and a row whose name was eaten by one
+    /// no longer says which account it is about. Truncated rather than wrapped for
+    /// the same reason the line was moved: a second line is the defect. What the
+    /// truncation costs is given back in the tooltip, which carries the note whole
+    /// — the same place `switchHelp` puts what the checkbox cannot draw.
+    ///
+    /// `layoutPriority` earns nothing at a fleet's own labels and is not there for
+    /// them: dot and `acc1` are 37.5 pt of a 292 pt line, so nothing competes, and
+    /// taking the modifier off reddened no test in a suite of 674 until one asked a
+    /// long label. The label is whatever the gateway calls an account, which is
+    /// where the long one comes from.
+    ///
+    /// Not private, so a test can render one row: what this arrangement promises is
+    /// a height, and a height is only observable on the thing that has one.
+    @ViewBuilder func accountRow(_ account: AccountUsage, in labels: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                // This account's line on the chart below, which is why the chart
+                // has no legend of its own: a row of swatches under the plot said
+                // the same thing twice as far from the names as it could be put.
+                Circle()
+                    .fill(Self.accountColor(for: account.label, in: labels))
+                    .frame(width: Self.accountDotSize, height: Self.accountDotSize)
+                Text(account.label)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .layoutPriority(1)
+                if let state = history.switches?[account.label], state.disabled {
+                    let note = Self.switchNote(state, now: history.now)
+                    Text(note)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(note)
+                }
+                Spacer(minLength: 4)
+                rotationSwitch(for: account.label)
+            }
+            windowRow("5h", account.fiveHour)
+            windowRow("7d", account.sevenDay)
         }
     }
 
@@ -1791,7 +1934,9 @@ struct UsagePopoverView: View {
             : "Take this account out of the gateway rotation"
     }
 
-    /// The line under a switched-off account.
+    /// The note beside a switched-off account's name — on that line and not
+    /// under it, so that switching an account off costs the list no row
+    /// (`accountRow`).
     ///
     /// The moment is drawn when the gateway named one, because an account
     /// disabled for an hour from the command line is not the same state as one
