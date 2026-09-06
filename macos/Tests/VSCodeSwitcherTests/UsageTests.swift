@@ -88,6 +88,379 @@ enum UsageFixtures {
      "points": [{"ts": 1786700123, "util_5h": null, "util_7d": 99.0}]}
     """
 
+    /// `GET /gw/status` at 2026-09-06 03:08:15 local (`now: 1788653295`, which is
+    /// 00:08:15Z), cut down and not otherwise touched.
+    ///
+    /// Cut down means two things and nothing else: five of the body's eight
+    /// top-level blocks are gone, and a row carries only fields that were written
+    /// down for it **at that moment** — the four this app reads, plus whichever
+    /// neighbours were recorded. Nothing here is invented, and where a value for
+    /// that moment is not known the field is absent rather than filled in. Hence
+    /// the rows being of three different widths: `acc2` was taken whole, `acc3`
+    /// kept its switch and lost its quota block, and `main` was written down as
+    /// the four fields plus `util_5h`.
+    ///
+    /// The five are named rather than counted, so the next reader can check the
+    /// claim without a live gateway: `config`, `counters`, `counters_total`,
+    /// `session_bindings` and `statistics` are cut, and `accounts`, `now` and
+    /// `uptime_seconds` are kept. (Live `GET /gw/status`, re-read 2026-09-06.)
+    /// The proxy's host name went too — internal host names do not go in this
+    /// repository — and it is not one of the five: `proxy` is a field of the
+    /// **account row**, alongside `proxy_auth`, and it was dropped out of `acc2`,
+    /// the one row taken whole.
+    ///
+    /// The utilisations that are here are here deliberately, at their live values,
+    /// as the trap of §2.7 written into the fixture: `acc2` is at 0.72 of its
+    /// five-hour quota and `main` at 1.0 of its own, and `GET
+    /// /gw/usage/<label>/history` writes that same quantity, under that same key
+    /// name `util_5h`, as `72.0` and `100.0`. One name, two units — that is the
+    /// dangerous half of §2.7, and it is why these values sit in the fixture rather
+    /// than being rounded off. Nothing decodes them, and a test below is what says
+    /// so. `acc2`'s pair is **bracketed by** the gateway's own
+    /// history, not measured in it: the series carries no point at `1788653295`
+    /// at all, and the readings 41 s before and 19 s after (`1788653254` and
+    /// `1788653314`) both say 72.0 and 3.0. What makes that bracket worth trusting
+    /// rather than a coincidence of two neighbours is that the series had moved 70 s
+    /// earlier — the poll at `1788653225` reads 71.0 and **4.0** — so a pair that
+    /// holds on both sides of the moment is the series standing still across it and
+    /// not a series that never moves. (Re-read from
+    /// `/gw/usage/acc2/history?since=1788600000` on 2026-09-06.)
+    ///
+    /// `acc3`'s deadline and reason belong to this moment as much as the rest: the
+    /// switch was thrown at 2026-09-05 19:58:55 local for 22 h, seven hours before
+    /// this probe, so `1788706735` (2026-09-06 17:58:55 local) was already what the
+    /// gateway was sending, and both fields were read back unchanged from a live
+    /// `GET /gw/status` at 05:39:36 the same morning. Its `util_*`, `reset_*` and
+    /// `unified_status` were not recorded at 03:08:15 and so are not written here.
+    ///
+    /// Three accounts, and **`main` is the reason this fixture exists**: switched
+    /// on (`disabled: false`) and still not routable (`eligible: false`), because
+    /// the gateway folds a quota cool-down into the second flag and not the first —
+    /// `util_5h: 1.0` against its `max_util_5h = 0.99` is that cool-down, sitting
+    /// in the row. Both of those are fractions and both are this endpoint's: the
+    /// ceiling comes from the same body's `config` block, one of the five cut away
+    /// above, and it read 0.99 again live on 2026-09-06. Nothing here may be read
+    /// against a percentage — the account history spells the same quantity that way
+    /// (`util_5h: 26.0` in the `history` fixture), and mixing the two is a
+    /// hundredfold slip written down as a measurement. It is the only shape in
+    /// which the two flags disagree, and a
+    /// fixture where they never disagree cannot tell a reader of one from a reader
+    /// of the other — which is the whole of what the checkbox on this path gets
+    /// right.
+    ///
+    /// **It may not reproduce against a live gateway.** A five-hour window empties
+    /// by itself, and later the same day `main` was the one account the gateway
+    /// was routing to; a fleet reading `disabled == !eligible` in every row is the
+    /// ordinary case and this one is the occasional one. Anybody re-taking this
+    /// body has to keep a row of this shape whether the gateway is offering one
+    /// that day or not.
+    ///
+    /// The fourth state — switched off with no deadline, the only kind this app's
+    /// own switch can produce — is in `switchAnswer` below.
+    static let status = """
+    {"uptime_seconds": 176312.4, "now": 1788653295,
+     "accounts": [
+       {"label": "acc2", "auth_state": "ok", "eligible": true,
+        "util_5h": 0.72, "util_7d": 0.03, "reset_5h": 1788655800, "reset_7d": 1789246800,
+        "unified_status": "allowed",
+        "disabled": false, "disabled_until": null, "disabled_reason": ""},
+       {"label": "acc3", "eligible": false,
+        "disabled": true, "disabled_until": 1788706735,
+        "disabled_reason": "operator: 22h, switched over from the temporary quota cooldown"},
+       {"label": "main", "eligible": false, "util_5h": 1.0,
+        "disabled": false, "disabled_until": null, "disabled_reason": ""}
+     ]}
+    """
+
+    /// The same endpoint from a gateway that names an account and says nothing
+    /// about its switch. There is no reading of that hole which draws a checkbox
+    /// honestly, so the body is refused whole — see the test.
+    static let statusWithoutTheSwitch = """
+    {"accounts": [{"label": "acc2", "eligible": true, "disabled_until": null}]}
+    """
+
+    /// And the mirror of it: every switch reported, and nothing said about routing.
+    ///
+    /// The hole this one has is the other field of the same row, and the reading
+    /// that used to be given it — a missing `eligible` is an account there is no
+    /// route to — was safe only while the count could take the fleet line *down*
+    /// and never put it up. Since the count became the verdict it is the loudest
+    /// statement this surface makes, and `?? false` would have this body assert it
+    /// out of a hole: two accounts nobody switched off, both reported, and an
+    /// orange line saying every client request is now a 429. Refused whole instead
+    /// — see the tests, one here and one on the model.
+    static let statusWithoutTheRoutingFlag = """
+    {"accounts": [
+       {"label": "acc2", "disabled": false, "disabled_until": null, "disabled_reason": ""},
+       {"label": "main", "disabled": false, "disabled_until": null, "disabled_reason": ""}
+     ]}
+    """
+
+    /// And the same endpoint for a fleet with nowhere left to route, in which
+    /// **nobody has switched anything off**.
+    ///
+    /// Built rather than captured, and deliberately the shape that costs the
+    /// warning its precision: `eligible` is `is_eligible`, which folds the
+    /// five-hour window in beside the operator's switch, so a fleet whose windows
+    /// have all filled reads exactly like this — every `disabled: false`, every
+    /// `eligible: false`, and every client request answered 429 all the same. Not
+    /// a hypothetical shape: `main` was already half of it at 03:08:15 local on
+    /// 2026-09-06 (00:08:15Z), sitting at `util_5h: 1.0` in `status` above against
+    /// the `max_util_5h = 0.99` of that same body's `config` block — two fractions
+    /// of one endpoint, never a fraction against the history's percentage. This is
+    /// that row with the others joining it.
+    static let statusWithNowhereToRoute = """
+    {"now": 1788653295,
+     "accounts": [
+       {"label": "acc2", "eligible": false, "util_5h": 1.0,
+        "disabled": false, "disabled_until": null, "disabled_reason": ""},
+       {"label": "main", "eligible": false, "util_5h": 1.0,
+        "disabled": false, "disabled_until": null, "disabled_reason": ""}
+     ]}
+    """
+
+    /// The fleet `switchAnswer` and `switchAnswerWithWarning` were derived against,
+    /// as `/gw/status` would have reported it: `acc3` still parked from the evening
+    /// before, `acc2` and `main` both routable.
+    ///
+    /// It is not `status`, and that difference is what makes the scene reachable at
+    /// all. There `main` is still inside its five-hour cool-down, so `acc2` is the
+    /// one account the gateway routes to and a `disable acc2` would answer
+    /// `eligible_accounts: 0` with the sentence rather than `switchAnswer`'s 1.
+    /// Taking `acc2` out of *this* fleet leaves 1, and taking `main` out after it
+    /// leaves 0 — which is the pair of answers the ordering tests are built on, and
+    /// a scene the gateway could not have produced proves nothing about the
+    /// gateway's answers.
+    ///
+    /// **Cut like `status` above**, and the cut is worth stating: the fields this
+    /// app reads, plus the utilisations that make a routing flag legible where the
+    /// switch alone does not explain it. `acc3` needs none — it is `eligible: false`
+    /// because somebody switched it off — while the other two are routable at
+    /// utilisations well under the `max_util_5h = 0.99` of that endpoint's own
+    /// `config` block. A live body is not cut this way: it writes `util_5h` and
+    /// `util_7d` on **every** row unconditionally, switched-off accounts included
+    /// (live `GET /gw/status`, 2026-09-06 — `acc2` sat at `disabled: true` with
+    /// `util_5h: 0.0` beside `util_7d: 0.13`).
+    static let statusWithTwoRoutableAccounts = """
+    {"now": 1788653295,
+     "accounts": [
+       {"label": "acc2", "eligible": true, "util_5h": 0.72,
+        "disabled": false, "disabled_until": null, "disabled_reason": ""},
+       {"label": "acc3", "eligible": false, "disabled": true,
+        "disabled_until": 1788706735, "disabled_reason": "operator: 22h"},
+       {"label": "main", "eligible": true, "util_5h": 0.11,
+        "disabled": false, "disabled_until": null, "disabled_reason": ""}
+     ]}
+    """
+
+    /// The same fleet once both of its routable accounts have been switched off:
+    /// what `/gw/status` answers a pass asked after `switchAnswer` and
+    /// `switchAnswerWithWarning` have both landed.
+    ///
+    /// A pass reads the accounts table the two POSTs have just written to, so the
+    /// body it gets back carries their switches; `/gw/status` has no memory of what
+    /// the fleet looked like before them. Serving `statusWithTwoRoutableAccounts` to
+    /// a pass asked at that moment is a body the gateway could not have sent, and a
+    /// test reading a switch off such a pass is reading the fixture rather than the
+    /// gateway.
+    ///
+    /// **The two switched rows are exactly what this app's own click produces.**
+    /// `disableAccount` sends no body, `_parse_disable_body` reads a missing one as
+    /// `DISABLED_NO_DEADLINE` with an empty reason, and the account row publishes
+    /// `disabled_until` as the raw column only while it is positive — so `null`
+    /// beside `disabled: true` and nothing to say in `disabled_reason` (`claude_gw`
+    /// at `30dfb1b`, the symbols being `Gateway._parse_disable_body` and the account
+    /// row of `Gateway._status_payload`). That is `switchAnswer`'s own shape, and
+    /// deliberately: the two endpoints answer in one shape.
+    ///
+    /// **And the count agrees with the answers that got it here.** All three rows
+    /// are `eligible: false`, so this body counts 0 routable — which is what
+    /// `switchAnswerWithWarning` said when `main` went out, the gateway computing
+    /// both with the same `is_eligible`. `acc3` carries its parking over from
+    /// `statusWithTwoRoutableAccounts` untouched.
+    ///
+    /// Cut like the bodies above, and with no utilisation in it at all: every
+    /// `eligible: false` here is explained by that row's own switch, which is the
+    /// same reason `statusWithASwitchThrownElsewhere` below carries none.
+    static let statusWithBothRoutableAccountsSwitchedOff = """
+    {"now": 1788653295,
+     "accounts": [
+       {"label": "acc2", "eligible": false, "disabled": true,
+        "disabled_until": null, "disabled_reason": ""},
+       {"label": "acc3", "eligible": false, "disabled": true,
+        "disabled_until": 1788706735, "disabled_reason": "operator: 22h"},
+       {"label": "main", "eligible": false, "disabled": true,
+        "disabled_until": null, "disabled_reason": ""}
+     ]}
+    """
+
+    /// `/gw/status` for the sitting after `status`'s 22-hour parking of `acc3` has
+    /// run out by itself — the gateway putting an account back with nobody
+    /// clicking anything, which is the state `disabled_until` exists to describe.
+    ///
+    /// **So `acc3` keeps both fields it was parked with**, and blanking them was
+    /// this fixture claiming a body the gateway does not send. `/gw/status`
+    /// publishes `disabled_until` raw — `a.disabled_until if a.disabled_until > 0
+    /// else None` — and `disabled_reason` raw beside it, with its own comment saying
+    /// `null` is reserved for the two cases where there is no deadline to publish
+    /// (`claude_gw` at `30dfb1b`, `src/gateway.py:1702`–`:1703`, the symbol being
+    /// `Gateway._status_payload`'s account row and the numbers hints). Only
+    /// `disabled` is a verdict — `is_disabled()`, which an expired deadline makes
+    /// false — and the reason is cleared by nothing but an explicit
+    /// `handle_account_enable` (`:2145`). An expiry nobody clicked therefore reads
+    /// `disabled: false` with the past stamp and the operator's words still sitting
+    /// there, and those two are the only record that the parking ever happened.
+    /// Nothing on screen moves either way, `switchNote` drawing only under
+    /// `state.disabled`; what moves is what the fixture is allowed to prove.
+    ///
+    /// `main` carries its cool-down over from `status` (`util_5h: 1.0` against the
+    /// same endpoint's `max_util_5h = 0.99`), so this body keeps a row saying why a
+    /// `disabled: false` account can still be `eligible: false`. Cut the same way as
+    /// the bodies above and with the same caveat: a live body carries `util_5h` and
+    /// `util_7d` on every row, whatever its switch says. `now` is cut too — this
+    /// type reads no such key — but the sitting is any moment past `acc3`'s
+    /// `1788706735`, which is what makes the deadline a past one.
+    static let statusWithTheParkingExpired = """
+    {"accounts": [
+      {"label": "acc2", "eligible": true, "disabled": false,
+       "disabled_until": null, "disabled_reason": ""},
+      {"label": "acc3", "eligible": true, "disabled": false,
+       "disabled_until": 1788706735,
+       "disabled_reason": "operator: 22h, switched over from the temporary quota cooldown"},
+      {"label": "main", "eligible": false, "util_5h": 1.0, "disabled": false,
+       "disabled_until": null, "disabled_reason": ""}
+    ]}
+    """
+
+    /// `/gw/status` reporting switches this app did not throw: `acc2` taken out
+    /// from somewhere else, `acc3` put back.
+    ///
+    /// The answer a *second* pass gives where the first got `status`, so that a pass
+    /// which left a row alone and a pass which rewrote it with what was already
+    /// there draw two different pictures. Both rows moved, and in opposite
+    /// directions, because a test of "this label is held and that one is not" needs
+    /// each to be able to fail on its own.
+    ///
+    /// Two accounts rather than three: the third would say nothing here that these
+    /// two do not. Cut like the bodies above, with the same caveat about a live
+    /// one — and no utilisation in it at all, both flags here being explained by
+    /// their own switch.
+    static let statusWithASwitchThrownElsewhere = """
+    {"accounts": [
+      {"label": "acc2", "eligible": false, "disabled": true,
+       "disabled_until": null, "disabled_reason": "somebody else"},
+      {"label": "acc3", "eligible": true, "disabled": false,
+       "disabled_until": null, "disabled_reason": ""}
+    ]}
+    """
+
+    /// `POST /gw/accounts/acc2/disable`. **Built to the contract, not captured
+    /// from the wire** — no live `disable` was ever recorded for this repository,
+    /// and the field list was checked against a live `enable`, which answers with
+    /// the same shape.
+    ///
+    /// So the numbers have to satisfy the contract rather than merely look
+    /// plausible, and this one did not: it said `eligible_accounts: 2` for a fleet
+    /// of three in which `acc3` was already switched off the evening before, so
+    /// taking `acc2` out could not leave two. One left, and `main` is the one —
+    /// **at a moment later in the same day than `status` above**, which is the half
+    /// of the derivation that has to be said out loud. At 00:08:15Z `main` was in
+    /// its five-hour cool-down (`eligible: false`, and
+    /// `testAnAccountTheGatewayWillNotRouteToIsStillTheOperatorsToSwitch` reads the
+    /// fleet's count as 1, that one being `acc2`), so this very switch would then
+    /// have answered `eligible_accounts: 0` **with** the sentence. The window
+    /// emptied by itself — `status`'s own note says `main` was later the one account
+    /// the gateway was routing to — and this body belongs to that later fleet: `acc3`
+    /// still off, `main` back, `acc2` being taken out here.
+    ///
+    /// The body is flat: the account's new state and the fleet's cost stand side
+    /// by side, with no object around either. And the pairing is the contract's,
+    /// not this fixture's taste — `Gateway._switch_payload` writes the warning as
+    /// `None if eligible else "claude-gw: …"`, so a count above zero comes with
+    /// `warning: null` and never with a sentence.
+    static let switchAnswer = """
+    {"label":"acc2","disabled":true,"disabled_until":null,"disabled_reason":"",\
+    "eligible":false,"eligible_accounts":1,"warning":null}
+    """
+
+    /// And the same endpoint taking the last usable account out: the other half
+    /// of that pairing, `eligible_accounts: 0` with the sentence.
+    ///
+    /// Built the same way, with one part of it exact: the sentence is the
+    /// gateway's own, taken from `Gateway._switch_payload` (`src/gateway.py:1986`)
+    /// and compared character for character — 127 of them — with the two source
+    /// lines it is joined from. It is quoted in production code as
+    /// `UsageHistoryModel.noRouteWarning`'s reason for existing, so it is the one
+    /// string here nobody may tidy.
+    static let switchAnswerWithWarning = """
+    {"label":"main","disabled":true,"disabled_until":null,"disabled_reason":"",\
+    "eligible":false,"eligible_accounts":0,\
+    "warning":"claude-gw: no usable account is left in the fleet - every client request \
+    will be answered with 429 until one of them comes back"}
+    """
+
+    /// And a switch answer with the fleet's cost missing from it, which is refused.
+    ///
+    /// `warning: null` is kept, because it is the half that is legitimate: the
+    /// gateway sends `null` there on purpose whenever it has somewhere left to
+    /// route, so a hole in the count sits beside a value that looks like the quiet
+    /// case. `?? 0` read exactly this body as "the fleet has nowhere left to go"
+    /// and raised the orange line in the second the operator is looking at the
+    /// checkbox they just pressed — a false alarm at the worst moment there is for
+    /// one. There is nothing to blame the fleet for here; there is a click to
+    /// blame, which is what the model does with it.
+    static let switchAnswerWithoutTheCount = """
+    {"label":"acc2","disabled":true,"disabled_until":null,"disabled_reason":"",\
+    "eligible":false,"warning":null}
+    """
+
+    /// A switch answer that **contradicts the request**: a `disable` answered with
+    /// `disabled: false`.
+    ///
+    /// Written for `testTheStateAfterASwitchIsTheOneTheGatewaySentBack`, which is
+    /// where the reason for a body of this shape is; it lives here with the other
+    /// switch answers so that
+    /// `testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent` can reach it.
+    ///
+    /// The contradiction is in `disabled` and nowhere else. The count is the one
+    /// the contract gives for the fleet that test's stub reports — it answers
+    /// `status`, in which `acc2` is the single routable account, and this body
+    /// leaves `acc2` routable — so it is 1, with `warning: null` beside it as the
+    /// pairing requires. A count of 3 stood here and was a second contradiction
+    /// nobody meant, of the fleet rather than of the click.
+    static let switchAnswerContradictingTheClick = """
+    {"label":"acc2","disabled":false,"disabled_until":null,"disabled_reason":"pinned",\
+    "eligible":true,"eligible_accounts":1,"warning":null}
+    """
+
+    /// An `enable` that gives the fleet an account back: count 1, and therefore no
+    /// sentence.
+    ///
+    /// `switchAnswerWithWarning` sent the other way round, and the second half of
+    /// `testAFleetWithNothingLeftInItSaysSoAndStopsSayingIt`: the line the first
+    /// half raised has to come down on this count.
+    static let switchAnswerPuttingTheAccountBack = """
+    {"label":"main","disabled":false,"disabled_until":null,"disabled_reason":"",\
+    "eligible":true,"eligible_accounts":1,"warning":null}
+    """
+
+    /// `POST /gw/accounts/acc3/enable` against the fleet of `status` above: the
+    /// account switched off the evening before is put back.
+    ///
+    /// Built to that fleet rather than to taste, which is what fixes the count.
+    /// In `status` the gateway routes to `acc2` alone — `acc3` is switched off and
+    /// `main` is in its five-hour cool-down — so putting `acc3` back makes two,
+    /// and a count above zero comes with `warning: null`.
+    ///
+    /// Its own account, for the reason every one of these has one: the popover
+    /// keys the rotation by the label that was clicked, so a body answering for
+    /// somebody else would be invisible to the row and to every assertion on it,
+    /// while being a body the gateway could not have sent for that click.
+    static let switchAnswerPuttingAcc3Back = """
+    {"label":"acc3","disabled":false,"disabled_until":null,"disabled_reason":"",\
+    "eligible":true,"eligible_accounts":2,"warning":null}
+    """
+
     static func decode<Body: Decodable>(_ text: String, as type: Body.Type) throws -> Body {
         try JSONDecoder().decode(type, from: Data(text.utf8))
     }
@@ -288,6 +661,297 @@ final class UsageDecodingTests: XCTestCase {
         let history = try UsageFixtures.decode(UsageFixtures.history, as: HistorySeries.self)
         XCTAssertNotNil(history.points.first?.fiveHour, "util_5h")
     }
+
+    // MARK: - The rotation
+
+    /// `accounts` in `/gw/status` is a **list**, and every entry carries the
+    /// label it is about — where the same key in `/gw/usage` is a dictionary the
+    /// label is the key of. Two endpoints, two shapes, one field name, so the
+    /// shape is asked for here rather than assumed.
+    ///
+    /// And what says an account is out of the rotation is `disabled` alone.
+    /// `disabled_until` is `null` for two states that are nothing alike — in the
+    /// rotation, and out of it with nobody's deadline on it — so a reader that
+    /// takes the deadline for the verdict gets `acc2` and `acc3` the same way up.
+    func testTheRotationIsAListOfAccountsEachNamingItself() throws {
+        let status = try UsageFixtures.decode(UsageFixtures.status, as: GatewayStatus.self)
+        XCTAssertEqual(status.accounts.map(\.label), ["acc2", "acc3", "main"])
+        XCTAssertEqual(Set(status.byLabel.keys), ["acc2", "acc3", "main"])
+
+        let inRotation = try XCTUnwrap(status.byLabel["acc2"])
+        XCTAssertFalse(inRotation.disabled)
+        XCTAssertNil(inRotation.disabledUntil)
+        XCTAssertEqual(inRotation.disabledReason, "")
+
+        let untilAMoment = try XCTUnwrap(status.byLabel["acc3"])
+        XCTAssertTrue(untilAMoment.disabled)
+        XCTAssertEqual(untilAMoment.disabledUntil, Date(timeIntervalSince1970: 1_788_706_735))
+        XCTAssertEqual(untilAMoment.disabledReason,
+                       "operator: 22h, switched over from the temporary quota cooldown")
+    }
+
+    /// An account nobody switched off, that the gateway will still not route to,
+    /// is **in the rotation** and its box is ticked.
+    ///
+    /// The property, not the account: a body in which `disabled` and `eligible`
+    /// disagree has to come out on the side of `disabled`, because that is the one
+    /// the operator set and the one the checkbox offers to change. `eligible` is
+    /// written by `is_eligible` (`src/accounts.py:258`), which is
+    /// `is_eligible_apart_from_5h(...) AND util_5h < max_5h` — the five-hour window
+    /// folded in beside the operator's own switch, the quota cool-down and the
+    /// token backoff — so a box drawn from it clears itself when a window fills and
+    /// then sends an `enable` that changes nothing.
+    ///
+    /// The fixture's `main` is the live shape of that, and it is the only row in
+    /// which the two flags differ: with every row agreeing, a reader of `eligible`
+    /// and a reader of `disabled` are indistinguishable and this whole decision is
+    /// unguarded. See the fixture's own note on re-taking it.
+    func testAnAccountTheGatewayWillNotRouteToIsStillTheOperatorsToSwitch() throws {
+        let status = try UsageFixtures.decode(UsageFixtures.status, as: GatewayStatus.self)
+        let unroutable = try XCTUnwrap(status.byLabel["main"])
+        XCTAssertFalse(unroutable.disabled, """
+            nobody switched this account off — the gateway simply has nowhere to route it, \
+            which is `eligible: false` beside `disabled: false`
+            """)
+        XCTAssertTrue(UsagePopoverView.switchAppearance(unroutable, busy: false).ticked,
+                      "the box follows the operator's switch, not the gateway's routing")
+        XCTAssertNil(unroutable.disabledUntil)
+        XCTAssertEqual(unroutable.disabledReason, "")
+
+        // And the flag that was not allowed near the box is counted for the fleet:
+        // acc2 alone, with acc3 switched off and main unroutable.
+        XCTAssertEqual(status.routableAccounts, 1)
+    }
+
+    /// A body that names an account and says nothing about its switch is refused
+    /// whole, and takes the rest of the rotation with it.
+    ///
+    /// The lenient reading — a missing `disabled` is an account nobody switched
+    /// off — is §2.4's confidently-wrong reading with a click attached: it ticks
+    /// and arms every checkbox in the fleet on the strength of a key that was not
+    /// in the body. `label` has always been strict, and the asymmetry was the
+    /// wrong way round; the day the gateway renames the field, a strict `disabled`
+    /// takes the whole rotation to "nobody said", which this app knows how to draw
+    /// and nobody can act on by mistake.
+    func testABodyThatSaysNothingAboutASwitchIsRefusedWhole() {
+        XCTAssertThrowsError(try UsageFixtures.decode(UsageFixtures.statusWithoutTheSwitch,
+                                                      as: GatewayStatus.self),
+                             "a hole where the checkbox's own field goes was read as a state")
+    }
+
+    /// And a body that says nothing about **routing** is refused too, which it was
+    /// not until the count became the verdict.
+    ///
+    /// `?? false` there was safe for exactly as long as a zero count could only
+    /// take the fleet line down: "an account the gateway said nothing about is not
+    /// one this app may count as somewhere to route" left an error that was a
+    /// warning standing, never one lighting up. `applyRoutable` raises the line on
+    /// a zero count now, so silence about `eligible` manufactures the loudest
+    /// statement this surface makes — a fleet of accounts nobody switched off,
+    /// every one of them reported, and an orange line under them saying every
+    /// client request is a 429.
+    ///
+    /// Refusing it is not a worse answer, it is the honest one: the pass writes
+    /// `rotationFailure`, the boxes go inert, and the line says what happened. The
+    /// model's half of that is
+    /// `testARotationWithNoRoutingFlagRaisesNoWarningAtAll`.
+    func testABodyThatSaysNothingAboutRoutingIsRefusedWhole() {
+        XCTAssertThrowsError(try UsageFixtures.decode(UsageFixtures.statusWithoutTheRoutingFlag,
+                                                      as: GatewayStatus.self), """
+                             a hole where the fleet's routing flag goes was read as "no route", \
+                             which is the one reading that raises a warning out of nothing
+                             """)
+    }
+
+    /// A switch answer with no `eligible_accounts` in it is refused, for the same
+    /// reason and on the worse path.
+    ///
+    /// This decoder runs on the click: `?? 0` would take a body that lost the key
+    /// and raise the orange line in the very second the operator is looking at the
+    /// checkbox they just pressed. The `warning: null` beside the hole is no help
+    /// at all — it is what the gateway sends when there *is* somewhere to route —
+    /// so nothing in the body contradicts the invented zero.
+    ///
+    /// Both halves are asked, because "refuses everything" and "refuses the hole"
+    /// are different rules: the fixture with the count decodes.
+    func testASwitchAnswerWithNoCountInItIsRefused() throws {
+        XCTAssertThrowsError(try UsageFixtures.decode(UsageFixtures.switchAnswerWithoutTheCount,
+                                                      as: SwitchResult.self), """
+                             a missing count was read as a fleet with nowhere left to route, on \
+                             the one path where that reading is a false alarm under the pointer
+                             """)
+
+        let whole = try UsageFixtures.decode(UsageFixtures.switchAnswer, as: SwitchResult.self)
+        XCTAssertEqual(whole.eligibleAccounts, 1, "the same body with its count decodes")
+    }
+
+    /// And a body with no `accounts` in it at all is refused too — where a body
+    /// with an empty `accounts` is an answer and decodes.
+    ///
+    /// The same distinction one level up from `disabled`, and it was made the
+    /// other way here while `disabled` was being made strict: `?? []` wrote the
+    /// absence of an answer as an answer. What that costs is not one wrong field
+    /// but a whole surface with nothing on it — `switches` becomes `[:]` rather
+    /// than `nil`, so every checkbox is inert with no line anywhere saying why,
+    /// and `routableAccounts` comes out zero, which is the count that raises the
+    /// warning about a fleet with nowhere left to route.
+    ///
+    /// Both halves are asked, because "refuses everything" and "refuses the hole"
+    /// are different rules and only one of them is this one.
+    func testABodyWithNoAccountsAtAllIsRefusedAndAnEmptyFleetIsNot() throws {
+        XCTAssertThrowsError(try UsageFixtures.decode("""
+            {"uptime_seconds": 176312.4, "now": 1788653295}
+            """, as: GatewayStatus.self),
+                             "a body that never mentioned the fleet was read as a fleet of none")
+
+        let empty = try UsageFixtures.decode("""
+            {"now": 1788653295, "accounts": []}
+            """, as: GatewayStatus.self)
+        XCTAssertTrue(empty.accounts.isEmpty, "an empty rotation is an answer and has to decode")
+        XCTAssertEqual(empty.routableAccounts, 0)
+    }
+
+    /// The four fields, and not one more — asked of the type rather than of a
+    /// body, because what this guards against is somebody widening it.
+    ///
+    /// `/gw/status` carries `util_5h` and `util_7d` too, and it writes them as
+    /// **fractions**. The endpoint that spells the same quantity as **per cent**
+    /// under those very key names is `GET /gw/usage/<label>/history`, whose body
+    /// even says so in a `units` field (SPEC §2.7): one probe, 2026-09-06
+    /// 05:34:17Z, has `main` at `util_5h: 0.43` in `/gw/status` and `util_5h:
+    /// 43.0` in the last point of its history. That is the dangerous pair, and it
+    /// is dangerous because the name is the same on both sides — `/gw/usage`
+    /// itself has no `util_5h` key at all (it writes `five_hour.utilization`, also
+    /// per cent), so mixing *that* one up is a mismatch a reader can see.
+    /// Everything downstream of this file is in per cent, so a utilisation read
+    /// here "while we are reading the body anyway" would understate by a hundred
+    /// times with nothing on screen to look wrong. There is no reading on this
+    /// path at all, and that is the property held here.
+    func testNoUtilisationIsReadOffTheRotationBodyAtAll() throws {
+        let status = try UsageFixtures.decode(UsageFixtures.status, as: GatewayStatus.self)
+        let account = try XCTUnwrap(status.accounts.first)
+        XCTAssertEqual(Set(Mirror(reflecting: account).children.compactMap(\.label)),
+                       ["label", "disabled", "disabledUntil", "disabledReason"], """
+                       a field was added to AccountSwitch: if it is a reading, it arrived as a \
+                       fraction and every per-cent reader downstream will be a hundred times low
+                       """)
+    }
+
+    /// What either switch endpoint answers with. The body is flat — the
+    /// account's new state and the fleet's cost side by side — so the state is
+    /// read off the same decoder the four fields of `/gw/status` are, and the two
+    /// cannot come to disagree about what a missing `disabled` means.
+    ///
+    /// `warning` is a string or `null`, and it is the fleet's answer rather than
+    /// this account's: the gateway writes it as `None if eligible else "…"`, so a
+    /// sentence and a zero count are one fact spelled twice and the two never
+    /// arrive apart. Both halves of that pairing are read here.
+    func testASwitchAnswersWithTheNewStateAndWhatItCostTheFleet() throws {
+        let quiet = try UsageFixtures.decode(UsageFixtures.switchAnswer, as: SwitchResult.self)
+        XCTAssertEqual(quiet.account.label, "acc2")
+        XCTAssertTrue(quiet.account.disabled, "the state after the switch, off the flat body")
+        XCTAssertNil(quiet.account.disabledUntil)
+        XCTAssertEqual(quiet.account.disabledReason, "")
+        XCTAssertEqual(quiet.eligibleAccounts, 1)
+        XCTAssertNil(quiet.warning, "a count above zero comes with no sentence, by the contract")
+
+        let loud = try UsageFixtures.decode(UsageFixtures.switchAnswerWithWarning,
+                                            as: SwitchResult.self)
+        XCTAssertEqual(loud.account.label, "main")
+        XCTAssertTrue(loud.account.disabled)
+        XCTAssertEqual(loud.eligibleAccounts, 0)
+        XCTAssertEqual(loud.warning, """
+            claude-gw: no usable account is left in the fleet - every client request will be \
+            answered with 429 until one of them comes back
+            """)
+    }
+
+    /// Every switch answer this suite holds is a body `_switch_payload` could
+    /// actually have written: the sentence is there exactly when the count is zero.
+    ///
+    /// **Nothing in production reads `SwitchResult.warning` at all**, which is what
+    /// the field is decoded for: §4 keeps `fleet` off every string a person reads,
+    /// and the `else` branch of `_switch_payload` (`src/gateway.py:1986`) is one
+    /// fixed constant rather than a message, so the count says everything it says.
+    /// Two tests read it, and they hold different things — this one holds the
+    /// **pairing** (a sentence exactly when the count is zero) over every switch
+    /// answer in the suite, while `testASwitchAnswersWithTheNewStateAndWhatItCostTheFleet`
+    /// twenty lines above pins the **wording** of the gateway's constant character
+    /// for character, and is what reddens if `_switch_payload` ever rewrites it.
+    /// What the field is still worth is this: it is
+    /// the body's own statement of the invariant the whole switch surface rests
+    /// on, one fact the gateway writes twice, and putting the verdict on the count
+    /// alone is only sound while the two agree.
+    ///
+    /// **It is not a test of the gateway.** Not one of these bodies came off the
+    /// wire — no live `disable` was ever recorded here, and the field list was
+    /// checked against a live `enable` — so what is asked is whether our own
+    /// fixtures are bodies that could have arrived. It is exactly the check that
+    /// catches a count invented to look plausible: this branch has had to correct
+    /// one twice.
+    ///
+    /// **The list below is the whole of "every", and the name says so.** It is
+    /// written out by hand and nothing walks `UsageFixtures` to fill it, so a new
+    /// switch answer is covered only once somebody has typed it in here — adding
+    /// the fixture is half the work, and this test staying green over a body it
+    /// has never seen is not evidence about that body. Reflection could enumerate
+    /// the static properties of `UsageFixtures`, but not which of them are switch
+    /// answers: the ones that are not (`status`, `usage`, `history`, and the
+    /// fixtures written to be refused) would have to be named by hand instead, so
+    /// the hand-kept list would only move, not go away — and the list of what to
+    /// check is the safer of the two to forget nothing from, because forgetting an
+    /// entry there leaves a test that says less, while forgetting an exclusion
+    /// leaves one that fails on a body it was never about.
+    ///
+    /// That the fixtures all live on `UsageFixtures` rather than inside the tests
+    /// that use them is what makes the list keepable at all: one place to add to,
+    /// and one place to look. `switchAnswerWithoutTheCount` is not here because it
+    /// does not decode at all, which is
+    /// `testASwitchAnswerWithNoCountInItIsRefused`'s subject.
+    ///
+    /// Proved by mutation on the fixtures themselves, 2026-09-06, and it takes two
+    /// because the pairing has two halves. Writing a sentence into
+    /// `switchAnswerPuttingTheAccountBack`, whose count is 1, reddens this test and
+    /// nothing else in the suite — the sentence has no other reader, which is the
+    /// finding this test was written for. Taking `switchAnswerWithWarning`'s count
+    /// from 0 to 1 reddens this one and **five** others, six of 671, and they are
+    /// named because "four others" stood here and was one short:
+    /// `testASwitchAnswersWithTheNewStateAndWhatItCostTheFleet` twenty lines above,
+    /// which reads the count off the same body, and four on the surface —
+    /// `testAFleetWithNothingLeftInItSaysSoAndStopsSayingIt`,
+    /// `testAPassThatFoundSomewhereToRouteTakesTheWarningDown`,
+    /// `testAPassThatLeftBeforeTheClickDoesNotTakeTheWarningDown` and
+    /// `testTheCountThatStandsIsTheOneAskedForLast`, each of which needs this body
+    /// to raise the orange line and finds it raising nothing once the count is 1.
+    /// Two further users of it stay green and are the control on the list being
+    /// about the count rather than about the body:
+    /// `testTheCountIsSettledByAPassOnceTheLastClickHasLanded` and
+    /// `testABurstsOverlapIsNotChargedToTheNextLoneClick` count passes and never
+    /// ask what the fleet was left with.
+    ///
+    /// The entry added the same day, `switchAnswerPuttingAcc3Back`, was proved the
+    /// same way: writing a sentence into it beside its count of 2 reddens this test
+    /// and nothing else of the 668. That is what a list entry buys — the body's own
+    /// user (`testAClickStillInTheAirKeepsItsRowAcrossTheReopen`) stays green under
+    /// that mutation, because nothing on the switch path reads the sentence.
+    func testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent() throws {
+        let bodies = [
+            "switchAnswer": UsageFixtures.switchAnswer,
+            "switchAnswerWithWarning": UsageFixtures.switchAnswerWithWarning,
+            "switchAnswerContradictingTheClick": UsageFixtures.switchAnswerContradictingTheClick,
+            "switchAnswerPuttingTheAccountBack": UsageFixtures.switchAnswerPuttingTheAccountBack,
+            "switchAnswerPuttingAcc3Back": UsageFixtures.switchAnswerPuttingAcc3Back
+        ]
+        for (name, body) in bodies.sorted(by: { $0.key < $1.key }) {
+            let answer = try UsageFixtures.decode(body, as: SwitchResult.self)
+            XCTAssertEqual(answer.warning != nil, answer.eligibleAccounts == 0, """
+                \(name) is not a body the gateway could have sent: eligible_accounts is \
+                \(answer.eligibleAccounts) beside warning \
+                \(answer.warning.map { "\"\($0)\"" } ?? "null"), where _switch_payload writes the \
+                sentence exactly when the count is zero
+                """)
+        }
+    }
 }
 
 /// The arithmetic of four differently-priced counters.
@@ -358,18 +1022,34 @@ final class TokenArithmeticTests: XCTestCase {
 final class UsageClientTests: XCTestCase {
 
     /// Remembers the request a stub transport was handed.
+    ///
+    /// The verb and the body are kept as well as the URL, and only since the
+    /// switches arrived: while every call was a GET the method was the one thing
+    /// about a request nobody could get wrong.
     private final class RequestLog: @unchecked Sendable {
         private let lock = NSLock()
-        private var stored: URL?
+        private var stored: URLRequest?
         var url: URL? {
             lock.lock()
             defer { lock.unlock() }
-            return stored
+            return stored?.url
         }
 
-        func record(_ url: URL?) {
+        var method: String? {
             lock.lock()
-            stored = url
+            defer { lock.unlock() }
+            return stored?.httpMethod
+        }
+
+        var body: Data? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored?.httpBody
+        }
+
+        func record(_ request: URLRequest) {
+            lock.lock()
+            stored = request
             lock.unlock()
         }
     }
@@ -379,7 +1059,7 @@ final class UsageClientTests: XCTestCase {
                             log: RequestLog? = nil,
                             failure: (any Error)? = nil) -> UsageClient {
         UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
-            log?.record(request.url)
+            log?.record(request)
             if let failure { throw failure }
             let url = request.url ?? Config.default.resolvedUsageBaseURL
             guard let response = HTTPURLResponse(url: url,
@@ -418,6 +1098,60 @@ final class UsageClientTests: XCTestCase {
 
         XCTAssertEqual(log.url?.path, "/gw/usage/main/history")
         XCTAssertEqual(series.points.count, 1)
+    }
+
+    /// The three endpoints the switches added, each on its own verb.
+    ///
+    /// The verb is the whole of the difference between them — one `fetch` sends
+    /// all six requests this client makes — so it is asked for here rather than
+    /// left to the one function's default. A switch sent as a GET reads the
+    /// gateway's state and changes nothing, and the popover would then draw the
+    /// answer to a question it never asked.
+    ///
+    /// And a switch carries **no body at all**, which is what says "until
+    /// somebody puts it back": the gateway takes an expiry from a `seconds` or
+    /// `until` key, and a checkbox has nowhere to say a third thing.
+    func testTheRotationIsReadWithAGetAndMovedWithAPost() async throws {
+        let log = RequestLog()
+        let reading = makeClient(body: UsageFixtures.status, log: log)
+        let status = try await reading.status()
+        XCTAssertEqual(log.url?.path, "/gw/status")
+        XCTAssertNil(log.url?.query, "the rotation is the whole fleet's, so there is nothing to ask for")
+        XCTAssertEqual(log.method, "GET")
+        XCTAssertEqual(status.accounts.count, 3)
+
+        let writing = makeClient(body: UsageFixtures.switchAnswer, log: log)
+        let off = try await writing.disableAccount(label: "acc2")
+        XCTAssertEqual(log.url?.path, "/gw/accounts/acc2/disable")
+        XCTAssertEqual(log.method, "POST")
+        XCTAssertNil(log.body, "a body is where a duration would go, and this app never sets one")
+        XCTAssertTrue(off.account.disabled)
+
+        _ = try await writing.enableAccount(label: "acc2")
+        XCTAssertEqual(log.url?.path, "/gw/accounts/acc2/enable")
+        XCTAssertEqual(log.method, "POST")
+        XCTAssertNil(log.body)
+    }
+
+    /// The label is somebody's name for an account and goes into the path whole,
+    /// so it is escaped on the way in.
+    ///
+    /// Live labels are `acc2` and `main` and would never show this: the point is
+    /// that nothing checks them. A space unescaped makes a request line no
+    /// gateway will parse, and a `#` unescaped makes the rest of the path a URL
+    /// fragment — that is, a POST to `/gw/accounts/acc` with the verb intact,
+    /// which is the one failure here that could plausibly hit another account.
+    func testALabelThatNeedsEscapingIsEscaped() async throws {
+        let log = RequestLog()
+        let client = makeClient(body: UsageFixtures.switchAnswer, log: log)
+        _ = try await client.disableAccount(label: "acc 2#a")
+
+        XCTAssertEqual(log.url?.absoluteString,
+                       Config.default.resolvedUsageBaseURL.absoluteString
+                       + "/gw/accounts/acc%202%23a/disable")
+        XCTAssertEqual(log.url?.path, "/gw/accounts/acc 2#a/disable",
+                       "escaped on the wire and the label again when read back")
+        XCTAssertNil(log.url?.fragment, "the # is part of the label, not the start of a fragment")
     }
 
     /// Five seconds, and never a cached body: the numbers move every minute and

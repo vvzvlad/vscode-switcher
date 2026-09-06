@@ -224,6 +224,15 @@ struct FleetSeries: Sendable, Equatable {
 /// time. So the schedule is tied to the popover — `open` starts it, `close`
 /// stops it — and `fetch` refuses to run outside that, which is what makes the
 /// closed state provably free rather than merely cheap.
+///
+/// **With one exception, and it is deliberate: a switch already sent.** `close`
+/// cancels `fetchTask` and leaves `switchTasks` alone, because the operator asked
+/// for that request and a popover going away is not a change of mind — a popover
+/// closes on any click anywhere on the screen. So a POST can be in the air behind
+/// a shut popover, for as long as `UsageClient.timeoutSeconds`. What stays true
+/// with no exception is the schedule: nothing new is started while the popover is
+/// shut, and the answer to that one request writes into a surface nobody is
+/// looking at.
 @MainActor
 final class UsageHistoryModel: ObservableObject {
 
@@ -238,6 +247,57 @@ final class UsageHistoryModel: ObservableObject {
     /// Why the last pass was incomplete, if it was. Kept beside the previous
     /// series rather than replacing them, exactly as `UsageStore` does.
     @Published private(set) var failure: String?
+    /// Which accounts the gateway has in its rotation, by label — and `nil` when
+    /// nobody has been able to ask.
+    ///
+    /// **`nil` is not "everybody is in".** An empty dictionary is an answer (the
+    /// gateway listed no accounts); `nil` is the absence of one, and the two must
+    /// never be spelled the same way. A checkbox drawn ticked on the strength of
+    /// a request that failed invites a click that cannot do anything, which is
+    /// the control-surface form of the rule §2.4 states about percentages: a
+    /// confidently wrong reading is worse than a missing one. The row draws such
+    /// a switch inert instead.
+    @Published private(set) var switches: [String: AccountSwitch]?
+    /// Why the rotation on screen may be stale: the last pass could not ask.
+    ///
+    /// The pass's own blame and nothing else. It shared a field with the blame
+    /// for a failed click once, and the two have opposite lifetimes — this one is
+    /// rewritten by every pass, and a click that would not go through has no
+    /// other mark on this surface at all, so any later pass that succeeded wiped
+    /// the one thing saying the click had failed.
+    @Published private(set) var rotationFailure: String?
+    /// Why a click would not go through, by the label it was on.
+    ///
+    /// Per label because a failed click leaves nothing else behind — the tick is
+    /// drawn from the gateway's answer and there was none, so by design it does
+    /// not move — and because two accounts can each be carrying their own bad
+    /// news. Cleared by the next click on that same label (see `setAccount`) and
+    /// by the popover being opened again (see `open`), which are the two events
+    /// that say the operator is done reading it.
+    @Published private(set) var switchFailures: [String: String] = [:]
+    /// What is said when the gateway has nowhere left to route a request, or
+    /// `nil` when it has somewhere.
+    ///
+    /// **The verdict is a count and the sentence is only its wording.** Both the
+    /// count on a pass (`GatewayStatus.routableAccounts`) and the count in a
+    /// switch answer (`SwitchResult.eligibleAccounts`) are the gateway's own
+    /// `is_eligible` over the fleet, so they are one quantity at two moments;
+    /// zero raises this line and more than zero takes it down, whichever of the
+    /// two spoke last. See `applyRoutable`, which is the only writer that moves it
+    /// **on an answer**, either way.
+    ///
+    /// It has a second writer all the same, and it is not a counting: `open` clears
+    /// the line for the sitting, because a message about a moment that may be an
+    /// hour old is a fact about the past shown as the present (§2.4). The two do not
+    /// move together, and deliberately — `open` clears the line and **keeps**
+    /// `routableAskedAt`, which is argued where that field is cleared and is not.
+    @Published private(set) var fleetWarning: String?
+    /// The labels with a switch request in the air.
+    ///
+    /// Published because the row has to go inert while one is: without that a
+    /// second click sends the opposite request and which of the two lands last is
+    /// the network's business, not the operator's.
+    @Published private(set) var inFlight: Set<String> = []
     /// When the lines on screen arrived, or `nil` while there are none.
     ///
     /// The age of the *series*, never the age of the attempt: the attempt has its
@@ -288,6 +348,67 @@ final class UsageHistoryModel: ObservableObject {
     /// the footer's own wording is not finer than a minute.
     static let tickSeconds: TimeInterval = 15
 
+    /// What the line under the accounts says when the gateway has nowhere left to
+    /// route — **the only wording this surface has**, whichever of the two
+    /// countings raised it.
+    ///
+    /// It is the gateway's own sentence minus `" in the fleet"`: 127 characters
+    /// against 114, both counted again on 2026-09-06. §4 keeps that word out of
+    /// every string a person reads, because only somebody who works on this app
+    /// reads it as a set of accounts — and saying the same thing in the words §4
+    /// allows is not the same act as rewording somebody else's caveat. What makes
+    /// it the first and not the second is that the gateway's sentence is a
+    /// **constant**: `_switch_payload` (`src/gateway.py:1986`, `claude_gw` at
+    /// `30dfb1b`) writes `None if eligible else "<one fixed two-line string>"`, so
+    /// it is not a message about this switch, this account or this moment. It says
+    /// what a zero count says and nothing besides, and there is nothing in it left
+    /// to lose.
+    ///
+    /// So the sentence off the wire is decoded and never printed (see
+    /// `SwitchResult.warning`), and this string is raised by a click and by a pass
+    /// alike. The arrangement before it — the gateway's words while its answer was
+    /// the newest thing said, ours from the next pass on — also made a promise the
+    /// code did not keep: `applyRotation` calls `applyRoutable` only when
+    /// `/gw/status` answered, so a gateway that stopped answering right after the
+    /// click, which is the moment a gateway most often does stop, left its own
+    /// wording standing for the whole sitting.
+    nonisolated static let noRouteWarning =
+        "claude-gw: no usable account is left - every client request will be "
+        + "answered with 429 until one of them comes back"
+
+    /// The clock every moment on this path runs on. There are three of them:
+    /// `Rotation.askedAt` (when a pass asked), `switchConfirmedAt` (when a switch
+    /// answer was applied) and `routableAskedAt` (when the answer whose count is on
+    /// screen was asked for).
+    ///
+    /// That last one has **two** writers, and the comparison between them is the
+    /// whole of what it is for: a click stamps a local in `setAccount` before its
+    /// request goes out, a pass carries its own `Rotation.askedAt` in from
+    /// `applyRotation`, and both reach the field through `applyRoutable`, which
+    /// keeps whichever of the two asked later and refuses the other.
+    ///
+    /// Monotonic rather than `Date()`, because neither stamp is ever drawn:
+    /// they exist only to be compared with each other, and the wall clock is
+    /// free to step backwards (an NTP correction, a wake from sleep). A step
+    /// back after a switch answer leaves that answer stamped in the future, and
+    /// then every pass looks older than it — so the label stops being refreshed
+    /// by the gateway for as long as it takes the clock to catch up. Both
+    /// writers come here so the two can be compared at all.
+    ///
+    /// **What holds each of the three.** `testTheStampsThatDecideAStalePassCannotStepBackwards`
+    /// holds the declared type of `Rotation.askedAt` through a `Mirror`, and the
+    /// compiler holds the other two against it: `holds` compares
+    /// `switchConfirmedAt[label]` with that field directly, and
+    /// `applyRoutable(_:askedAt:)` takes a `ContinuousClock.Instant` and is handed
+    /// `rotation.askedAt` by `applyRotation` and the `setAccount` local by the
+    /// click, so all three are one type or none compiles. What is **not** held is a
+    /// *fourth* moment taken later off `Date()` and never compared with these — the
+    /// compiler has nothing to say about a value nobody sets beside them. A `Mirror`
+    /// sweep is not the missing test and should not be written: this model
+    /// legitimately holds `Date`s (`now`, `fetchedAt`, `checkedAt`), so "no stored
+    /// property is a `Date`" is a false invariant here.
+    nonisolated static func stamp() -> ContinuousClock.Instant { ContinuousClock.now }
+
     private(set) var isOpen = false
     private let client: UsageClient
     private let defaults: UserDefaults
@@ -298,6 +419,49 @@ final class UsageHistoryModel: ObservableObject {
     /// is about requests that do and do not happen, and that is only observable
     /// at the transport.
     private(set) var fetchTask: Task<Void, Never>?
+    /// The switch requests in the air, one per label. Separate from `fetchTask`
+    /// on purpose, and not merely for bookkeeping: `close` cancels that one, and
+    /// a switch the operator has already asked for may not be cancelled by the
+    /// popover going away. Not private for `fetchTask`'s reason — a test waits
+    /// for the request to land rather than racing it.
+    private(set) var switchTasks: [String: Task<Void, Never>] = [:]
+    /// When the gateway last spoke for a label *with authority* — that is, when a
+    /// switch answer for it was applied here. Read by `applyRotation` and by
+    /// nothing else, which is why it is not published: it decides which of two
+    /// writers wins, and draws nothing itself. No pruning, and none wanted: one
+    /// entry per account of a fleet that has three.
+    private var switchConfirmedAt: [String: ContinuousClock.Instant] = [:]
+    /// When the answer whose count is on screen right now was **asked** for, or
+    /// `nil` while no count has been applied at all.
+    ///
+    /// Fleet-level, like the count itself, and it is what orders two answers that
+    /// come back out of the order they went out in. `setAccount` guards one label
+    /// at a time on purpose — a second click on a *different* account while the
+    /// first is in the air is a thing an operator legitimately does — so two
+    /// switch answers can and do overtake each other, and each carries its own
+    /// reading of a quantity that moved between them.
+    ///
+    /// This does not replace `isStale`, and neither replaces the other. That one
+    /// answers "is there an unanswered mutation outstanding, so this pass's count
+    /// is from before it?", which no ordering by ask-instant can answer: a pass
+    /// asked genuinely later than a click the gateway has not applied yet is the
+    /// newer request and the older news. This one answers "did the answer already
+    /// on screen ask later than the one arriving now?". The two compose.
+    private var routableAskedAt: ContinuousClock.Instant?
+    /// Whether two switch requests were in the air at once during the burst that
+    /// is still landing.
+    ///
+    /// The one arrangement the ask-instant above cannot order, and so the one that
+    /// has to be settled by asking rather than by comparing (`setAccount`). A click
+    /// sent on its own has nothing to settle: its answer counted the fleet after
+    /// its own switch, and the only other count it can meet is a pass's, which
+    /// `isStale` and `applyRoutable` order correctly in both directions.
+    ///
+    /// Recorded when the second click goes out rather than counted when the answers
+    /// come back, because by then `inFlight` has emptied and the overlap has left
+    /// no trace. Cleared when the air clears, so the next lone click is not charged
+    /// for this burst's ambiguity.
+    private var clicksOverlapped = false
 
     init(client: UsageClient, defaults: UserDefaults = .standard) {
         self.client = client
@@ -321,6 +485,73 @@ final class UsageHistoryModel: ObservableObject {
         self.labels = labels
         isOpen = true
         now = Date()
+        // A new sitting, so last sitting's three messages go — all three, and one
+        // reason for them. Nothing runs while the popover is shut, so each of them
+        // stands for a tick that may be an hour old: the blame for a click waits
+        // for the next click on that same label, and the other two wait for a pass
+        // that is not running. An hour after a dead WireGuard came back — the
+        // gateway answering again, every checkbox live — the grey line still read
+        // "acc2: unreachable" as though it had just happened. That is a fact about
+        // the past shown as the present (§2.4), with the operator's own control
+        // beside it, and `fleetWarning` is the same shape of lie in orange with no
+        // age anywhere near it.
+        //
+        // `open` rather than `close`, which is the event these survive on purpose:
+        // a popover closes on any click anywhere on the screen, including one that
+        // never came near it, so a close is not the operator finishing with what
+        // they say. Coming back is.
+        //
+        // And nothing is lost by clearing here, because `open` fires a pass in
+        // the next line: what all four stand for is a fleet that may no longer be
+        // the fleet, and the pass is exactly the thing that settles them.
+        switchFailures = [:]
+        fleetWarning = nil
+        rotationFailure = nil
+        // `routableAskedAt` is **not** among them, though the line it orders is
+        // cleared one statement above. It is not a message about a moment; it is
+        // the order two answers are judged in, and the answers it judges outlive
+        // the close — `close` cancels `fetchTask` and leaves `switchTasks` alone,
+        // so a click asked before the close can still be in the air here. Clearing
+        // it does not remove a stale statement, it removes the comparison, and a
+        // comparison with nothing to compare against accepts everything: that
+        // click's answer would then write its pre-close count over a pass of this
+        // sitting, which is the very race the marker exists for. Nothing is stale
+        // about it either way — it is an instant, not a reading, and a pass asked
+        // in this sitting is newer than every stamp that predates the close.
+        // The rotation goes with them, and it is the one of the four that binds
+        // hardest: the other three are messages about a moment, this one is a
+        // **control**. `close` leaves it alone on purpose and the model outlives
+        // the sitting — `NSPopover` keeps its content view controller — so an hour
+        // later the boxes were drawn from an hour-old reading, ticked as current
+        // and clickable, with the line that would have explained their age cleared
+        // one statement above. §2.4's rule about a confidently-wrong reading is
+        // heavier on a control than on a number, because acting on it changes the
+        // fleet: `disableAccount` sends no body, and `_parse_disable_body` reads
+        // no body, an empty body and `{}` alike as `DISABLED_NO_DEADLINE`, so a
+        // click on a stale tick turns somebody's timed parking of an account
+        // into an indefinite switch-off. `nil` is a state this app already draws
+        // and already refuses to let anybody click — `switchAppearance(nil,
+        // busy:)` is `(ticked: false, usable: false)` and `switchHelp(nil)` says
+        // the gateway did not say — and the pass on the next line fills it in.
+        //
+        // **With one exception: a label whose click is still in the air.** The
+        // argument above is about age, and that entry has none — the operator is
+        // waiting on it right now. `applyRotation` holds such a label by laying
+        // the value it already has over the pass's, so with the dictionary wiped
+        // there is nothing to lay and the first half of `holds`
+        // (`inFlight.contains`) does nothing at all: the pass this `open` fires
+        // answers in a fraction of a second, well before a POST sent before the
+        // close, and writes the gateway's pre-click reading under a box the
+        // operator is at that moment switching. Only the labels in flight are
+        // carried, never the confirmed ones: this sitting's pass is asked after
+        // this line, so it is newer than every confirmation that predates it, and
+        // `holds`'s second half refuses them on its own.
+        //
+        // `nil` and `[:]` are two different readings here — "the gateway did not
+        // say" against "the gateway said nobody" — so an empty carry-over collapses
+        // back to `nil` rather than standing as an answer this app was never given.
+        let heldOver = (switches ?? [:]).filter { inFlight.contains($0.key) }
+        switches = heldOver.isEmpty ? nil : heldOver
         fetch()
         schedule()
     }
@@ -339,6 +570,11 @@ final class UsageHistoryModel: ObservableObject {
         timer = nil
         fetchTask?.cancel()
         fetchTask = nil
+        // `switchTasks` is deliberately left alone. Cancelling a disable that is
+        // already on its way is worse than letting it land: the operator asked
+        // for it, and the popover closing is not a change of mind. They outlive
+        // this object as well — the answer only writes into `self` if it is still
+        // there.
     }
 
     // MARK: Fetching
@@ -370,6 +606,32 @@ final class UsageHistoryModel: ObservableObject {
         var series: [AccountSeries]
         var fleet: FleetSeries
         var failure: String?
+        var rotation: Rotation
+    }
+
+    /// The rotation half of one pass: what `/gw/status` said, what it cost the
+    /// fleet, why it said nothing, and when it was asked.
+    struct Rotation: Sendable {
+        /// The rotation by label, or `nil` when the gateway would not answer.
+        /// Never an empty dictionary standing in for the failure — see `switches`.
+        var state: [String: AccountSwitch]?
+        /// How many accounts the gateway may still route to, `nil` for the same
+        /// reason. Fleet-level and kept that way: it is the warning's question,
+        /// never a switch's.
+        var routable: Int?
+        /// Why it would not answer, named by its endpoint rather than folded into
+        /// `Loaded.failure`: that one is a list of accounts whose *history* is
+        /// missing, and a reader who cannot tell the chart's silence from the
+        /// rotation's has been told nothing.
+        var failure: String?
+        /// When the request went **out**, not when it came back. What this moment
+        /// has to answer is "had the operator's own answer already landed by the
+        /// time this pass asked?", and a stamp taken on arrival calls a pass that
+        /// left before the click younger than the click. See `applyRotation`.
+        ///
+        /// Off `UsageHistoryModel.stamp()`, which is where the reason for a
+        /// monotonic clock is written down.
+        var askedAt: ContinuousClock.Instant
     }
 
     /// One request per account, in parallel, with each account's failure kept as
@@ -381,9 +643,16 @@ final class UsageHistoryModel: ObservableObject {
     /// from both. Doing it in the view instead would redo the fold on every
     /// redraw of an open popover, which is once every tick for as long as it is
     /// up.
+    ///
+    /// The rotation rides **beside** the group rather than inside it, and that is
+    /// a fact about the group's type: its element is one account's history, so a
+    /// fifth member answering something else would have to be dressed as one.
+    /// `async let` costs the same in wall time — one more request in parallel with
+    /// the rest — and keeps the two questions apart, blame and all.
     nonisolated static func load(client: UsageClient,
                                  labels: [String],
                                  since: Date) async -> Loaded {
+        async let rotation = fetchRotation(client: client)
         struct Fetched: Sendable {
             var label: String
             var points: [HistoryPoint]
@@ -426,7 +695,30 @@ final class UsageHistoryModel: ObservableObject {
         failures.sort()
         return Loaded(series: answered.map { AccountSeries.make(label: $0.label, points: $0.points) },
                       fleet: FleetSeries.make(from: answered.map(\.points)),
-                      failure: failures.isEmpty ? nil : failures.joined(separator: "; "))
+                      failure: failures.isEmpty ? nil : failures.joined(separator: "; "),
+                      rotation: await rotation)
+    }
+
+    /// One `/gw/status`, as a state or as a reason there is none.
+    ///
+    /// The failure is turned into text here, off the main actor, for the reason
+    /// every other failure on this path is: an `Error` is not `Sendable` and the
+    /// only thing anybody does with this one is print it.
+    private nonisolated static func fetchRotation(client: UsageClient) async -> Rotation {
+        // Read before the request goes out, and that is the whole of its job:
+        // `applyRotation` weighs this pass against answers that landed while it
+        // was in the air, so the moment it needs is the one it stopped knowing
+        // anything at.
+        let askedAt = UsageHistoryModel.stamp()
+        do {
+            let status = try await client.status()
+            return Rotation(state: status.byLabel,
+                            routable: status.routableAccounts,
+                            failure: nil,
+                            askedAt: askedAt)
+        } catch {
+            return Rotation(state: nil, routable: nil, failure: "status: \(error)", askedAt: askedAt)
+        }
     }
 
     /// The gateway's samples with the lag between its two measuring sources taken
@@ -572,9 +864,371 @@ final class UsageHistoryModel: ObservableObject {
             seriesPeriod = nil
             fetchedAt = nil
         }
+        applyRotation(loaded.rotation)
         failure = loaded.failure
         checkedAt = moment
         now = moment
+    }
+
+    /// The rotation of one pass, merged label by label — never assigned whole.
+    ///
+    /// The pass follows the same rule the series do: an answer replaces what is
+    /// held, a pass that got none leaves it alone. Blanking it on a failure would
+    /// take every switch on screen inert for a reason that has nothing to do with
+    /// the switches, and the blame beside them says why they may be stale.
+    ///
+    /// **But an answer does not replace a label the operator has just moved.**
+    /// `open` fires a pass at once; the pass is `/gw/status` plus one history per
+    /// account, and a switch is one short POST. The argument rests on that
+    /// **ratio** — four requests carrying some 208 KB against one small one — and
+    /// not on any absolute, because the absolute moves with three things: the
+    /// window the pass asks for, how much history the fleet has stored, and what
+    /// else the machine is doing.
+    ///
+    /// **The window has to be named or the figure belongs to nobody.** A pass asks
+    /// for `period.seconds` (see `fetch`), and the period defaults to
+    /// `HistoryPeriod.day`, so the day window is the one this argument is about.
+    /// Probe of 2026-09-06 07:25Z, plain GETs, load average 5.6 falling to 5.4 over
+    /// the run (one-minute, read inside the probe): ten passes back to back, status
+    /// and the three histories in parallel exactly as the client issues them, took
+    /// 0.052–0.083 s, against 0.011–0.017 s for ten bare `/gw/status` calls in the
+    /// same run. The bodies of that day pass were 6222 bytes of status against
+    /// 86289 / 9438 / 110764 of history for acc2 / acc3 / main — 212713 in all. The
+    /// two other windows in the same probe: `1h` is 12346 bytes in all (131 / 131 /
+    /// 5862 of history), and 48 h — `UsageStore.historyWindowSeconds`, another
+    /// consumer's window and one this popover never asks for — is 402500 (188263 /
+    /// 16415 / 191600). The status body is quoted with its date rather than as a
+    /// constant: its length moves with the `disabled_reason` strings inside it.
+    ///
+    /// The figures that stood here before were 0.071–0.101 s at load average 3.6
+    /// beside 188263 / 18242 / 191635 bytes, and earlier the same day 0.115…0.139 s
+    /// and 0.14…0.16 s with no conditions recorded at all. The byte half of the
+    /// first of those was the **48 h** window's, attributed to a request this app
+    /// never makes: acc2's 188263 reproduces byte for byte at 48 h and at no other
+    /// window, which is what identifies it. Which is the whole reason the window is
+    /// written down here beside the load.
+    ///
+    /// The POST side is **not** measured — no `disable` or `enable` may be fired at
+    /// the live gateway while the fleet is being operated from the CLI — so it
+    /// stands on its shape alone: one request, no body, no history to serialise.
+    ///
+    /// A click in those first fractions of a second is therefore answered *first*,
+    /// and the pass lands on top of it carrying the state from before the click.
+    /// The tick goes back where it was and stays there until the next pass, up to a
+    /// minute later — and what the operator reads is not a flicker but "the click
+    /// did nothing", so they click again and undo by hand what they had already
+    /// done.
+    ///
+    /// Two kinds of label are held against a pass: one whose own answer is younger
+    /// than the moment this pass *asked*, and one with a request still in the air —
+    /// that one has no answer to be younger yet, and letting the pass write the
+    /// pre-click state under a box the operator is waiting on says the same wrong
+    /// thing for the length of the round trip.
+    private func applyRotation(_ rotation: Rotation) {
+        if let fresh = rotation.state {
+            var merged = fresh
+            // Only labels already held can be held back: a label this app knows
+            // nothing about has nothing to keep, and the pass's own reading of it
+            // beats no reading at all.
+            for (label, held) in switches ?? [:] where holds(label, against: rotation) {
+                merged[label] = held
+            }
+            switches = merged
+        }
+        rotationFailure = rotation.failure
+        // And the count is held against a stale pass by the same measure as the
+        // labels — the half of this function where the rule was written down and
+        // then not applied. The cost here is the worse of the two: a tick put
+        // back wrongly is repaired by the next pass a minute later, while a
+        // warning taken down wrongly can be put back by nothing but another
+        // click. Somebody who has just switched the last usable account off
+        // watches the orange line appear and vanish, and the fleet is answering
+        // 429 to everything with nobody left to say so.
+        if let routable = rotation.routable, !isStale(rotation) {
+            applyRoutable(routable, askedAt: rotation.askedAt)
+        }
+    }
+
+    private func holds(_ label: String, against rotation: Rotation) -> Bool {
+        if inFlight.contains(label) { return true }
+        guard let confirmed = switchConfirmedAt[label] else { return false }
+        return confirmed > rotation.askedAt
+    }
+
+    /// Whether this pass is older news than the operator's own — asked of the
+    /// whole fleet, where `holds` asks about one account.
+    ///
+    /// The count is fleet-level, so any confirmed switch younger than the moment
+    /// this pass asked, or any click still in the air, makes the count it carries
+    /// the state from before that click. One switch is enough: the count moves
+    /// with it.
+    ///
+    /// The second half stays reachable only because a click sent on its own asks
+    /// for no settling pass. `fetch` cancels whatever pass is in flight, so a
+    /// settling pass fired after every click would destroy every pass that asked
+    /// before a confirmation — and a pass asked after one is younger than it by
+    /// construction. See `setAccount`, where that gate is written and argued.
+    private func isStale(_ rotation: Rotation) -> Bool {
+        !inFlight.isEmpty || switchConfirmedAt.values.contains { $0 > rotation.askedAt }
+    }
+
+    /// The newest authoritative count of accounts the gateway may still route to.
+    ///
+    /// **The count is the verdict and the sentence is only its wording**, which is
+    /// how the gateway itself is built: `is_eligible` counts both
+    /// `GatewayStatus.routableAccounts` and `SwitchResult.eligibleAccounts`
+    /// (`src/gateway.py:1675` and `:2014`), and `_switch_payload` (`:1986`) writes
+    /// its sentence as `None if eligible else "claude-gw: …"` — so a non-empty
+    /// `warning` and a zero count are one fact written twice, and no body carries
+    /// one without the other. Reading them as two facts is how the line came to be
+    /// raised by a sentence and taken down by a count, an arrangement whose only
+    /// justification was a third kind of answer this endpoint does not send.
+    ///
+    /// **So this takes a count and nothing else.** The sentence used to arrive
+    /// here beside it and win when it was there, and three things went with that
+    /// parameter: a guard against an empty string, which `_switch_payload` cannot
+    /// send (`null` or the constant, nothing between) and which no mutation held;
+    /// the word "fleet" on screen, which §4 forbids; and a promise that the next
+    /// pass would restate the same verdict in this app's own words, which
+    /// `applyRotation` never made good on — it calls this only when `/gw/status`
+    /// answered.
+    ///
+    /// So the line also lights up on a pass, which is the whole point of putting
+    /// the verdict on the count: before this, a fleet with nowhere to route said
+    /// nothing at all unless this very session of this very app had switched the
+    /// last account off. Somebody else's `claude-gw disable` from the command
+    /// line, every account in backoff at once, or a restart after one's own click
+    /// all left the popover silent.
+    ///
+    /// **And it costs a state that is not a switch at all, honestly.** `eligible`
+    /// folds the quota cool-down in with the operator's switch, so this line now
+    /// appears over a fleet with every checkbox still ticked, when the accounts
+    /// have merely all filled their five-hour windows. That is not a false alarm:
+    /// it is precisely the state the sentence describes, because the client is
+    /// answered 429 either way. It is reachable rather than theoretical — `main`
+    /// sat at `util_5h: 1.0` against the `max_util_5h = 0.99` of the same
+    /// `/gw/status` body's `config` block at 2026-09-06 00:08:15Z, which is the
+    /// `status` fixture — and the checkboxes beside the line say the rest. Both
+    /// numbers there are that endpoint's fractions; the account history writes the
+    /// same quantity as a percentage, and reading one against the other is a
+    /// hundredfold slip dressed as a measurement.
+    ///
+    /// **And a count is only applied if it was asked for later than the one on
+    /// screen.** The count is the fleet's and moves with every switch, while
+    /// `setAccount` guards one label at a time — a second click on another account
+    /// while the first is in the air is a legitimate thing to do — so two answers
+    /// can land in the other order from the one they were asked in. Both accounts
+    /// routable, the operator switches one off (answer A, count 1) and without
+    /// waiting switches the other off (answer B, count 0); B lands first and the
+    /// orange line goes up; A lands second and takes it down, while every client
+    /// request is being answered 429 with nothing on screen saying so until the
+    /// next pass, up to `refreshSeconds` later. The cost is the asymmetry named
+    /// above: a warning taken down wrongly can be put back by nothing but another
+    /// click.
+    ///
+    /// **The ask-instant, not the arrival — and it is a stand-in rather than the
+    /// thing itself.** What ought to order two counts is which of them measured the
+    /// fleet last, and that moment is in no body: the gateway writes the switch and
+    /// then counts, with no suspension between the two. Both handlers are that same
+    /// pair of statements — `handle_account_disable` calls `update_account(label,
+    /// disabled_until=…, disabled_reason=…)` and then `_switch_payload(label, now)`
+    /// on the next line, and `handle_account_enable` does it with
+    /// `disabled_until=0, disabled_reason=""` (`claude_gw` at `30dfb1b`,
+    /// `src/gateway.py:2073`–`:2074` and `:2145`–`:2146`; the symbols are the
+    /// reference and the line numbers only hints). So each answer is
+    /// internally consistent — but which handler ran first was settled by two
+    /// `URLSession` connections arriving at one single-threaded aiohttp loop, and
+    /// this app has no say in that. The ask-instant is the nearest thing this side
+    /// has, and it is right whenever the gateway processed the POSTs in the order
+    /// they were sent, which is the arrangement worked through above.
+    ///
+    /// **When it did not, this guard cannot repair the order — it only picks which
+    /// half is wrong.** Take the same two clicks with the gateway processing `main`
+    /// first (its answer carrying count 1) and `acc2` second (carrying 0 and the
+    /// sentence): the true final count is now in the answer to the *earlier*
+    /// question, and it is refused either way round — arriving second it is older
+    /// than what stands, and arriving first it is taken down by `main`'s. Before
+    /// this guard, arrival order happened to be right in that arrangement and wrong
+    /// in the one above.
+    ///
+    /// So the class is closed by **observation** and not by ordering: `setAccount`
+    /// asks for a fresh pass once the last click of a burst that had two of them in
+    /// the air at once has landed, and the gateway counts again with nothing in the
+    /// air. The guard covers the window before that pass returns. The cost is one
+    /// pass — 208 KB and 0.052–0.083 s on the probe `applyRotation` records — per
+    /// such burst, and nothing at all for a click sent on its own: one POST is only
+    /// ever ordered against a *pass*, never against a second POST, and both those
+    /// orderings are this guard's and `isStale`'s to get right. Settling after
+    /// every click would also put `isStale`'s second half out of reach, because
+    /// `fetch` cancels the pass in flight — the very pass that half refuses.
+    ///
+    /// It composes with `isStale` rather than replacing it — see `routableAskedAt`,
+    /// where the two questions are set side by side.
+    private func applyRoutable(_ count: Int, askedAt: ContinuousClock.Instant) {
+        if let applied = routableAskedAt, askedAt <= applied { return }
+        routableAskedAt = askedAt
+        guard count == 0 else {
+            fleetWarning = nil
+            return
+        }
+        fleetWarning = Self.noRouteWarning
+    }
+
+    // MARK: Switching an account
+
+    /// Take one account out of the gateway's rotation, or put it back.
+    ///
+    /// **Nothing moves on the click.** The checkbox is drawn from `switches`, and
+    /// `switches` is written from the gateway's answer and from nowhere else, so
+    /// between the click and the answer the row still says what the fleet last
+    /// said. Moving it first and rolling it back on a failure is the other design,
+    /// and it makes the one state that matters — "the gateway did not take it" —
+    /// look exactly like a short delay. The answer may also disagree with the
+    /// request, which the optimistic version has no way to show at all.
+    ///
+    /// A label already in flight is refused silently rather than queued: the
+    /// second click of a double click is the opposite request, and a queue would
+    /// only make "whichever lands last wins" arrive more reliably.
+    func setAccount(label: String, enabled: Bool) {
+        guard !inFlight.contains(label) else { return }
+        // A second label going out while the first is still in the air is the one
+        // arrangement two counts can be measured in either order in, and the
+        // settling pass at the end of this task exists for exactly it.
+        if !inFlight.isEmpty { clicksOverlapped = true }
+        inFlight.insert(label)
+        // Stamped here, synchronously, and not where the answer is applied: what
+        // the fleet count has to be ordered by is when each request went out (see
+        // `applyRoutable`), and two clicks on two labels can be answered in either
+        // order. Taken at the same point `fetchRotation` takes a pass's — the
+        // moment this app stopped knowing anything.
+        let askedAt = UsageHistoryModel.stamp()
+        // The operator is acting on this switch again, which is the one event that
+        // says the last message about it was read. Chosen over "the popover
+        // closed", because a popover closes on any click anywhere on the screen —
+        // including one that never came near it — which is the same argument that
+        // keeps `close` from cancelling a switch already sent.
+        switchFailures[label] = nil
+        let client = client
+        switchTasks[label] = Task { [weak self] in
+            let answer = await UsageHistoryModel.switchAccount(client: client,
+                                                               label: label,
+                                                               enabled: enabled)
+            guard let self else { return }
+            inFlight.remove(label)
+            // Whether the air has just cleared on a burst that needs settling.
+            // Read before either branch and cleared with the burst it describes:
+            // a later click of its own must not inherit this one's ambiguity.
+            let settle = inFlight.isEmpty && clicksOverlapped
+            if inFlight.isEmpty { clicksOverlapped = false }
+            guard let result = answer.result else {
+                switchFailures[label] = answer.failure
+                // A refused connection changed nothing at the gateway. A
+                // **timeout** is another matter, and `UsageClient.timeoutSeconds`
+                // is five: it is this app giving up on the answer, not the gateway
+                // giving up on the request, so the switch may well have been
+                // applied and the tick on screen is no longer known to be the
+                // fleet's. Asking again costs one pass; a tick that confidently
+                // shows the state before a switch that landed costs the operator
+                // a click undoing what they wanted. Nothing to ask for once the
+                // popover is shut — `fetch` refuses there, and there is no
+                // surface left to be wrong on.
+                //
+                // Deliberately **not** gated on `settle` the way the success
+                // path's pass below is. That one settles the fleet count, which a
+                // pass cannot do while any click is still out — `isStale` refuses
+                // it — and which a lone click never put in doubt. This one repairs
+                // the tick of the label that just failed, and that label has
+                // already left `inFlight` one line above, so the pass has something
+                // to do for it whether or not other labels are still in the air and
+                // whether or not two clicks ever overlapped.
+                fetch()
+                return
+            }
+            // Written into a dictionary that may not exist yet, and that is not
+            // an accident: the answer is authoritative about this one account
+            // whether or not `/gw/status` ever came through, so this much of the
+            // rotation is now known.
+            var known = switches ?? [:]
+            known[label] = result.account
+            switches = known
+            // When this app was **told**, which is the question `holds` asks of
+            // it — not when the request went out. That is what keeps a pass that
+            // left before the click from putting the tick back or from taking the
+            // warning down (see `applyRotation`), and it is a different question
+            // from the one `askedAt` above answers.
+            switchConfirmedAt[label] = UsageHistoryModel.stamp()
+            // The count decides, here as on a pass, and the same writer takes it
+            // both ways round: the answer's own `warning` is decoded and left
+            // alone (see `SwitchResult.warning`), so this cannot come to be two
+            // rules with two wordings. Ordered by the moment this click was
+            // asked, because the answer beside it may have overtaken one asked
+            // later still.
+            applyRoutable(result.eligibleAccounts, askedAt: askedAt)
+            // And once the last click of a burst that had two of them in the air
+            // at once has landed, the count is settled by asking rather than by
+            // ordering. The guard above orders answers by the moment this app
+            // asked, which is right only while the gateway processed the POSTs in
+            // the order they were sent; it did not choose that order and cannot see
+            // it (see `applyRoutable`). One more pass, with nothing in the air, and
+            // the gateway counts the fleet once for everybody.
+            //
+            // Nothing standing at the moment it goes out refuses that pass. It is
+            // asked from here, and both this and `fetch` are on the main actor, so
+            // it goes out; its `askedAt` is taken later than every click sent so
+            // far, so `applyRoutable` admits it; `inFlight` is empty and every
+            // confirmation is older than it, so `isStale` is false. With the
+            // popover shut `fetch` refuses — which is the right answer there, since
+            // there is no surface left to be wrong on.
+            //
+            // One arrangement does refuse it, and harmlessly — a click sent
+            // **after** this pass left, in either of the two forms it can be in
+            // when the pass lands. Already answered, it has stamped a
+            // `switchConfirmedAt` younger than this pass's `askedAt` and
+            // `isStale`'s second half throws the count away (and `applyRoutable`
+            // would refuse the pass on the ask-instant even if `isStale` let it
+            // through); still in the air, it is the first half,
+            // `!inFlight.isEmpty`, that throws the count away instead. Nothing is
+            // lost either way — that click's own answer counted the fleet later
+            // than this pass asked, so it is the newer news whichever way round
+            // they land. The screen then stands on the click's count until the
+            // minute timer, which is where it would have stood anyway.
+            //
+            // Neither half of `settle` is decoration, and they refuse for different
+            // reasons. While another click is in the air `isStale` refuses this
+            // pass's count outright, so firing one would be 208 KB
+            // (`applyRotation`) spent to be ignored — and the click still out there
+            // brings its own settling pass with it when it lands. A click that went
+            // out **alone** has nothing to settle at all, and asking anyway would
+            // cost more than the bytes: `fetch` cancels the pass in flight, and
+            // that pass is the one thing `isStale`'s second half exists to refuse.
+            // Settle after every click and no pass asked before a confirmation can
+            // ever land, which turns that half into a guard that cannot fire.
+            if settle { fetch() }
+        }
+    }
+
+    /// One switch request, as a result or as a reason. Text rather than an
+    /// `Error` for `fetchRotation`'s reason, and the label is in it because the
+    /// popover keeps one message per label.
+    ///
+    /// Not private, for `load`'s reason: `nonisolated` here is load-bearing and
+    /// nothing warns when it is lost. This runs from a `Task` started inside a
+    /// `@MainActor` method, so that task inherits the main actor and only this
+    /// declaration keeps the request off it — a request that may sit there for
+    /// `UsageClient.timeoutSeconds` with the popover open on screen (§6). A test
+    /// can only ask that from a detached task, and only if it can reach this.
+    nonisolated static func switchAccount(client: UsageClient,
+                                          label: String,
+                                          enabled: Bool) async
+        -> (result: SwitchResult?, failure: String?) {
+        do {
+            let answer = enabled
+                ? try await client.enableAccount(label: label)
+                : try await client.disableAccount(label: label)
+            return (answer, nil)
+        } catch {
+            return (nil, "\(label): \(error)")
+        }
     }
 
     // MARK: Timer
@@ -976,14 +1630,24 @@ struct UsagePopoverView: View {
 
     // MARK: Accounts
 
+    /// The account list, and the three fleet-wide lines under it.
+    ///
+    /// **The lines are outside the list's own branch on purpose.** The rows come
+    /// from the quota poll (`/gw/usage`) and the rotation from `/gw/status`, which
+    /// are two answers and fail apart. Drawn inside the `else`, all three went off
+    /// screen whenever the first of the two was down — and that is not a passing
+    /// state on the way to a drawn list: with `/gw/usage` answering HTTP 500 the
+    /// popover said "/gw/usage: HTTP 500" and nothing else, while every client
+    /// request was being answered 429 and the orange line that says so was drawn
+    /// nowhere.
     @ViewBuilder private var accounts: some View {
-        if usage.snapshot.accounts.isEmpty {
-            Text(Self.accountsEmptyLabel(usage.snapshot))
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-        } else {
-            let labels = usage.snapshot.accounts.map(\.label)
-            VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
+            if usage.snapshot.accounts.isEmpty {
+                Text(Self.accountsEmptyLabel(usage.snapshot))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            } else {
+                let labels = usage.snapshot.accounts.map(\.label)
                 ForEach(usage.snapshot.accounts, id: \.label) { account in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 5) {
@@ -998,13 +1662,151 @@ struct UsagePopoverView: View {
                                 .font(.system(size: 12, weight: .semibold))
                                 .lineLimit(1)
                                 .truncationMode(.middle)
+                            Spacer(minLength: 4)
+                            rotationSwitch(for: account.label)
+                        }
+                        if let state = history.switches?[account.label], state.disabled {
+                            Text(Self.switchNote(state, now: history.now))
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                         }
                         windowRow("5h", account.fiveHour)
                         windowRow("7d", account.sevenDay)
                     }
                 }
             }
+            // Once for the list rather than once per row: all three lines are
+            // about the fleet, and a warning repeated beside every account would
+            // read as one warning per account.
+            if let warning = history.fleetWarning {
+                // One wording and one only — `UsageHistoryModel.noRouteWarning`,
+                // where the reason is written down. The gateway's own sentence is
+                // decoded and never reaches this line: it names the metric by the
+                // word §4 keeps off every string a person reads, and being a
+                // constant rather than a message it says nothing the count has not
+                // already said.
+                Text(warning)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // The operator's own clicks first: those are about something they did
+            // a moment ago, where the line under them is about a question nobody
+            // asked out loud.
+            if let blame = Self.switchBlame(history.switchFailures) {
+                Text(blame)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let failure = history.rotationFailure {
+                Text(failure)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+
+    /// The operator's switch for one account: ticked while the gateway routes to
+    /// it, and inert whenever this app cannot say.
+    ///
+    /// Three states rather than two, and the third is the whole of §2.4 applied
+    /// to a control: with no answer from `/gw/status` the box is drawn clear and
+    /// disabled, because a tick means "in the rotation" and this app would be
+    /// saying it without having been told. In flight it is inert as well, which is
+    /// what keeps a double click from sending a disable and an enable and leaving
+    /// the order to the network.
+    ///
+    /// There is a third way into that first state, and it is rare: the row comes
+    /// from `/gw/usage`'s account list and the tick from `/gw/status`, two answers
+    /// taken at two moments, so an account removed at the gateway between them has
+    /// a row here and no answer about it. `switches?[label]` is `nil` for exactly
+    /// the reason the whole dictionary can be, and the box draws the same. The
+    /// error runs the safe way — a control nobody may click over an account that
+    /// may already be gone, and the next quota poll takes the row with it. It has
+    /// not been reproduced live and will not be in this round: producing it means
+    /// removing an account at a gateway the fleet is being run from by hand.
+    @ViewBuilder private func rotationSwitch(for label: String) -> some View {
+        let state = history.switches?[label]
+        let look = Self.switchAppearance(state, busy: history.inFlight.contains(label))
+        Toggle("", isOn: Binding(get: { look.ticked },
+                                 set: { history.setAccount(label: label, enabled: $0) }))
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+            .disabled(!look.usable)
+            .help(Self.switchHelp(state))
+            .accessibilityLabel(Self.switchAccessibilityLabel(label))
+    }
+
+    /// What the checkbox is called to somebody who cannot see it. The tick is the
+    /// whole of the control — `labelsHidden`, no text beside it — so without this
+    /// the row's several boxes are several unnamed checkboxes.
+    ///
+    /// A named function rather than a literal at the call site for the same reason
+    /// `switchHelp` is one: §4 keeps the word this fleet metric is called by
+    /// internally off every string a person reads, and a literal inside a
+    /// `@ViewBuilder` is a string no test can ask for
+    /// (`testNoStringOnScreenNamesTheMetricByItsInternalWord`). It says "the
+    /// gateway rotation" for the same reason `switchHelp` does: what a tick means
+    /// is a fact about the gateway, not about this app.
+    static func switchAccessibilityLabel(_ label: String) -> String {
+        "\(label) in the gateway rotation"
+    }
+
+    /// Whether the box is ticked and whether it can be clicked — one function
+    /// because it is one decision: a box this app cannot fill in is a box it
+    /// must not let anybody click either.
+    ///
+    /// Written outside the view for the plain reason that inside it nothing can
+    /// ask. `ImageRenderer` draws this checkbox as a blank plate: ticked, clear,
+    /// inert and inert-and-ticked all come out as the same 784 inked pixels of
+    /// which 784 are chromatic (measured 2026-09-06, scale 2.0, a 40×24 frame),
+    /// so a paint test cannot tell one state of it from another, and `?? true`
+    /// in place of `?? false` would have gone unseen by every test on this
+    /// surface. That the view is wired to this function is still held by
+    /// reading it — but the wire is now one line long.
+    static func switchAppearance(_ state: AccountSwitch?, busy: Bool) -> (ticked: Bool, usable: Bool) {
+        guard let state else { return (ticked: false, usable: false) }
+        return (ticked: !state.disabled, usable: !busy)
+    }
+
+    /// Every click that would not go through, on one line, oldest label first.
+    ///
+    /// Ordered by label rather than by when it happened so that the line does not
+    /// reshuffle itself under the pointer as a second account answers.
+    static func switchBlame(_ failures: [String: String]) -> String? {
+        guard !failures.isEmpty else { return nil }
+        return failures.sorted { $0.key < $1.key }.map(\.value).joined(separator: "; ")
+    }
+
+    /// What the switch says when the pointer rests on it — and it may not claim a
+    /// state nobody reported, so the unknown case has wording of its own.
+    static func switchHelp(_ state: AccountSwitch?) -> String {
+        guard let state else { return "The gateway did not say whether this account is in rotation" }
+        return state.disabled
+            ? "Put this account back into the gateway rotation"
+            : "Take this account out of the gateway rotation"
+    }
+
+    /// The line under a switched-off account.
+    ///
+    /// The moment is drawn when the gateway named one, because an account
+    /// disabled for an hour from the command line is not the same state as one
+    /// disabled until somebody comes back — and this app can only ever write the
+    /// second kind. Written by `resetLabel`, the popover's one countdown, so the
+    /// wording is the wording of every other moment on this surface.
+    static func switchNote(_ state: AccountSwitch, now: Date) -> String {
+        var note = "off"
+        if let until = state.disabledUntil {
+            note += " (\(resetLabel(until, now: now)))"
+        }
+        if !state.disabledReason.isEmpty {
+            note += " · \(state.disabledReason)"
+        }
+        return note
     }
 
     /// One quota window of one account: what it is, how full it is, and when it
