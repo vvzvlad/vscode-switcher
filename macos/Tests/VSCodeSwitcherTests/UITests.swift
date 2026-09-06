@@ -4174,6 +4174,200 @@ final class UsageHistoryTests: XCTestCase {
                        HistoryPeriod.hour.seconds, accuracy: 5)
     }
 
+    /// And the rotation is applied the moment `/gw/status` answers, with the
+    /// histories still in the air.
+    ///
+    /// This is the second half of the 2026-09-06 complaint: it does not show up
+    /// straight away, and the list jumps once the popover is already open. Both
+    /// answers used to be awaited together and applied as one value, so every
+    /// checkbox stood clear and disabled and no note existed until the **last**
+    /// history landed, and then
+    /// the row changed under the pointer. The gap is the whole difference in size
+    /// between the two: measured against the live gateway the same day on an idle
+    /// machine (load average 4.05), ten day passes took 0.052–0.251 s (median
+    /// 0.063) against ten bare `/gw/status` at 0.014–0.018 s (median 0.017) —
+    /// 6210 bytes of status against 178 313 of pass. `fetch`'s own docblock carries
+    /// the second run, under load, and what the pair of them says.
+    ///
+    /// Asked by holding the histories open-ended and letting the status answer at
+    /// once, which states the claim exactly: the checkboxes are drawn off an answer
+    /// that arrived while the rest of the pass had not. The wait for it is **timed
+    /// rather than open**, for `testLoadDoesNotNeedTheMainThread`'s reason — the
+    /// regression this guards is a rotation that waits for the histories, and an
+    /// open wait on it inside a held gate is a run that never returns rather than
+    /// a test that fails.
+    ///
+    /// Two controls, and neither is spare. `series` empty proves the gate really
+    /// was holding the histories rather than the fixture being empty, and the same
+    /// two read after the gate opens prove the gate was the only thing holding them
+    /// — without that half a stub that answered no history at all would pass.
+    ///
+    /// Mutation, 2026-09-06 against a suite of 674 and re-run the same day against
+    /// 675 when the test below arrived: awaiting the histories first
+    /// and applying both halves together — which is how `fetch` was written until
+    /// that day — reddens this test and nothing else, on its first two assertions,
+    /// `switches` still `nil` after the five-second deadline. The two controls stand
+    /// through it, as they must: the mutation moves when the rotation lands, not
+    /// whether the gate holds. And the test below stands through it as well, which
+    /// is why the re-run: it cancels a pass mid-air on this same path, and a
+    /// mutation there could plausibly have reached it.
+    func testTheRotationIsDrawnBeforeTheHistoriesHaveLanded() async throws {
+        let counter = RequestCounter()
+        let histories = Gate()
+        let history = UsageHistoryModel(client: rotationClient(counter, historyGate: histories),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc2", "acc3"])
+        defer { history.close() }
+        // The pass is genuinely in the air before anything is asked of it: `open`
+        // starts a `Task` whose body has not run yet.
+        await histories.arrival()
+
+        var switches: [String: AccountSwitch]?
+        let deadline = ContinuousClock.now + .seconds(5)
+        while ContinuousClock.now < deadline {
+            switches = history.switches
+            if switches != nil { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertNotNil(switches, """
+            the rotation waited for the histories: every box stands clear and disabled until \
+            they answer, and then the list moves
+            """)
+        XCTAssertEqual(switches?["acc3"]?.disabled, true,
+                       "the boxes were drawn off something other than this rotation")
+        XCTAssertTrue(history.series.isEmpty,
+                      "the histories answered after all, so nothing here was held apart")
+        XCTAssertNil(history.fetchedAt, "the pass dated itself from its cheap half")
+
+        histories.open()
+        await history.fetchTask?.value
+        XCTAssertEqual(history.series.map(\.label), ["acc2", "acc3"],
+                       "the histories never landed at all, so the first half of this proves nothing")
+        XCTAssertNotNil(history.fetchedAt, "the pass never dated itself")
+    }
+
+    /// And a pass cancelled before its rotation landed applies neither half of
+    /// itself.
+    ///
+    /// The promise `fetch` makes out loud since the two halves began landing
+    /// apart, and until this test **nothing held it**: it is written as one guard
+    /// asked twice, and taking either copy off reddened nothing in a suite of 674.
+    /// Both are reachable and each costs its own thing. The rotation half draws
+    /// the checkboxes, so a cancelled pass applying it puts the fleet as it stood
+    /// a period ago back under the pointer; the history half writes
+    /// `seriesPeriod`, so the same pass applying that leaves a `1d` chart under
+    /// the `7d` tab — the picture lying about its own axis `apply` refuses one
+    /// line further down.
+    ///
+    /// The arrangement is the one a change of period makes on its own:
+    /// `period.didSet` calls `fetch`, and `fetch` cancels the pass in flight
+    /// before starting the next. So the first pass is cancelled with its answer
+    /// already in hand — `firstStatus` holds it at a gate and hands it the fleet
+    /// as it stood, while the second pass is held by nothing and lands whole —
+    /// and then the gate opens and the cancelled one wakes with news a period old.
+    /// That is the shape the guard is written against: the request is done, only
+    /// the hop back to the main actor is left, which is where the cancelling
+    /// `fetch` fits.
+    ///
+    /// A change of period rather than any of the other five occasions a pass is
+    /// started on, and not because it is the only one that cancels: the cancel is
+    /// `fetch`'s own, standing between its `isOpen` guard and the new task, so
+    /// all six pass through it — those of them that start at all, since under a
+    /// shut popover `fetch` leaves on that same `isOpen` guard and never reaches
+    /// the cancel. What makes the history half observable at all is
+    /// the two passes asking **different questions** — two passes over one window
+    /// and one set of accounts land identical lines, and a misapplied one leaves
+    /// no mark on them — and **three** of the six can. Two are made to by a guard
+    /// of their own: a change of period (`period != oldValue`), and a change of
+    /// the account list under an open popover (`update(labels:)`, off the view's
+    /// `onChange` on what the summary poll named, `labels != self.labels`). The
+    /// third only may, and is easy to leave out for exactly that reason: `open`
+    /// assigns `self.labels` under no guard at all, so a close, a change of the
+    /// fleet, and a reopen put two passes over different account sets in the air
+    /// — the older one held off by this same guard, `close` having cancelled it
+    /// and left `open`'s `fetch` a nil `fetchTask` to cancel. The window is not
+    /// `UsageClient.timeoutSeconds`, which is the ceiling on a pass **nobody
+    /// cancelled**: `close` cancels this one, and what is left of it is the hop
+    /// back to the main actor — 0.13–2.76 ms of it, against 42.7–50.5 ms
+    /// uncancelled, probed with plain GETs against the live gateway 2026-09-06
+    /// 22:12Z at load average 7.33. Nobody has observed the arrangement, and it
+    /// is named as a structural hole rather than a reachable one: `open` is the
+    /// only writer of `self.labels` with no guard, but the sole way back in is a
+    /// user's second click, orders past those milliseconds on its own — and past
+    /// them again when the close caught the button still down and armed
+    /// `PopoverDismissal.suppressionWindow` (0.25 s). The remaining three — the
+    /// repair after a failed
+    /// switch, `settle`, and `tick` — ask over the labels and the period of the
+    /// pass they replace, every time.
+    ///
+    /// The period is the one taken because the mark it leaves is a single field.
+    /// `apply` writes the period it was handed into `seriesPeriod` on any
+    /// non-empty answer, so the claim below is one equality against a scalar; a
+    /// change of labels leaves its mark in `series`, written in that same branch,
+    /// and asking it means comparing the contents of an array instead.
+    ///
+    /// The stale body has to *say* something else, or a pass that applied it and
+    /// a pass that applied nothing leave the same model behind. It says it where
+    /// the assertion looks — `acc2` switched off, where the fresh answer has it in
+    /// the rotation — and it keeps the routable count at one, as
+    /// `UsageFixtures.status` has it, so the orange line is not a second thing
+    /// being claimed here. (Which account holds that one routable slot does move,
+    /// and nothing here asks.)
+    ///
+    /// Mutations, 2026-09-06 against a suite of 675. Dropping `!Task.isCancelled`
+    /// from the rotation half fails the `switches` assertion alone (`acc2` reads
+    /// switched off, off the body the cancelled pass carried) and reddens no other
+    /// test; dropping it from the history half fails the `seriesPeriod` assertion
+    /// alone (`1d` under the `7d` tab) and likewise reddens nothing else. The two
+    /// assertions before the gate opens are the control: without them the pair
+    /// after it would pass just as well against a second pass that never landed.
+    func testAPassCancelledBeforeItsRotationLandedAppliesNeitherHalf() async throws {
+        let counter = RequestCounter()
+        let held = Gate()
+        // A fleet with `acc2` switched off, which is the only thing asserted about
+        // this body. One routable account, as `UsageFixtures.status` has too, so
+        // the orange line reads the same off either answer and is not a second
+        // claim riding along.
+        let stale = """
+        {"accounts": [
+           {"label": "acc2", "eligible": false,
+            "disabled": true, "disabled_until": null, "disabled_reason": ""},
+           {"label": "acc3", "eligible": false,
+            "disabled": true, "disabled_until": 1788706735, "disabled_reason": ""},
+           {"label": "main", "eligible": true,
+            "disabled": false, "disabled_until": null, "disabled_reason": ""}
+         ]}
+        """
+        let history = UsageHistoryModel(
+            client: rotationClient(counter, firstStatus: (gate: held, body: stale)),
+            defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        defer { history.close() }
+        let cancelled = history.fetchTask
+        // The first pass is genuinely at the gate before anything is asked of it.
+        await held.arrival()
+
+        XCTAssertEqual(history.period, .day, "the pass being cancelled asked for the wrong window")
+        history.period = .week
+        await history.fetchTask?.value
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, false,
+                       "the second pass never drew the boxes, so there is nothing here to undo")
+        XCTAssertEqual(history.seriesPeriod, .week,
+                       "the second pass never drew its own lines, so the same")
+
+        held.open()
+        await cancelled?.value
+
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, false, """
+            the cancelled pass put its own rotation on the boxes, and what it carries is the \
+            fleet as it stood before the period was changed
+            """)
+        XCTAssertEqual(history.seriesPeriod, .week, """
+            the cancelled pass applied its lines under the tab that is on screen: a 1d chart \
+            labelled 7d
+            """)
+    }
+
     /// And closing it stops the schedule: a tick after the close asks for
     /// nothing more.
     func testClosingStopsTheSchedule() async {
@@ -4227,6 +4421,12 @@ final class UsageHistoryTests: XCTestCase {
     /// `UsageHistoryModel.refreshSeconds` (a `static let` on the `@MainActor`
     /// class) inside `load` fails it after the timeout instead of passing in
     /// milliseconds.
+    ///
+    /// **Both halves of a pass, because they are two calls now.** The rotation
+    /// used to be started from inside `load` and rode its `nonisolated` for free;
+    /// since 2026-09-06 `fetch` starts it beside the histories so that the
+    /// checkboxes land without waiting for them, which is a second entry point
+    /// with the same trap under it and no diagnostic over it.
     func testLoadDoesNotNeedTheMainThread() {
         let counter = RequestCounter()
         let client = client(counter)
@@ -4234,6 +4434,7 @@ final class UsageHistoryTests: XCTestCase {
         Task.detached {
             _ = await UsageHistoryModel.load(client: client, labels: ["acc1", "acc2"],
                                              since: Date().addingTimeInterval(-3600))
+            _ = await UsageHistoryModel.fetchRotation(client: client)
             semaphore.signal()
         }
         XCTAssertEqual(semaphore.wait(timeout: .now() + 5), .success,
@@ -4606,6 +4807,7 @@ final class UsageHistoryTests: XCTestCase {
         private var arrivals: [CheckedContinuation<Void, Never>] = []
         private var opened = false
         private var reached = false
+        private var claimed = false
 
         func open() {
             lock.lock()
@@ -4649,6 +4851,25 @@ final class UsageHistoryTests: XCTestCase {
                 if already { continuation.resume() }
             }
         }
+
+        /// Answers `true` to the first caller and `false` to every one after it.
+        ///
+        /// Which is how a test puts **two** passes in the air and still knows the
+        /// order they land in: `wait` holds everybody who reaches it, `open`
+        /// releases them all at once, and which of the released two gets back to
+        /// the main actor first is the executor's business. Holding only the first
+        /// leaves the second free to land whole while the first is still at the
+        /// gate, and then the gate decides the order rather than observing it.
+        ///
+        /// Synchronous and under the same lock as the rest, so "first" is settled
+        /// once however the two callers arrive.
+        func claimFirst() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if claimed { return false }
+            claimed = true
+            return true
+        }
     }
 
     /// A gateway that answers the three questions separately: histories from the
@@ -4656,26 +4877,52 @@ final class UsageHistoryTests: XCTestCase {
     /// each of which may be `nil`, which is that endpoint failing while the
     /// others go on answering.
     ///
-    /// Either of the two may be held in a gate, and never both at once: what a
-    /// gate buys is an order between a pass and a click, and a test holding both
-    /// has stopped being able to state one.
+    /// The switch and the rotation may be held in a gate, and never both at once:
+    /// what those two gates buy is an order between a pass and a click, and a test
+    /// holding both has stopped being able to state one.
+    ///
+    /// `historyGate` is a different axis and composes with either: it orders the
+    /// two halves of one pass against each other, which is what a pass that draws
+    /// the rotation without waiting for the histories has to be asked.
+    ///
+    /// `firstStatus` is a third: the **first** `/gw/status` of the run is held in
+    /// its own gate and answered with its own body, and every later one is
+    /// answered from `status` and held by nothing. Which is what a test with two
+    /// passes in the air needs and `statusGate` cannot give it — that one holds
+    /// both, and the order two released passes land in is the executor's. The body
+    /// differs because a stale pass that wrote what was already there and one that
+    /// wrote nothing leave the same model behind. And this path deliberately does
+    /// **not** check for cancellation: what it stands for is the answer being in
+    /// hand already when the cancel arrives, so that only the hop back to the main
+    /// actor is left — which is the case `fetch`'s guards are written against.
     private func rotationClient(_ counter: RequestCounter,
                                 status: String? = UsageFixtures.status,
                                 switchAnswer: String? = UsageFixtures.switchAnswer,
                                 gate: Gate? = nil,
-                                statusGate: Gate? = nil) -> UsageClient {
+                                statusGate: Gate? = nil,
+                                firstStatus: (gate: Gate, body: String)? = nil,
+                                historyGate: Gate? = nil) -> UsageClient {
         UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
             counter.record(request.url)
             let url = request.url ?? Config.default.resolvedUsageBaseURL
             let body: String?
             if url.path.hasSuffix("/history") {
-                body = UsageFixtures.history
-            } else if url.path == "/gw/status" {
-                if let statusGate {
-                    await statusGate.wait()
+                if let historyGate {
+                    await historyGate.wait()
                     try Task.checkCancellation()
                 }
-                body = status
+                body = UsageFixtures.history
+            } else if url.path == "/gw/status" {
+                if let firstStatus, firstStatus.gate.claimFirst() {
+                    await firstStatus.gate.wait()
+                    body = firstStatus.body
+                } else {
+                    if let statusGate {
+                        await statusGate.wait()
+                        try Task.checkCancellation()
+                    }
+                    body = status
+                }
             } else {
                 if let gate {
                     await gate.wait()
@@ -7323,9 +7570,9 @@ final class UsagePopoverLabelTests: XCTestCase {
         // What the checkbox is called with no eyes on it — as much a string on
         // screen as the ones with pixels, and §4 draws no line between them.
         strings.append(UsagePopoverView.switchAccessibilityLabel("acc2"))
-        // The line under a switched-off account, in all three of its shapes. The
-        // reason in the third is the gateway's word and is here to be carried
-        // rather than to be judged: what is asked is the frame around it.
+        // The note beside a switched-off account's name, in all three of its
+        // shapes. The reason in the third is the gateway's word and is here to be
+        // carried rather than to be judged: what is asked is the frame around it.
         if let off = try? Self.rotationState(disabled: true) {
             strings.append(UsagePopoverView.switchNote(off, now: now))
         }
@@ -7401,14 +7648,15 @@ final class UsagePopoverLabelTests: XCTestCase {
         }
         let refused = await UsageHistoryModel.load(client: refusing, labels: ["acc2"],
                                                    since: now.addingTimeInterval(-86_400))
+        let refusedRotation = await UsageHistoryModel.fetchRotation(client: refusing)
         let refusedClick = await UsageHistoryModel.switchAccount(client: refusing, label: "acc2",
                                                                  enabled: false)
         // Without this the three below could be `nil`, and a sweep over three
         // empty strings reads as covered while covering nothing.
-        XCTAssertNotNil(refused.rotation.failure, "the refusing client answered the rotation")
+        XCTAssertNotNil(refusedRotation.failure, "the refusing client answered the rotation")
         XCTAssertNotNil(refused.failure, "the refusing client answered a history")
         XCTAssertNotNil(refusedClick.failure, "the refusing client answered the click")
-        strings.append(refused.rotation.failure ?? "")
+        strings.append(refusedRotation.failure ?? "")
         strings.append(refused.failure ?? "")
         strings.append(refusedClick.failure ?? "")
         for text in strings {
@@ -7484,8 +7732,8 @@ final class UsagePopoverLabelTests: XCTestCase {
             """, as: AccountSwitch.self)
     }
 
-    /// The line under a switched-off account says the two things the gateway can
-    /// add to "off", and says nothing where there is nothing to say.
+    /// The note beside a switched-off account's name says the two things the
+    /// gateway can add to "off", and says nothing where there is nothing to say.
     ///
     /// The deadline is drawn and never set: this app's own switch sends no body,
     /// which is the gateway's "until somebody puts it back", so a moment here can
@@ -9093,7 +9341,60 @@ final class UsagePopoverPaintTests: XCTestCase {
         return widths
     }
 
-    // MARK: - The line under a switched-off account
+    // MARK: - The note beside a switched-off account
+
+    /// A reason standing on the live gateway on 2026-09-06, and the one that made
+    /// this arrangement worth measuring: 62 characters, wider than the room the
+    /// name line has for a note at any width this popover is drawn at.
+    ///
+    /// Live, and **not drawn anywhere today**: it sits on `acc3`, whose `disabled`
+    /// is `false`, so the row it belongs to shows no note at all. `disabled_reason`
+    /// outlives the switch it was written for. What that buys is the length being
+    /// a real one rather than an invented one — a fixture, not an observation of
+    /// the surface.
+    private static let longReason = "operator: 22h, switched over from the temporary quota cooldown"
+
+    /// One account's row, rendered on its own at the width the list gives it.
+    ///
+    /// The row and not the whole popover, because what the arrangement promises is
+    /// a **height**, and a height is only observable on the thing that has one.
+    /// Ink bands over the whole picture — how this was measured while the note had
+    /// a line of its own — cannot see the note at all now: the name line runs from
+    /// the dot to the checkbox at the right edge, so a note between them widens no
+    /// band. What is counted instead is inked pixels, which a wider note moves and
+    /// a note that is not drawn does not.
+    private func accountRow(disabled: Bool,
+                            reason: String,
+                            label: String = "acc1") async throws -> Canvas {
+        // `elsewhere` is here so the fleet has somewhere to route: this account
+        // alone would be zero routable accounts in the switched-off half, and the
+        // orange line is drawn under the list rather than in a row — but a rotation
+        // this stub answers is the fleet's, and a fixture that says one thing in
+        // one half and another in the other is measuring itself.
+        let rotation = """
+        {"accounts": [{"label": "\(label)", "eligible": \(!disabled), "disabled": \(disabled), \
+        "disabled_until": null, "disabled_reason": "\(reason)"}, \
+        {"label": "elsewhere", "eligible": true, "disabled": false, \
+        "disabled_until": null, "disabled_reason": ""}]}
+        """
+        let (view, store, history) = try await popover(named: [label], asked: [label],
+                                                       readings: [label: 40], rotation: rotation)
+        defer { history.close() }
+        let account = try XCTUnwrap(store.snapshot.accounts.first, "the poll named no account")
+        let content = UsagePopoverView.width - 2 * UsagePopoverView.padding
+        return try canvas(view.accountRow(account, in: [label]).frame(width: content))
+    }
+
+    /// Everything drawn in a rendering, counted rather than bounded: a note that
+    /// grew inside a line already running edge to edge changes this and changes no
+    /// bounding box.
+    private func inkedPixels(in canvas: Canvas) -> Int {
+        var count = 0
+        for y in 0..<canvas.height {
+            for x in 0..<canvas.width where canvas.alpha(x, y) > 8.0 / 255 { count += 1 }
+        }
+        return count
+    }
 
     /// The row of an account the gateway is not routing to says so, and the row
     /// of one it is says nothing extra.
@@ -9104,50 +9405,193 @@ final class UsagePopoverPaintTests: XCTestCase {
     /// differ in the checkbox's own tick as well, so a note deleted outright
     /// would still leave the pictures unequal and the probe would report it
     /// drawn. Two reasons of different lengths hold the rest of the row fixed:
-    /// the note is drawn and the wider reason takes more room, or it is not and
-    /// the two pictures are the same to the pixel.
+    /// the note is drawn and the wider reason inks more of the line, or it is not
+    /// and the two renderings are the same to the pixel.
     ///
-    /// Measured over every band of ink in the popover rather than at a
-    /// coordinate: the row's place moves with any change of font or inset, while
-    /// "exactly one line of this picture got wider" survives all of them.
+    /// Both are short enough to escape the truncation, because two reasons both
+    /// cut off at the same width would ink the same amount for a reason that has
+    /// nothing to do with whether either was drawn.
+    ///
+    /// Mutation, 2026-09-06 against a suite of 674: deleting the note's `Text` from
+    /// `accountRow` reddens this and nothing else in the suite — 8372 inked pixels
+    /// against 8372, the two reasons drawing the same picture to the pixel. The two
+    /// tests under it stay green under that mutation and are supposed to: with the
+    /// note's `Text` gone all three of the height test's rows are equally
+    /// note-less, so both of its pairs collapse into equalities, and the name
+    /// test's crowded row has nothing left to crowd it. Each of them has its own
+    /// mutation, recorded with it.
     func testTheRowOfASwitchedOffAccountSaysSoAndTheRowOfALiveOneDoesNot() async throws {
-        func bands(disabled: Bool, reason: String) async throws -> [Double] {
-            // `elsewhere` is here so the fleet has somewhere to route and no orange
-            // line joins the picture: `acc1` alone would be zero routable accounts
-            // in the switched-off half and one line more than in the other.
-            let rotation = """
-            {"accounts": [{"label": "acc1", "eligible": \(!disabled), "disabled": \(disabled), \
-            "disabled_until": null, "disabled_reason": "\(reason)"}, \
-            {"label": "elsewhere", "eligible": true, "disabled": false, \
-            "disabled_until": null, "disabled_reason": ""}]}
-            """
-            let (view, _, history) = try await popover(named: ["acc1"], asked: ["acc1"],
-                                                       readings: ["acc1": 40], rotation: rotation)
-            defer { history.close() }
-            return inkBands(in: try canvas(view))
-        }
-        // Short enough that neither is truncated: the note is one line with a
-        // tail truncation, and two reasons both cut off at the popover's width
-        // would be the same width for a reason that has nothing to do with this.
-        let narrow = try await bands(disabled: true, reason: "z")
-        let wide = try await bands(disabled: true, reason: "zzzzzzzzzz")
-
-        XCTAssertEqual(narrow.count, wide.count,
-                       "the two rotations drew a different number of lines: \(narrow) / \(wide)")
-        let moved = zip(narrow, wide).enumerated().filter { abs($0.element.1 - $0.element.0) > 0.5 }
-        XCTAssertEqual(moved.count, 1,
-                       "\(moved.count) lines of the popover follow the reason, not one: "
-                       + "\(narrow) / \(wide)")
-        let note = try XCTUnwrap(moved.first?.element)
-        XCTAssertGreaterThan(note.1, note.0 + 10,
-                             "nine more characters bought \(note.1 - note.0) pt of line")
+        let narrow = inkedPixels(in: try await accountRow(disabled: true, reason: "z"))
+        let wide = inkedPixels(in: try await accountRow(disabled: true, reason: "zzzzzzzzzz"))
+        XCTAssertGreaterThan(wide, narrow + 20,
+                             "nine more characters of reason bought \(wide - narrow) pixels of "
+                             + "ink (\(narrow) against \(wide)): the note is not drawn")
 
         // And in the rotation the field is not drawn at all, so the same two
         // values give the same picture.
-        let live = try await bands(disabled: false, reason: "z")
-        let liveWide = try await bands(disabled: false, reason: "zzzzzzzzzz")
+        let live = inkedPixels(in: try await accountRow(disabled: false, reason: "z"))
+        let liveWide = inkedPixels(in: try await accountRow(disabled: false,
+                                                            reason: "zzzzzzzzzz"))
         XCTAssertEqual(live, liveWide,
                        "an account in the rotation drew a reason it is not disabled for")
+    }
+
+    /// And the note costs the row no height, which is the whole of why it moved
+    /// onto the name line.
+    ///
+    /// It had a line of its own until 2026-09-06 and the complaint was the two
+    /// halves of that: a bare `off` on a row by itself, and a list that grows by a
+    /// line the moment somebody switches an account off — under the pointer, since
+    /// the click that switches it is made on this very row.
+    ///
+    /// Three rows and not two, and **each pair among them catches a defect the
+    /// other cannot** — measured, not reasoned: the mutations below fail one
+    /// assertion each, and a different one. The live row against the short reason
+    /// is what sees the arrangement itself, the note taking a row of its own; the
+    /// two reasons of different widths are what see the truncation, a note allowed
+    /// to wrap on exactly the value that made it worth showing. Neither pair alone
+    /// is this test. The two-widths pair is here in the shape §4 prescribes for
+    /// "is it drawn" and does not answer that question here — the test next door
+    /// does, and the height claim needs the live row that the §4 shape leaves out.
+    ///
+    /// Mutations, re-run 2026-09-06 against a suite of 675, and what makes both
+    /// pairs necessary is that **each fails one assertion here, and a different
+    /// one** — not that either is invisible elsewhere in the suite. Putting the
+    /// note back under the name, exactly as it stood (its `lineLimit(1)` kept),
+    /// fails the live-against-short assertion alone: 51.0 pt against 68.0, the
+    /// 17 pt a switched-off account cost the list. That one reddens nothing else
+    /// in the suite, and it leaves the two reasons equal at 68.0, so the pair that
+    /// reads as the canonical §4 probe cannot see that defect at all. Taking
+    /// `lineLimit(1)` off the note fails the other one instead, 51.0 against 62.0
+    /// — the live reason wrapping to a second line inside the name row. That one
+    /// is **not** confined to this test: it reddens three assertions across two,
+    /// the other two being both of the name test's ink checks next door (623
+    /// against 381 at the short label, 3038 against 0 at the long one), and that
+    /// test's own record carries them.
+    ///
+    /// (Recorded wrong first time round and re-run: the first mutation was written
+    /// without the `lineLimit(1)`, which is two changes at once, and the 81.0 pt it
+    /// produced was charged to the arrangement rather than to the wrapping.)
+    func testTheNoteRidesOnTheNameLineAndCostsTheRowNoHeight() async throws {
+        func height(disabled: Bool, reason: String) async throws -> Double {
+            let picture = try await accountRow(disabled: disabled, reason: reason)
+            return Double(picture.height) / picture.scale
+        }
+        let live = try await height(disabled: false, reason: "")
+        let short = try await height(disabled: true, reason: "z")
+        let long = try await height(disabled: true, reason: Self.longReason)
+
+        XCTAssertEqual(short, long, accuracy: 0.5,
+                       "a longer reason made the row taller — \(short) pt against \(long) pt — so "
+                       + "the note wrapped rather than being cut")
+        XCTAssertEqual(live, short, accuracy: 0.5,
+                       "switching an account off cost the row \(short - live) pt, which is the "
+                       + "list moving under the pointer of whoever clicked it")
+    }
+
+    /// The dot and the name, as the row with nothing beside them draws it: over the
+    /// name line's own rows, every column up to the first clear gap wider than the
+    /// 5 pt the `HStack` puts between its items.
+    ///
+    /// Two things here were first written as assumptions and both were wrong, which
+    /// is why they are measured. The band **cannot be a number**: written as one it
+    /// was 60 pt, on the arithmetic that `acc1` at 12 pt semibold is 27.5 pt of ink
+    /// after a 7 pt dot and a 5 pt gap — and the note starts 5 pt past the name,
+    /// well inside 60, so the crowded row came out 185 pixels *heavier* than the
+    /// bare one and the probe read a wider name where it was reading a reason. And
+    /// the columns **cannot be taken over the whole row**: under the name line sit
+    /// the two window rows, whose ink runs from the label to the reset column, so
+    /// the first gap in a full-height scan is one of theirs — 164 pt in, past the
+    /// note entirely.
+    private func nameBand(of canvas: Canvas, over rows: Range<Int>) -> Int {
+        func inked(_ x: Int) -> Bool { rows.contains { canvas.alpha(x, $0) > 8.0 / 255 } }
+        // Wider than the 5 pt between the name and whatever follows it, and far
+        // narrower than the `Spacer` before the checkbox, which is the only gap in
+        // a name line drawn with nothing between the two.
+        let gap = Int(8 * canvas.scale)
+        var clear = 0
+        for x in 0..<canvas.width {
+            if inked(x) { clear = 0; continue }
+            clear += 1
+            if clear == gap { return x - gap + 1 }
+        }
+        return canvas.width
+    }
+
+    /// And what the note gives up to fit is its own tail and never the name.
+    ///
+    /// The name is the row's identity: the checkbox beside it does something to
+    /// *that* account, and a row whose name was eaten by a 62-character reason
+    /// no longer says which. So the two are asked with a reason wider than the line
+    /// has room for, and what is compared is the left of the row — dot and name —
+    /// against the same row with no note at all. Pixel for pixel, because a name
+    /// shortened by `truncationMode(.middle)` is still a name and still inks
+    /// something, an ellipsis of its own at that.
+    ///
+    /// **Asked twice, and the second label is the whole test.** A fleet's labels
+    /// are short — `acc2`, `acc3`, `main` — and at that length the two never
+    /// compete at all: the dot and `acc1` take 37.5 pt of a 292 pt line, the note
+    /// truncates into what is left whatever the priorities say, and taking
+    /// `layoutPriority` off the name reddened **nothing in a suite of 674 until
+    /// this test asked a long label**. That is
+    /// the modifier-in-the-default trap (§4): the label comes off `/gw/usage` and
+    /// is whatever the gateway calls an account, so the arrangement is asked at the
+    /// length where something has to give.
+    ///
+    /// Mutations, re-run 2026-09-06 against a suite of 675, and the two are not
+    /// symmetrical. Taking `layoutPriority(1)` off the name fails the long label's
+    /// assertion alone — 3038 inked pixels in the name's first 178 pt against 2483,
+    /// the name giving up a fifth of itself to a reason — leaves the short label's
+    /// green, and reddens nothing else in the suite. That asymmetry is the whole
+    /// reason the long label is here, and it is the only thing the pair of labels
+    /// has to prove: what the other mutation does is **not** the mirror image of
+    /// it. Taking `lineLimit(1)` off the note fails **both of this test's ink
+    /// checks** — 623 against 381 in the short label's 37.5 pt, 3038 against 0 in
+    /// the long one's 178 pt, a note that may wrap asking for its full width and
+    /// the name paying for it even at `acc1` — and the height test next door as
+    /// well, three assertions across two tests, which is that test's own record.
+    /// The two band guards here stand through both mutations and cannot do
+    /// otherwise: the band is measured on the **bare** row, which carries no note
+    /// for either modifier to act on.
+    func testTheNameIsNeverTheHalfThatIsCutToFitTheNote() async throws {
+        func ink(_ label: String) async throws -> (bare: Int, crowded: Int, band: Double) {
+            let bare = try await accountRow(disabled: false, reason: "", label: label)
+            let crowded = try await accountRow(disabled: true, reason: Self.longReason,
+                                               label: label)
+            // The name line is the top band of the three: name, then the 5h
+            // window, then the 7d one.
+            let line = try XCTUnwrap(inkBandRows(in: bare).first, "the bare row drew nothing")
+            // The band comes from the bare row, where the name has nothing next to
+            // it: in the crowded one the note's ink would close the gap that finds
+            // it.
+            let band = nameBand(of: bare, over: line)
+            func count(_ canvas: Canvas) -> Int {
+                var total = 0
+                for y in line {
+                    for x in 0..<band where canvas.alpha(x, y) > 8.0 / 255 { total += 1 }
+                }
+                return total
+            }
+            return (count(bare), count(crowded), Double(band) / bare.scale)
+        }
+
+        let short = try await ink("acc1")
+        XCTAssertGreaterThan(short.band, 30,
+                             "the band stopped at \(short.band) pt, which is inside the name "
+                             + "rather than after it")
+        XCTAssertEqual(short.bare, short.crowded,
+                       "the name gave way to the note: \(short.bare) inked pixels in the first "
+                       + "\(short.band) pt of the name line against \(short.crowded)")
+
+        // Long enough that the name and a 62-character reason cannot both have
+        // what they want, which is the only arrangement in which either gives way.
+        let long = try await ink("a-rather-long-account-label")
+        XCTAssertGreaterThan(long.band, short.band + 40,
+                             "the long label drew no wider than the short one (\(long.band) pt "
+                             + "against \(short.band)), so nothing here competes for room")
+        XCTAssertEqual(long.bare, long.crowded,
+                       "the long name gave way to the note: \(long.bare) inked pixels in the "
+                       + "first \(long.band) pt of the name line against \(long.crowded)")
     }
 
     /// The window the warning's own orange occupies in a rendering, measured.
