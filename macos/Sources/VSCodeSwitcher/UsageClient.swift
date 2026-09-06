@@ -22,11 +22,20 @@ enum UsageError: Error, Equatable, Sendable, CustomStringConvertible {
     }
 }
 
-/// Read-only HTTP client for the claude_gw gateway.
+/// HTTP client for the claude_gw gateway: four GETs that read the fleet and two
+/// POSTs that change it.
 ///
 /// The gateway takes no authentication — it listens on the loopback relay
-/// (`http://127.0.0.1:8788`) which forwards over WireGuard — so every call is a
-/// bare GET.
+/// (`http://127.0.0.1:8788`) which forwards over WireGuard — so nothing here
+/// carries a credential, and the two POSTs are as bare as the GETs: no body at
+/// all, the whole of the request being its path.
+///
+/// **It was read-only until the account switches arrived**, and they live here
+/// rather than in a writing client of their own for the plain reason that there
+/// is one gateway: a second type would duplicate the transport seam, the status
+/// check, `UsageError` and `describe` in order to send two requests that differ
+/// from the four beside them by a verb. What that would buy is a type name
+/// saying "this one writes", and this file says it in one line instead.
 ///
 /// The transport is injected with a default argument, the same seam
 /// `DataSource` uses for its assembly: the tests drive real bodies and real
@@ -62,7 +71,9 @@ struct UsageClient: Sendable {
     ///
     /// Two callers, on schedules an order of magnitude apart, and both ask once
     /// per account per pass. `UsageHistoryModel.load` draws the popover's chart
-    /// and runs only while the popover is open, on its own minute cadence; it
+    /// and runs only while the popover is open, on its own minute cadence and on
+    /// the four unscheduled occasions listed at `status` below — it is one pass
+    /// that carries both endpoints, so their schedules are the same one; it
     /// smooths what comes back (`withoutSourceLag`) because the chart wants the
     /// sawtooth gone. `UsageStore.histories` feeds `FleetCapacity` from `poll`,
     /// once every `UsageStore.historyIntervalSeconds`, and needs the **raw**
@@ -75,6 +86,41 @@ struct UsageClient: Sendable {
     /// minutes and ten times that at one, against about 3 KB for `/gw/usage`.
     func history(label: String, since: Date) async throws -> HistorySeries {
         try await fetch(pathSegments: ["gw", "usage", label, "history"], since: since)
+    }
+
+    /// Which accounts an operator has switched out of the rotation.
+    ///
+    /// Asked by the popover's own model while the popover is open, and never by
+    /// `UsageStore.poll`: the answer is 6.2 KB (measured 2026-09-06) and the one
+    /// thing this app reads out of it is drawn nowhere else, so on the minute
+    /// poll it would be some 370 KB an hour of a fact nobody is looking at.
+    ///
+    /// The same argument as `history` above, and **not** the same schedule. That
+    /// one is on `UsageStore.poll` as well, at `UsageStore.historyIntervalSeconds`;
+    /// this one is on no poll at all. Its only caller is
+    /// `UsageHistoryModel.fetchRotation`, one per pass — so it goes out on `open`,
+    /// on a change of period or of the account list, on the popover's own
+    /// `UsageHistoryModel.refreshSeconds` timer, and on the passes `setAccount`
+    /// asks for.
+    func status() async throws -> GatewayStatus {
+        try await fetch(pathSegments: ["gw", "status"], since: nil)
+    }
+
+    /// Take one account out of the rotation until somebody puts it back.
+    ///
+    /// No body, which is what says "until somebody puts it back": the gateway
+    /// reads an absent body, an empty one and `{}` alike, and takes an expiry
+    /// only from a `seconds` or `until` key that this app never sends. A
+    /// checkbox is two states and has nowhere to say a third.
+    func disableAccount(label: String) async throws -> SwitchResult {
+        try await fetch(pathSegments: ["gw", "accounts", label, "disable"],
+                        since: nil, method: "POST")
+    }
+
+    /// And put it back. Idempotent, so a second one costs nothing.
+    func enableAccount(label: String) async throws -> SwitchResult {
+        try await fetch(pathSegments: ["gw", "accounts", label, "enable"],
+                        since: nil, method: "POST")
     }
 
     // MARK: - Transport
@@ -90,9 +136,16 @@ struct UsageClient: Sendable {
         return (data, http)
     }
 
-    private func fetch<Body: Decodable>(pathSegments: [String], since: Date?) async throws -> Body {
+    /// One request, whatever its verb. The method is a parameter rather than a
+    /// second copy of this function: what a POST here differs in is the word and
+    /// nothing else — the status check, the decoding, `UsageError` and `describe`
+    /// are the same, and a switch endpoint that answered 404 or half a body would
+    /// otherwise be blamed by rules of its own that nobody had checked.
+    private func fetch<Body: Decodable>(pathSegments: [String],
+                                        since: Date?,
+                                        method: String = "GET") async throws -> Body {
         var request = URLRequest(url: endpoint(pathSegments: pathSegments, since: since))
-        request.httpMethod = "GET"
+        request.httpMethod = method
         request.timeoutInterval = Self.timeoutSeconds
         // The numbers change every minute and a cached body would be shown as
         // fresh; there is nothing here worth re-serving from a cache.

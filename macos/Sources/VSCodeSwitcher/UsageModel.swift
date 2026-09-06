@@ -187,8 +187,17 @@ struct SessionsReport: Sendable, Decodable {
 
 /// One quota window of one account: how much of it is spent, and when it resets.
 ///
-/// Units are per cent, 0…100. (`/gw/status` reports the same quantity as a
-/// fraction; this app never calls it, so the two cannot be mixed up.)
+/// Units are per cent, 0…100, and this window is spelled `five_hour` /
+/// `seven_day` with a `utilization` inside. `/gw/status` reports the same
+/// quantity as a **fraction**, and this app does call that endpoint now — for
+/// the operator switch and for nothing else. The two cannot be mixed up because
+/// no type on that path decodes a utilisation at all: `AccountSwitch` reads four
+/// fields and none of them is a reading (the warning is written out over
+/// `GatewayStatus`, where somebody minded to widen the type will meet it). The
+/// collision worth fearing is not here anyway but between `/gw/status` and the
+/// account history, which spell that quantity under one and the same key name in
+/// two different units (SPEC §2.7); this endpoint at least calls it something
+/// else.
 ///
 /// `known: false` means the gateway has no reading, which is not the same as an
 /// untouched quota — so it becomes `nil` here rather than 0, and the flag itself
@@ -657,5 +666,265 @@ struct UsageSnapshot: Sendable {
     /// only open question is whose row it belongs on.
     var total: TokenCounts {
         contested.reduce(tokensBySlug.values.reduce(unmatched, +)) { $0 + $1.tokens }
+    }
+}
+
+// MARK: - GET /gw/status
+
+/// Whether an operator has switched one account out of the gateway's rotation.
+///
+/// Four fields and no more, which is the whole of what this app asks `/gw/status`
+/// for. `disabled` is the verdict as of now; `disabled_until` is a moment when
+/// the gateway will put the account back by itself, and `null` covers both "in
+/// the rotation" and "out of it with no end named", so it may never be read as a
+/// state of its own — `disabled` is.
+///
+/// **Not `eligible`, which is the field that looks like this one.** The field is
+/// written by `is_eligible` (`src/accounts.py:258`), which is
+/// `is_eligible_apart_from_5h(...) AND util_5h < max_5h` — that is, the five-hour
+/// window *and* everything the inner half folds in: the operator's switch (it
+/// reaches the flag through `is_disabled` in there), the authorisation state, the
+/// quota cool-down, the token-refresh backoff and the weekly window. So an
+/// account that merely filled a window reads `eligible: false` exactly as a
+/// switched-off one does. Measured rather than reasoned: `main` at `util_5h: 1.0`
+/// in the `status` fixture (`GET /gw/status`, 2026-09-06 00:08:15Z) against the
+/// `max_util_5h = 0.99` of that same body's own `config` block, giving
+/// `eligible: false` beside `disabled: false`. Both are fractions and both are
+/// that endpoint's — the account history spells the same quantity as a percentage
+/// (`util_5h: 26.0` in the `history` fixture), and comparing across the two is how
+/// a hundredfold slip gets written down as a measurement. A checkbox bound to the
+/// flag would clear itself when a quota window filled and would then send an
+/// `enable` that changes nothing visible.
+///
+/// The flag *is* read, one level up and for another question: `GatewayStatus`
+/// counts it into `routableAccounts`, because "is there anywhere left to send a
+/// request" is exactly what `eligible` answers and exactly what the warning under
+/// the accounts is about. It is deliberately not a field of this type — a
+/// checkbox drawn from an `AccountSwitch` has no way to reach a number that is
+/// not in one.
+struct AccountSwitch: Sendable, Decodable, Equatable {
+    let label: String
+    let disabled: Bool
+    /// When the gateway will re-enable it on its own, or `nil` — see above: `nil`
+    /// is not "enabled".
+    let disabledUntil: Date?
+    /// What the operator gave as the reason, `""` when none was given. Empty
+    /// rather than `nil` because the gateway sends the empty string itself, and
+    /// two spellings of "nothing was said" would only be told apart by accident.
+    let disabledReason: String
+
+    // Explicit keys, as everywhere in this file: `.convertFromSnakeCase` is what
+    // silently drops one of two similarly-shaped names.
+    enum CodingKeys: String, CodingKey {
+        case label
+        case disabled
+        case disabledUntil = "disabled_until"
+        case disabledReason = "disabled_reason"
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        label = try container.decode(String.self, forKey: .label)
+        // Required, exactly as `label` is, and the asymmetry used to run the other
+        // way: `disabled` is the one field on this path that draws a *control*,
+        // and the lenient reading of a missing one — "nobody switched it off" —
+        // ticks and arms every checkbox in the fleet on the strength of a key that
+        // was not there. That is §2.4's confidently-wrong reading with a click
+        // attached. The day the gateway renames the field, refusing the body takes
+        // the whole rotation to "nobody said", which is a state this app knows how
+        // to draw and a state nobody can act on by mistake.
+        disabled = try container.decode(Bool.self, forKey: .disabled)
+        disabledUntil = try container.decodeIfPresent(Double.self, forKey: .disabledUntil)
+            .map { Date(timeIntervalSince1970: $0) }
+        disabledReason = try container.decodeIfPresent(String.self, forKey: .disabledReason) ?? ""
+    }
+}
+
+/// The body of `GET /gw/status`, cut down to the one question this app asks it.
+///
+/// **`accounts` here is an ARRAY**, each element carrying its own `label` — where
+/// `/gw/usage` sends a dictionary keyed by the label. Two endpoints, two shapes,
+/// one field name.
+///
+/// **And the body carries utilisation too, in fractions.** `util_5h`, `util_7d`
+/// and their `reset_*` stamps are all there, written 0…1 — while the account
+/// history, `GET /gw/usage/<label>/history`, writes the same quantity under
+/// **those same two key names** as 0…100 and says so in a `units` field
+/// (SPEC §2.7): one probe on 2026-09-06 at 05:34:17Z had `main` at `util_5h:
+/// 0.43` here and `util_5h: 43.0` in the last point of its history. One name, two
+/// units, and nothing about either body to make the mix-up visible. (`/gw/usage`
+/// is not the trap: it has no `util_5h` key at all, spelling the reading
+/// `five_hour.utilization`, per cent.) This type reads none of them,
+/// deliberately: everything downstream of here is in per cent, so a fraction
+/// decoded "while we are reading the body anyway" would understate by a hundred
+/// times with nothing on screen to look wrong. Quota readings come from
+/// `/gw/usage` and its history, and from nowhere else.
+struct GatewayStatus: Sendable, Decodable {
+    let accounts: [AccountSwitch]
+    /// How many of them the gateway may still route a request to.
+    ///
+    /// Counted here over `eligible` and handed out only as this number, never per
+    /// account. The question it answers is the fleet's — "is there anywhere left
+    /// to send a request" — which is the question the warning under the accounts
+    /// asks, so this number both raises that warning and takes it down. Per
+    /// account the same flag would be the right answer to the wrong question, so
+    /// it is kept off `AccountSwitch` altogether and a checkbox cannot reach it.
+    ///
+    /// The same quantity as `SwitchResult.eligibleAccounts`: the gateway counts
+    /// both with `is_eligible` (`src/gateway.py:1675` and `:2014`), so a pass and
+    /// a switch answer are two moments of one measurement rather than two facts.
+    let routableAccounts: Int
+
+    enum CodingKeys: String, CodingKey {
+        case accounts
+    }
+
+    /// One element of the array, read for both questions at once: the switch the
+    /// checkbox draws, and the routing flag that may not go anywhere near it.
+    ///
+    /// `eligible` sits here rather than on `AccountSwitch` — this type is private
+    /// and nothing outside gets one, so a checkbox still has no way to reach the
+    /// flag — and the two questions are still two types. What it does not do is
+    /// read `accounts` a second time: the strictness below is the rule about a
+    /// missing array, and a rule written twice holds only where somebody ran a
+    /// mutation over both copies (AGENTS.md). One `decode`, one place to break.
+    private struct Entry: Decodable {
+        let account: AccountSwitch
+        let eligible: Bool
+
+        // The body is flat, so the switch is decoded off this same decoder — the
+        // shape `SwitchResult` uses for the same four fields, and for the same
+        // reason: one rule for them, written once.
+        enum CodingKeys: String, CodingKey {
+            case eligible
+        }
+
+        init(from decoder: any Decoder) throws {
+            account = try AccountSwitch(from: decoder)
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            // Strict, exactly as `disabled` is, and the leniency it replaces was
+            // written when this flag could only ever take the fleet line *down*:
+            // "an account the gateway said nothing about is not one this app may
+            // count as somewhere to route" left an error that was a warning
+            // standing, not a switch lighting up. That reading died in the round
+            // that made the count the verdict — `applyRoutable` raises the line on
+            // a zero count as well now — so a missing key paints the loudest thing
+            // on this surface out of a hole in the body.
+            //
+            // Refusing it buys the honest state this app already has: a pass that
+            // will not decode sets `rotationFailure` and leaves every switch inert,
+            // which says "this app cannot say" where `?? false` said "there is
+            // nowhere left to route".
+            eligible = try container.decode(Bool.self, forKey: .eligible)
+        }
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Strict, and the leniency it replaces was the same confidently-wrong
+        // reading `disabled` was cured of one round earlier — one level up. A
+        // missing `accounts` is not a gateway with no accounts: `?? []` wrote the
+        // absence of an answer as an answer, which left every checkbox drawn from
+        // an empty dictionary rather than from `nil` (inert either way, but with
+        // not one word anywhere saying why), and left `routableAccounts` at zero —
+        // a count that now raises the warning about a fleet with nowhere to route.
+        // An empty array is still an answer and still decodes; it is the hole that
+        // is refused.
+        let entries = try container.decode([Entry].self, forKey: .accounts)
+        accounts = entries.map(\.account)
+        routableAccounts = entries.filter(\.eligible).count
+    }
+
+    /// The switches by the label they belong to, which is how every reader wants
+    /// them: the popover draws one row per account of the *quota* poll and asks
+    /// this by name.
+    var byLabel: [String: AccountSwitch] {
+        Dictionary(accounts.map { ($0.label, $0) }, uniquingKeysWith: { _, last in last })
+    }
+}
+
+// MARK: - POST /gw/accounts/{label}/disable and /enable
+
+/// What either switch endpoint answers with: the account's new state, and what
+/// it cost the fleet.
+///
+/// The body is **flat** — the four fields of `AccountSwitch` sit beside
+/// `eligible_accounts` and `warning` at the top level, rather than under an
+/// account object — so `account` is decoded from this very decoder rather than
+/// from a nested container. One rule for the four fields, written once: a second
+/// copy of it here could come to disagree with `/gw/status` about what a missing
+/// `disabled` means, and the two are the same fact arriving by two routes.
+///
+/// **This is the authority on the new state**, which is why the popover takes the
+/// switch from here rather than from what it asked for: the gateway may answer
+/// something else, and a checkbox that moved on the click would then be showing
+/// the request instead of the fleet.
+struct SwitchResult: Sendable, Decodable, Equatable {
+    let account: AccountSwitch
+    /// How many accounts the fleet has left that it may still route to — this
+    /// body's answer to the question `GatewayStatus.routableAccounts` answers on a
+    /// pass, counted by the gateway with the same `is_eligible` in both places.
+    /// One quantity at two moments, which is why the popover takes its verdict
+    /// from whichever of the two spoke last and never from the sentence beside
+    /// this number.
+    let eligibleAccounts: Int
+    /// The gateway's wording for that verdict, and only the wording.
+    ///
+    /// **It is this number said again in words, not a second fact.**
+    /// `Gateway._switch_payload` (`src/gateway.py:1986`) writes the count and then
+    /// `None if eligible else "claude-gw: no usable account is left…"`, so
+    /// `warning != null` holds exactly when `eligible_accounts == 0` and there is
+    /// no body in which the two disagree. Reading them as two facts is how a rule
+    /// like "the sentence raises the warning, the count takes it down" comes to be
+    /// written: it is a fine rule, and it was justified by a third kind of body —
+    /// an `enable` that gives the fleet nothing back answering `warning: null`
+    /// with the count still at zero — that this endpoint does not send.
+    ///
+    /// The gateway deliberately does not refuse the call that empties the fleet:
+    /// switching off the last usable account is a legitimate thing for an operator
+    /// to do, and the only requirement is that they cannot fail to notice it.
+    ///
+    /// **Never printed.** The sentence names the metric by the word §4 keeps off
+    /// every string a person reads, and there is nothing to weigh against that:
+    /// the `else` branch above is one fixed two-line constant rather than a
+    /// message, so it carries not one thing this count does not. The popover words
+    /// the same verdict itself, in `UsageHistoryModel.noRouteWarning`.
+    ///
+    /// **Decoded and kept all the same**, because this field is the body's own
+    /// statement of the invariant the whole switch surface rests on — one fact
+    /// written twice by `_switch_payload`, which is what lets the popover put the
+    /// verdict on the count alone. Nothing in production reads it; two tests do,
+    /// and they hold two different things.
+    /// `testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent` holds
+    /// the **pairing** over every switch answer in the suite: those bodies are
+    /// hand-built (no live `disable` was ever captured), and the check is what
+    /// catches a fixture the gateway could not have sent — an `eligible_accounts`
+    /// this branch has already had to correct twice.
+    /// `testASwitchAnswersWithTheNewStateAndWhatItCostTheFleet` holds the
+    /// **wording**, character for character, and is what reddens if
+    /// `_switch_payload`'s constant is ever rewritten — a change this app has to
+    /// know about, since `UsageHistoryModel.noRouteWarning` is that sentence minus
+    /// three words.
+    let warning: String?
+
+    enum CodingKeys: String, CodingKey {
+        case eligibleAccounts = "eligible_accounts"
+        case warning
+    }
+
+    init(from decoder: any Decoder) throws {
+        account = try AccountSwitch(from: decoder)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Strict for `GatewayStatus.Entry.eligible`'s reason, and this is the worse
+        // of the two places to be lenient in: the count is the verdict, and this
+        // decoder is on the click path, so `?? 0` would raise the orange line in
+        // the very second the operator is looking at the checkbox they just
+        // pressed. A body that will not decode blames the click by the label it was
+        // on and leaves the tick where it stood — a state this app draws already.
+        eligibleAccounts = try container.decode(Int.self, forKey: .eligibleAccounts)
+        // And `warning` stays lenient, permanently: `null` is a value the gateway
+        // sends on purpose — it is what a count above zero comes with — so there is
+        // no hole to refuse here.
+        warning = try container.decodeIfPresent(String.self, forKey: .warning)
     }
 }

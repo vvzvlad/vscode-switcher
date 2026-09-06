@@ -3929,6 +3929,24 @@ final class RowRateTests: XCTestCase {
     }
 }
 
+/// A rotation that draws nothing and warns about nothing: it names one account no
+/// row here is about, and says the gateway can still route to it.
+///
+/// Two properties, both load-bearing for a picture measured in ink bands. Naming
+/// nobody the popover draws keeps every checkbox in these tests inert and every
+/// switched-off note unwritten, so the rows are the rows the chart tests are
+/// about. And naming somebody **eligible** keeps the orange line off the list:
+/// since the warning learned to light up on a pass, a rotation of zero routable
+/// accounts is a fleet with nowhere to send a request, so the obvious-looking
+/// `{"accounts": []}` would put a warning under every picture measured here — a
+/// stub's silence read as a verdict about the fleet. A rotation request that
+/// *fails* writes a line of blame instead, which is the same problem by the other
+/// road, so this answers.
+private let quietRotation = """
+{"accounts": [{"label": "elsewhere", "eligible": true, "disabled": false, \
+"disabled_until": null, "disabled_reason": ""}]}
+"""
+
 /// A gateway that answers each account it knows with one flat line at the level
 /// it is handed, ten samples a minute apart.
 ///
@@ -3941,10 +3959,23 @@ final class RowRateTests: XCTestCase {
 /// sits wants for the accounts it is not asking about. On, the request for it
 /// fails — and that is how an account comes to be named by the quota poll and
 /// missing from the chart, one of the two states the colours are told apart in.
+///
+/// `rotation` is the second question a pass asks — `/gw/status`, which the row's
+/// checkbox is drawn from. Its default is `quietRotation`, for the reason written
+/// there: a picture measured in ink bands must not be measuring this stub's
+/// opinion of the fleet.
 private func flatHistoryClient(readings: [String: Double],
-                               silentOnUnknown: Bool = false) -> UsageClient {
+                               silentOnUnknown: Bool = false,
+                               rotation: String = quietRotation) -> UsageClient {
     UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
         let url = request.url ?? Config.default.resolvedUsageBaseURL
+        if url.path == "/gw/status" {
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            return (Data(rotation.utf8), response)
+        }
         // .../gw/usage/<label>/history
         let label = url.pathComponents.dropLast().last ?? ""
         guard let value = readings[label] ?? (silentOnUnknown ? nil : 0) else {
@@ -4032,7 +4063,24 @@ final class UsageHistoryTests: XCTestCase {
         }
     }
 
-    /// Answers every history request from the fixture, and counts them.
+    /// Answers every history request from the fixture, the rotation from its own,
+    /// and counts them all.
+    ///
+    /// Two fixtures rather than one because a pass asks two different questions
+    /// and a stub that answers them alike cannot answer both. `GatewayStatus`
+    /// decodes `accounts` strictly (`UsageModel`), and the history body has no
+    /// such key, so a client that served the history to `/gw/status` too would
+    /// throw on every pass: `rotationFailure` set, `switches` left `nil`, and
+    /// "the gateway did not answer" the only rotation outcome this client can
+    /// produce. Every state on the other side of that — a fleet named, a fleet
+    /// answered empty, a switch that moves — would be unreachable here.
+    ///
+    /// An earlier note gave a different reason: that the history body decodes as
+    /// a `GatewayStatus` naming no accounts, so one fixture would say "answered,
+    /// nobody in the fleet" and blur the line between that and an answer nobody
+    /// gave. That was true of the lenient `accounts` decoding and is not true of
+    /// the strict one — the body no longer decodes at all — but the decision it
+    /// justified is still the right one, so only the reason is rewritten.
     private func client(_ counter: RequestCounter, gateway: Gateway = Gateway()) -> UsageClient {
         UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
             counter.record(request.url)
@@ -4042,8 +4090,15 @@ final class UsageHistoryTests: XCTestCase {
                                                  httpVersion: nil, headerFields: nil) else {
                 throw UsageError.unreachable("no test response")
             }
-            return (Data(UsageFixtures.history.utf8), response)
+            let body = url.path == "/gw/status" ? UsageFixtures.status : UsageFixtures.history
+            return (Data(body.utf8), response)
         }
+    }
+
+    /// The requests of one pass that are histories — the rotation rides beside
+    /// them and is counted separately wherever the count is the subject.
+    private func histories(_ counter: RequestCounter) -> [URL] {
+        counter.urls.filter { $0.path.hasSuffix("/history") }
     }
 
     private func model(_ counter: RequestCounter,
@@ -4056,8 +4111,18 @@ final class UsageHistoryTests: XCTestCase {
     }
 
     /// The whole reason this schedule is separate from `UsageStore`'s: a closed
-    /// popover costs nothing. Not "almost nothing" — no request at all, whatever
-    /// is poked at it.
+    /// popover costs nothing. Not "almost nothing" — no request at all from
+    /// anything the timer or the view model drives, which is every entry poked
+    /// below: `fetch`, a change of the account list, and a change of period.
+    ///
+    /// **`setAccount` is the one entry that is not swept, and it is an exception
+    /// on purpose rather than a hole.** It sends its request with no `isOpen`
+    /// guard, and adding one would be a branch that cannot execute: its only
+    /// caller is the binding inside `rotationSwitch`, a control that exists only
+    /// on a popover that is up. It is also the one request here that is *meant* to
+    /// outlive a close — the operator asked for it, a popover closes on any click
+    /// anywhere on the screen, and that is why `close` cancels `fetchTask` and
+    /// leaves `switchTasks` alone (`testASwitchAlreadySentOutlivesTheClose`).
     ///
     /// Poked *after* an open, on purpose. A model that has never been opened
     /// knows no accounts, so it asks for nothing however broken its guard is:
@@ -4075,7 +4140,7 @@ final class UsageHistoryTests: XCTestCase {
         history.open(labels: ["acc1", "acc2"])
         await history.fetchTask?.value
         let asked = counter.urls.count
-        XCTAssertEqual(asked, 2)
+        XCTAssertEqual(asked, 3, "two histories and the rotation: \(counter.urls)")
 
         history.close()
         history.fetch()
@@ -4086,7 +4151,8 @@ final class UsageHistoryTests: XCTestCase {
     }
 
     /// Opening asks once for each account, on the account's own endpoint, for
-    /// the chosen window.
+    /// the chosen window — and once for the rotation, which is the fleet's and
+    /// therefore asked for once however many accounts there are.
     func testOpeningAsksOnceForEveryAccount() async {
         let counter = RequestCounter()
         let history = model(counter, defaults: freshDefaults())
@@ -4096,11 +4162,13 @@ final class UsageHistoryTests: XCTestCase {
         defer { history.close() }
 
         XCTAssertEqual(Set(counter.urls.map(\.path)),
-                       ["/gw/usage/acc1/history", "/gw/usage/acc2/history"])
-        XCTAssertEqual(counter.urls.count, 2)
+                       ["/gw/usage/acc1/history", "/gw/usage/acc2/history", "/gw/status"])
+        XCTAssertEqual(histories(counter).count, 2)
+        XCTAssertEqual(counter.urls.filter { $0.path == "/gw/status" }.count, 1)
         XCTAssertEqual(history.series.map(\.label), ["acc1", "acc2"])
-        // The window asked for is the period, to the second.
-        let since = try? XCTUnwrap(counter.urls.first?.query?
+        // The window asked for is the period, to the second. Off a history: the
+        // rotation carries no window and is first in the air.
+        let since = try? XCTUnwrap(histories(counter).first?.query?
             .split(separator: "=").last.flatMap { Double($0) })
         XCTAssertEqual(Date().timeIntervalSince1970 - (since ?? 0),
                        HistoryPeriod.hour.seconds, accuracy: 5)
@@ -4135,7 +4203,7 @@ final class UsageHistoryTests: XCTestCase {
         await history.fetchTask?.value
         history.close()
 
-        XCTAssertEqual(counter.urls.count, 2, "changing the period did not refetch")
+        XCTAssertEqual(histories(counter).count, 2, "changing the period did not refetch")
         XCTAssertEqual(UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL),
                                          defaults: defaults).period,
                        .month,
@@ -4170,7 +4238,7 @@ final class UsageHistoryTests: XCTestCase {
         }
         XCTAssertEqual(semaphore.wait(timeout: .now() + 5), .success,
                        "the pass waited for a main thread that is standing right here")
-        XCTAssertEqual(counter.urls.count, 2, "the pass finished without asking for anything")
+        XCTAssertEqual(counter.urls.count, 3, "the pass finished without asking for anything")
     }
 
     /// A `null` sample is a hole, not a reading of zero: the line breaks there.
@@ -4214,7 +4282,7 @@ final class UsageHistoryTests: XCTestCase {
         await history.fetchTask?.value
         defer { history.close() }
 
-        XCTAssertEqual(counter.urls.count, 2, "the pass never reached the gateway")
+        XCTAssertEqual(histories(counter).count, 2, "the pass never reached the gateway")
         XCTAssertNil(history.fetchedAt, "a pass nobody answered dated the lines all the same")
         XCTAssertNotNil(history.checkedAt, "the attempt left no clock for the refresh to run on")
         XCTAssertNotNil(history.failure)
@@ -4269,7 +4337,7 @@ final class UsageHistoryTests: XCTestCase {
         await history.fetchTask?.value
         defer { history.close() }
         let asked = counter.urls.count
-        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(asked, 2, "one history and the rotation: \(counter.urls)")
         XCTAssertNil(history.fetchedAt, "the failed pass dated lines that never came")
 
         // Not on every tick, though: the clock behind the wording runs four
@@ -4522,6 +4590,1554 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(UsagePopoverView.accountColor(for: many[0], in: many),
                        UsagePopoverView.accountColor(for: many[UsagePopoverView.accountColors.count],
                                                      in: many))
+    }
+
+    // MARK: - Switching an account out of the rotation
+
+    /// A request held mid-air until the test lets it through, and cancellable
+    /// while it waits.
+    ///
+    /// The second half is the whole point: a switch that was cancelled and one
+    /// that is merely slow look exactly alike at a stub that always answers, and
+    /// what `close` promises is precisely the difference between them.
+    private final class Gate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var waiting: [CheckedContinuation<Void, Never>] = []
+        private var arrivals: [CheckedContinuation<Void, Never>] = []
+        private var opened = false
+        private var reached = false
+
+        func open() {
+            lock.lock()
+            opened = true
+            let pending = waiting
+            waiting = []
+            lock.unlock()
+            pending.forEach { $0.resume() }
+        }
+
+        func wait() async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                reached = true
+                let announce = arrivals
+                arrivals = []
+                let through = opened
+                if !through { waiting.append(continuation) }
+                lock.unlock()
+                announce.forEach { $0.resume() }
+                if through { continuation.resume() }
+            }
+        }
+
+        /// Returns once a request has **reached** the gate, whether or not it is
+        /// let through.
+        ///
+        /// Which is the half that makes a race deterministic rather than likely:
+        /// a test that clicks "while a pass is in the air" has to know the pass
+        /// really is in the air, and the only moment that says so is the transport
+        /// being entered. Started from `open`, the pass is a `Task` on the main
+        /// actor whose body has not run yet, so a click sent straight after it can
+        /// perfectly well be stamped first — and then the pass is genuinely the
+        /// newer news and is *supposed* to win.
+        func arrival() async {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                let already = reached
+                if !already { arrivals.append(continuation) }
+                lock.unlock()
+                if already { continuation.resume() }
+            }
+        }
+    }
+
+    /// A gateway that answers the three questions separately: histories from the
+    /// fixture, the rotation from `status`, and a switch from `switchAnswer` —
+    /// each of which may be `nil`, which is that endpoint failing while the
+    /// others go on answering.
+    ///
+    /// Either of the two may be held in a gate, and never both at once: what a
+    /// gate buys is an order between a pass and a click, and a test holding both
+    /// has stopped being able to state one.
+    private func rotationClient(_ counter: RequestCounter,
+                                status: String? = UsageFixtures.status,
+                                switchAnswer: String? = UsageFixtures.switchAnswer,
+                                gate: Gate? = nil,
+                                statusGate: Gate? = nil) -> UsageClient {
+        UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            counter.record(request.url)
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            let body: String?
+            if url.path.hasSuffix("/history") {
+                body = UsageFixtures.history
+            } else if url.path == "/gw/status" {
+                if let statusGate {
+                    await statusGate.wait()
+                    try Task.checkCancellation()
+                }
+                body = status
+            } else {
+                if let gate {
+                    await gate.wait()
+                    try Task.checkCancellation()
+                }
+                body = switchAnswer
+            }
+            guard let body else { throw UsageError.unreachable("nothing to say about \(url.path)") }
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            return (Data(body.utf8), response)
+        }
+    }
+
+    private func switchRequests(_ counter: RequestCounter) -> [URL] {
+        counter.urls.filter { $0.path.hasPrefix("/gw/accounts/") }
+    }
+
+    /// A second click on a switch already in the air sends nothing.
+    ///
+    /// Which is not tidiness: the second click of a double click asks for the
+    /// opposite, and with both requests out at once the account ends up wherever
+    /// the network happened to deliver them — the operator's own two clicks
+    /// deciding nothing. The guard is the label being in flight, so the state it
+    /// is asked in is the state it exists for.
+    ///
+    /// The control half is the third click, after the answer has landed: without
+    /// it the test would pass just as well against a model that never sends a
+    /// second request at all.
+    func testASecondClickOnASwitchAlreadyInTheAirSendsNothing() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(client: rotationClient(counter), defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        history.setAccount(label: "acc2", enabled: false)
+        XCTAssertTrue(history.inFlight.contains("acc2"), "the guard has nothing to guard against")
+        history.setAccount(label: "acc2", enabled: true)
+        await history.switchTasks["acc2"]?.value
+
+        XCTAssertEqual(switchRequests(counter).count, 1,
+                       "both clicks went out: \(switchRequests(counter))")
+        XCTAssertEqual(switchRequests(counter).first?.path, "/gw/accounts/acc2/disable",
+                       "and the one that went is the one that was clicked first")
+        XCTAssertTrue(history.inFlight.isEmpty, "the label stayed in flight after its answer")
+
+        // The click that lands after it is sent, so the count above is a guard
+        // and not a model that only ever sends one.
+        history.setAccount(label: "acc2", enabled: true)
+        await history.switchTasks["acc2"]?.value
+        XCTAssertEqual(switchRequests(counter).count, 2)
+    }
+
+    /// A rotation nobody answered is `nil`, not an empty fleet — and it costs the
+    /// chart nothing, because the two questions of a pass fail apart.
+    ///
+    /// `nil` against `[:]` is the whole of it: an empty dictionary is the gateway
+    /// saying "no accounts", and every switch drawn from it would be drawn clear
+    /// and clickable on the strength of a request that never arrived.
+    func testARotationNobodyAnsweredIsNotAnEmptyFleet() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(client: rotationClient(counter, status: nil),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        XCTAssertNil(history.switches, "a failed rotation request was written down as an empty fleet")
+        XCTAssertNotNil(history.rotationFailure, "and nothing said why")
+        XCTAssertEqual(history.series.map(\.label), ["acc2"], "the chart went with it")
+        XCTAssertNil(history.failure, "and the histories were blamed for it too")
+    }
+
+    /// And a rotation that was answered once is kept when the next pass fails.
+    ///
+    /// The same rule the lines follow: an answer replaces what is held, a pass
+    /// that got none leaves it alone. Blanking it here would take every switch on
+    /// screen inert for a reason that has nothing to do with the switches.
+    func testAKnownRotationSurvivesAPassThatCouldNotAskAgain() async {
+        let counter = RequestCounter()
+        let gateway = Gateway()
+        let history = UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            counter.record(request.url)
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            let isRotation = url.path == "/gw/status"
+            guard !isRotation || gateway.answers else {
+                throw UsageError.unreachable("the gateway is not there")
+            }
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            return (Data((isRotation ? UsageFixtures.status : UsageFixtures.history).utf8), response)
+        }, defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        XCTAssertEqual(history.switches?["acc3"]?.disabled, true, "the first pass learned nothing")
+
+        gateway.answers = false
+        history.fetch()
+        await history.fetchTask?.value
+        XCTAssertEqual(history.switches?["acc3"]?.disabled, true,
+                       "one failed request took the whole rotation off the screen")
+        XCTAssertNotNil(history.rotationFailure, "and it was kept without a word about its age")
+    }
+
+    /// A rotation body with a hole where one account's switch should be takes the
+    /// **whole** fleet to "unknown", rather than that one account to "in".
+    ///
+    /// The cost of the lenient reading is not one wrong row: `disabled` is what
+    /// the box draws, so a missing one drew every box in the fleet ticked and
+    /// armed, and a click on any of them sent a request about a state nobody had
+    /// reported. Refusing the body is the state this app already knows how to
+    /// draw — clear, inert, and blamed in the line underneath.
+    func testARotationBodyMissingASwitchLeavesEveryBoxUnknown() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(
+            client: rotationClient(counter, status: UsageFixtures.statusWithoutTheSwitch),
+            defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        XCTAssertNil(history.switches, "one account with a hole in it lit up the whole fleet")
+        XCTAssertNotNil(history.rotationFailure, "and nothing said why the boxes went inert")
+        XCTAssertFalse(UsagePopoverView.switchAppearance(history.switches?["acc2"], busy: false).usable,
+                       "a box nobody reported on was left clickable")
+    }
+
+    /// And a rotation body with a hole where the **routing flag** goes raises no
+    /// warning: it says "this app cannot say", not "there is nowhere to route".
+    ///
+    /// The lenient `?? false` was written when a zero count could only ever take
+    /// the fleet line down, and that stopped being true in the round that made the
+    /// count the verdict. Read leniently, this body — two accounts, neither
+    /// switched off, both reported — comes out as a fleet with nowhere left to
+    /// route and paints the loudest line on the surface out of a hole. The blame
+    /// and the inert boxes are the honest reading of the same silence, and this app
+    /// already draws them.
+    func testARotationWithNoRoutingFlagRaisesNoWarningAtAll() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(
+            client: rotationClient(counter, status: UsageFixtures.statusWithoutTheRoutingFlag),
+            defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        XCTAssertNil(history.fleetWarning, """
+            a body that never mentioned routing was read as a fleet with nowhere to route, and \
+            the orange line says every client request is now a 429
+            """)
+        XCTAssertNil(history.switches, "a body refused whole left switches behind")
+        XCTAssertNotNil(history.rotationFailure, "and nothing said why the boxes went inert")
+    }
+
+    /// A switch answer with no count in it blames the click and raises nothing.
+    ///
+    /// The same hole as next door on the worse path: this decoder runs on the
+    /// operator's own click, so the lenient `?? 0` puts the orange line up in the
+    /// very second they are looking at the checkbox they pressed — a false alarm
+    /// with the pointer still on the control that seems to have caused it. The
+    /// blame per label is what a click that would not go through leaves, and the
+    /// tick does not move, both of which this surface draws already.
+    ///
+    /// The pass either side of the click answers `status`, where one account is
+    /// routable, so the fleet has nothing to warn about at any point in this test —
+    /// which is what makes the assertion a question about the hole.
+    func testASwitchAnswerWithNoCountBlamesTheClickAndWarnsAboutNothing() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(
+            client: rotationClient(counter, switchAnswer: UsageFixtures.switchAnswerWithoutTheCount),
+            defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        XCTAssertNil(history.fleetWarning, "the fleet had somewhere to route before the click")
+
+        history.setAccount(label: "acc2", enabled: false)
+        await history.switchTasks["acc2"]?.value
+
+        XCTAssertNil(history.fleetWarning, """
+            a body that never named the fleet's cost was read as a cost of everything, under \
+            the pointer of the operator who had just clicked
+            """)
+        XCTAssertEqual(history.switchFailures["acc2"]?.hasPrefix("acc2: "), true,
+                       "the click that could not be read was not blamed: \(history.switchFailures)")
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, false,
+                       "an answer nobody could read moved the switch anyway")
+        // The failed click asks the rotation again, and that pass is the one this
+        // test lets finish rather than leaving in the air.
+        await history.fetchTask?.value
+    }
+
+    /// The state after a switch is the gateway's answer, and nothing else.
+    ///
+    /// Asked with an answer that **contradicts** the request — a disable answered
+    /// with `disabled: false` — because that is the only fixture that can tell
+    /// the two designs apart. Storing what was asked for looks right against
+    /// every answer that agrees, and the day the gateway refuses a switch (the
+    /// last usable account, an operator's rule, a race with another client) the
+    /// row would show the click rather than the fleet.
+    ///
+    /// The contradiction is in `disabled` and in nothing else, and the count it is
+    /// sent with is the contract's for this fleet at this moment — the derivation
+    /// is written where the fixture is, beside the other switch answers, so that
+    /// `testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent` can reach it.
+    func testTheStateAfterASwitchIsTheOneTheGatewaySentBack() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(
+            client: rotationClient(counter,
+                                   switchAnswer: UsageFixtures.switchAnswerContradictingTheClick),
+            defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        history.setAccount(label: "acc2", enabled: false)
+        await history.switchTasks["acc2"]?.value
+
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, false,
+                       "the row shows the click instead of the fleet")
+        XCTAssertEqual(history.switches?["acc2"]?.disabledReason, "pinned")
+        XCTAssertEqual(history.switches?["acc3"]?.disabled, true,
+                       "the answer about one account rewrote the others")
+    }
+
+    /// A switch the gateway would not take changes nothing, says why, and goes on
+    /// saying it after a pass that went perfectly well.
+    ///
+    /// The first half follows from the state coming out of the answer: there is no
+    /// answer, so there is nothing to write, and the row still says what the fleet
+    /// last said.
+    ///
+    /// The second half is why the blame is kept per label rather than in the field
+    /// the pass writes. A failed click has **no other mark on this surface at
+    /// all** — by design the tick does not move — so the sentence naming it is the
+    /// whole of the event, and a pass that succeeded used to overwrite it with
+    /// `nil` on its way past. The operator was then left with a box in its old
+    /// position and nothing anywhere saying their click had not worked.
+    func testABlameForAClickOutlivesAPassThatWentFine() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(client: rotationClient(counter, switchAnswer: nil),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        XCTAssertTrue(history.switchFailures.isEmpty, "nothing had gone wrong before the click")
+
+        history.setAccount(label: "acc2", enabled: false)
+        await history.switchTasks["acc2"]?.value
+
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, false,
+                       "a request that never landed moved the switch anyway")
+        XCTAssertEqual(history.switchFailures["acc2"]?.hasPrefix("acc2: "), true,
+                       "the blame does not name the account: \(history.switchFailures)")
+        XCTAssertTrue(history.inFlight.isEmpty, "the label was left in flight, so the row stays inert")
+
+        // The pass the failure itself asks for — and it answers, so this is the
+        // successful pass the blame has to survive.
+        await history.fetchTask?.value
+        XCTAssertNil(history.rotationFailure, "the pass that had to go well did not")
+        XCTAssertEqual(history.switchFailures["acc2"]?.hasPrefix("acc2: "), true,
+                       "a pass that went fine wiped the one mark a failed click leaves")
+        XCTAssertNotNil(UsagePopoverView.switchBlame(history.switchFailures),
+                        "and the line under the accounts had nothing left to print")
+
+        // The next click on that same label is what clears it: the operator acting
+        // on the switch again is the one event that says the message was read.
+        history.setAccount(label: "acc2", enabled: false)
+        XCTAssertTrue(history.switchFailures.isEmpty, "the message outlived the click that answered it")
+        await history.switchTasks["acc2"]?.value
+        await history.fetchTask?.value
+    }
+
+    /// A switch that failed asks the gateway what actually happened.
+    ///
+    /// "Nothing changed" is true of a refused connection and **not** of a timeout,
+    /// and `UsageClient.timeoutSeconds` is five: giving up on the answer is not the
+    /// gateway giving up on the request, so a switch that timed out may well have
+    /// been applied. Leaving the tick where it was then shows the state from before
+    /// a switch that landed — confidently, with no mark of doubt on the box itself —
+    /// and the operator's next click undoes what they wanted. One extra pass is the
+    /// cheaper of the two.
+    func testASwitchThatFailedAsksTheRotationAgain() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(client: rotationClient(counter, switchAnswer: nil),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        let asked = counter.urls.filter { $0.path == "/gw/status" }.count
+        XCTAssertEqual(asked, 1, "the opening pass asked for the rotation more than once")
+
+        history.setAccount(label: "acc2", enabled: false)
+        await history.switchTasks["acc2"]?.value
+        await history.fetchTask?.value
+
+        XCTAssertEqual(counter.urls.filter { $0.path == "/gw/status" }.count, asked + 1,
+                       "the failed switch left the tick standing as a confirmed state")
+    }
+
+    /// What the switch cost the fleet is shown, not counted and dropped.
+    ///
+    /// The gateway answers a switch that leaves nothing usable with a zero count,
+    /// which is the one thing on this path the operator cannot work out from the
+    /// checkboxes. What goes on screen is this app's own wording of that verdict:
+    /// the sentence beside the count says `fleet`, which §4 keeps off every string
+    /// a person reads, and being a constant it says nothing the count does not.
+    ///
+    /// The second click is the pair the contract sends the other way round —
+    /// `eligible_accounts: 1` with `warning: null`, because `_switch_payload`
+    /// writes the sentence as `None if eligible else "…"` — and the line has to go
+    /// on that count. Both bodies here are ones the gateway can actually send: the
+    /// pair never comes apart, and
+    /// `testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent` is what holds
+    /// them to it.
+    func testAFleetWithNothingLeftInItSaysSoAndStopsSayingIt() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            counter.record(request.url)
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            let body: String
+            if url.path.hasSuffix("/history") {
+                body = UsageFixtures.history
+            } else if url.path == "/gw/status" {
+                body = UsageFixtures.status
+            } else {
+                // The switch already counted above is this one, so the first
+                // answer carries the warning and the second says it is over.
+                body = counter.urls.filter { $0.path.hasPrefix("/gw/accounts/") }.count == 1
+                    ? UsageFixtures.switchAnswerWithWarning
+                    : UsageFixtures.switchAnswerPuttingTheAccountBack
+            }
+            return (Data(body.utf8), response)
+        }, defaults: freshDefaults())
+        history.open(labels: ["main"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        XCTAssertNil(history.fleetWarning, "there was nothing to warn about before the click")
+
+        history.setAccount(label: "main", enabled: false)
+        await history.switchTasks["main"]?.value
+        // Ours rather than the answer's, even here where the answer carried a
+        // sentence: the click and the pass raise one line with one wording.
+        XCTAssertEqual(history.fleetWarning, UsageHistoryModel.noRouteWarning)
+
+        history.setAccount(label: "main", enabled: true)
+        await history.switchTasks["main"]?.value
+        XCTAssertNil(history.fleetWarning,
+                     "the count said there is somewhere to route and the line stayed up")
+    }
+
+    /// A switch already on its way outlives the popover closing.
+    ///
+    /// The operator asked for it, and a popover going away is not a change of
+    /// mind — it is what happens on the very next click anywhere else on the
+    /// screen. `fetchTask` is cancelled there and this one is not, which is why
+    /// they are two fields rather than one.
+    ///
+    /// The gate is what makes the difference visible: the request waits until
+    /// this test lets it through and then asks whether it was cancelled, so a
+    /// `close` that reached it comes back as a failure rather than as a slightly
+    /// later success.
+    func testASwitchAlreadySentOutlivesTheClose() async {
+        let counter = RequestCounter()
+        let gate = Gate()
+        let history = UsageHistoryModel(client: rotationClient(counter, gate: gate),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+
+        history.setAccount(label: "acc2", enabled: false)
+        history.close()
+        gate.open()
+        await history.switchTasks["acc2"]?.value
+
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, true,
+                       "the close took the switch with it: \(history.switchFailures)")
+        XCTAssertTrue(history.switchFailures.isEmpty)
+    }
+
+    /// A pass that left before the click may not undo it.
+    ///
+    /// `open` fires a pass at once and a switch is one short POST against a pass's
+    /// `/gw/status` plus a history per account, so a click in the first fractions
+    /// of a second is answered *first* and the pass lands on top of it with the
+    /// state from before the click. The tick goes back where it was and stays there
+    /// until the next pass, up to a minute — and what that reads as is not a
+    /// flicker but "the click did nothing", so the operator clicks again and undoes
+    /// by hand what they had already done.
+    ///
+    /// What carries that is the **ratio**, four requests of some 208 KB against one
+    /// small one, and not an absolute — which moves with the window the pass asks
+    /// for as well as with the fleet's stored history and the machine's load, so the
+    /// window is named: a pass asks for `period.seconds` and the period defaults to
+    /// `HistoryPeriod.day`. Probe of 2026-09-06 07:25Z, plain GETs, load average 5.6
+    /// falling to 5.4 over the run: ten day passes back to back, issued in parallel
+    /// exactly as the client issues them, took 0.052–0.083 s, against 0.011–0.017 s
+    /// for ten bare `/gw/status` calls in the same run; the day histories are 86289
+    /// / 9438 / 110764 bytes to the status body's 6222, 212713 in all. The figures
+    /// that stood here before were the **48 h** window's — `UsageStore`'s, never
+    /// this popover's. The POST is not timed at all (no live `disable`/`enable` may
+    /// be fired while the fleet is being operated from the CLI); its side of the
+    /// comparison is its shape. `UsageHistoryModel.applyRotation` carries the same
+    /// numbers and the other two windows beside them.
+    ///
+    /// The gate holds `/gw/status` and the test waits for it to be **reached**
+    /// before clicking. Without that wait the ordering is genuinely undecided —
+    /// the pass is a `Task` on the main actor whose body has not run yet, so its
+    /// request can be sent after the click, and then the pass is the newer news
+    /// and is supposed to win.
+    func testAPassThatLeftBeforeTheClickDoesNotPutTheTickBack() async {
+        let counter = RequestCounter()
+        let statusGate = Gate()
+        let history = UsageHistoryModel(client: rotationClient(counter, statusGate: statusGate),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        defer { history.close() }
+        await statusGate.arrival()
+
+        history.setAccount(label: "acc2", enabled: false)
+        await history.switchTasks["acc2"]?.value
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, true, "the answer to the click never landed")
+
+        statusGate.open()
+        await history.fetchTask?.value
+
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, true, """
+            the pass put the tick back where it stood before the click, and the fixture it \
+            came from is older news than the answer the operator already has
+            """)
+        // The control: the pass did land, so the assertion above is a rule and
+        // not a pass that quietly wrote nothing at all.
+        XCTAssertEqual(history.switches?["acc3"]?.disabled, true, "the pass never reached the model")
+        XCTAssertNotNil(history.switches?["main"], "the pass never reached the model")
+    }
+
+    /// And a label with a click still in the air is left alone too.
+    ///
+    /// It has no answer yet to be newer than the pass, so the stamp cannot hold it
+    /// — but the operator is watching that box, and letting a pass write the
+    /// pre-click state under it says the same wrong thing for the length of the
+    /// round trip.
+    ///
+    /// The second pass answers something **else** about `acc2`, because a pass
+    /// that overwrote the row with what was already there and one that left it
+    /// alone draw the very same picture. `acc3` moving the other way is the
+    /// control that the pass landed at all.
+    func testAPassLeavesAloneALabelWithAClickStillInTheAir() async {
+        let counter = RequestCounter()
+        let gate = Gate()
+        let history = UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            counter.record(request.url)
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            let body: String
+            if url.path.hasSuffix("/history") {
+                body = UsageFixtures.history
+            } else if url.path == "/gw/status" {
+                // The rotation request already counted is this one, so the first
+                // pass gets the fixture and every pass after it gets the change.
+                body = counter.urls.filter { $0.path == "/gw/status" }.count == 1
+                    ? UsageFixtures.status
+                    : UsageFixtures.statusWithASwitchThrownElsewhere
+            } else {
+                await gate.wait()
+                try Task.checkCancellation()
+                body = UsageFixtures.switchAnswer
+            }
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            return (Data(body.utf8), response)
+        }, defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, false, "the first pass said nothing useful")
+
+        history.setAccount(label: "acc2", enabled: false)
+        XCTAssertTrue(history.inFlight.contains("acc2"), "there is no click in the air to guard")
+        history.fetch()
+        await history.fetchTask?.value
+
+        XCTAssertEqual(history.switches?["acc3"]?.disabled, false, "the second pass never landed")
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, false,
+                       "a pass rewrote the box the operator is waiting on")
+        XCTAssertEqual(history.switches?["acc2"]?.disabledReason, "")
+
+        // And the answer, when it comes, is what moves it.
+        gate.open()
+        await history.switchTasks["acc2"]?.value
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, true)
+    }
+
+    /// A pass that found somewhere to route takes the warning down.
+    ///
+    /// The warning is about the fleet — "is there anywhere left to send a
+    /// request" — and the fleet moves without this app: an account put back from
+    /// the command line, or a quota window that reset, ends the state the sentence
+    /// warns about. While only a switch answer could clear it, the orange line
+    /// stood from the click that raised it until the app was restarted, on every
+    /// opening of the popover, with nothing beside it to say how old it was.
+    ///
+    /// It is also the control on the hold next door: the pass here asks *after*
+    /// the click was answered, so it is the newer news and is supposed to win. A
+    /// hold that kept the line up on every pass following any click at all would
+    /// pass that test and fail this one.
+    func testAPassThatFoundSomewhereToRouteTakesTheWarningDown() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(
+            client: rotationClient(counter, switchAnswer: UsageFixtures.switchAnswerWithWarning),
+            defaults: freshDefaults())
+        history.open(labels: ["main"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        history.setAccount(label: "main", enabled: false)
+        await history.switchTasks["main"]?.value
+        XCTAssertNotNil(history.fleetWarning, "the switch that emptied the fleet said nothing")
+
+        // The fixture names one routable account, which is the fleet answering the
+        // question the warning asks.
+        history.fetch()
+        await history.fetchTask?.value
+        XCTAssertNil(history.fleetWarning, """
+            a pass that found the fleet with somewhere to route left the warning standing, \
+            and it will stand at every opening until the app is restarted
+            """)
+    }
+
+    /// **The count is the verdict and the sentence is only its wording**, so a
+    /// pass raises the line as well as taking it down.
+    ///
+    /// A fleet with nowhere to route used to say nothing at all unless this very
+    /// session of this very app had been the one to empty it: somebody's
+    /// `claude-gw disable` from the command line, every account in backoff at
+    /// once, or a restart after one's own click all left the popover silent while
+    /// every client request came back 429. The two counts are one measurement at
+    /// two moments — the gateway computes `routableAccounts` and
+    /// `eligible_accounts` with the same `is_eligible` — so the pass's count is
+    /// as good an answer as the switch's.
+    ///
+    /// The fixture is a fleet **nobody has switched off**, which is the price of
+    /// this and is paid on purpose: `eligible` folds the five-hour window in with
+    /// the operator's switch, so the line appears with every checkbox ticked when
+    /// the windows have merely filled. That is the state the sentence describes.
+    ///
+    /// Two mutations die here and they are the two halves of the finding. Not
+    /// raising on a pass leaves the first assertion `nil`; going back to "the
+    /// sentence raises and the count takes down" clears on the same pass, because
+    /// `/gw/status` sends no sentence at all.
+    func testTheCountRaisesTheWarningWithNoSentenceAnywhere() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            counter.record(request.url)
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            let body: String
+            if url.path.hasSuffix("/history") {
+                body = UsageFixtures.history
+            } else {
+                // The rotation request already counted is this one, so the first
+                // pass finds a fleet with nowhere to route and the next one finds
+                // `status`, where `acc2` is routable.
+                body = counter.urls.filter { $0.path == "/gw/status" }.count == 1
+                    ? UsageFixtures.statusWithNowhereToRoute
+                    : UsageFixtures.status
+            }
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            return (Data(body.utf8), response)
+        }, defaults: freshDefaults())
+        history.open(labels: ["main"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        XCTAssertEqual(history.fleetWarning, UsageHistoryModel.noRouteWarning, """
+            a fleet the gateway cannot route to said nothing, because nobody in this session \
+            had clicked anything
+            """)
+        // The state, not the switches: nobody has been switched off, so the boxes
+        // are all ticked and it is the line that carries the news.
+        XCTAssertEqual(history.switches?["main"]?.disabled, false)
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, false)
+
+        history.fetch()
+        await history.fetchTask?.value
+        XCTAssertNil(history.fleetWarning, "a count above zero left the line standing")
+    }
+
+    /// And a pass that left before the operator's own click may not take the
+    /// warning down either.
+    ///
+    /// The same race the tick is held against, in the half of `applyRotation`
+    /// where the rule was written down and then not applied — and the cost is the
+    /// worse of the two. A tick put back wrongly is repaired by the next pass a
+    /// minute later; a warning taken down wrongly can be put back by nothing but
+    /// another click, so it is gone until the operator happens to throw a switch
+    /// again. The scene is real: the popover is open, the minute pass is in the
+    /// air, the operator switches the last usable account off, the short POST
+    /// answers first with the sentence, and tens of milliseconds later the pass
+    /// lands carrying the fleet from before the click.
+    ///
+    /// The gate holds `/gw/status` and the test waits for it to be **reached**, so
+    /// the pass really did leave first rather than probably.
+    func testAPassThatLeftBeforeTheClickDoesNotTakeTheWarningDown() async throws {
+        let counter = RequestCounter()
+        let statusGate = Gate()
+        let history = UsageHistoryModel(
+            client: rotationClient(counter,
+                                   switchAnswer: UsageFixtures.switchAnswerWithWarning,
+                                   statusGate: statusGate),
+            defaults: freshDefaults())
+        history.open(labels: ["main"])
+        defer { history.close() }
+        await statusGate.arrival()
+
+        history.setAccount(label: "main", enabled: false)
+        await history.switchTasks["main"]?.value
+        let raised = try XCTUnwrap(history.fleetWarning,
+                                   "the switch that emptied the fleet never raised the line")
+
+        statusGate.open()
+        await history.fetchTask?.value
+
+        XCTAssertEqual(history.fleetWarning, raised, """
+            the pass counted the fleet as it stood before the click and took the line down, \
+            and nothing but another click could ever put it back
+            """)
+        // The control: the pass did land, so the assertion above is a rule and not
+        // a pass that quietly wrote nothing at all. `acc3` is a label the click
+        // never touched, so it carries the pass's own reading.
+        XCTAssertEqual(history.switches?["acc3"]?.disabled, true, "the pass never reached the model")
+    }
+
+    /// And two clicks of the operator's own, answered in the other order from the
+    /// one they were asked in: the count that stands is the one asked for **last**.
+    ///
+    /// `setAccount` guards one label at a time, deliberately — a second click on a
+    /// *different* account while the first is in the air is a thing an operator
+    /// does, and there is nothing to stop it. But the count is the fleet's and
+    /// moves with every switch, so two answers carry two readings of one quantity
+    /// and the wire decides nothing about which of them measured it later. Both
+    /// accounts routable, `acc2` switched off (its answer counts 1, `main` being
+    /// what is left), `main` switched off without waiting (its answer counts 0,
+    /// and the sentence with it); `main`'s answer lands first and the orange line
+    /// goes up, `acc2`'s lands second and — unordered — takes it back down. Every client request is then
+    /// answered 429 with nothing on screen saying so until the next pass, up to
+    /// `UsageHistoryModel.refreshSeconds` later. It is the expensive direction of
+    /// the two, for the reason `applyRotation` gives about the pass: a tick put
+    /// back wrongly is repaired by the next pass, a warning taken down wrongly by
+    /// nothing but another click.
+    ///
+    /// A gate **per label** is what makes the order a fact rather than a
+    /// likelihood: each answer waits until this test lets that label through, so
+    /// "asked first, answered last" is the arrangement and not the weather. The
+    /// per-label writes are ordered by nothing and are meant not to be — an answer
+    /// is authoritative about its own account whatever the fleet count is doing,
+    /// which is what the last assertion reads.
+    ///
+    /// **The settling pass this ends on is answered with the fleet the two clicks
+    /// left behind** — it is asked once both switches have landed, so an
+    /// always-routable body is one the gateway could not have sent, and a test
+    /// reading a switch off such a pass reads the fixture rather than the gateway
+    /// (`UsageFixtures.statusWithBothRoutableAccountsSwitchedOff`, where that rule is
+    /// written down). **No assertion here reads what that pass answered**, which is
+    /// why putting it right moved no number — and each of the six is covered, in
+    /// three groups. The opening one is made before either click, when the only pass
+    /// ever asked is the sitting's own. The middle two are safe by something
+    /// stronger than timing: the first reads `inFlight`, which no pass writes, and
+    /// the second reads the count `main`'s own answer put up at a moment when the
+    /// settling pass does not exist at all — `settle` is `inFlight.isEmpty &&
+    /// clicksOverlapped`, `acc2` is still in the air, and so `main`'s task asks for
+    /// no pass (checked with a throwaway probe beside it: `inFlight` is `["acc2"]`
+    /// there and exactly one `/gw/status` request has been recorded, the sitting's
+    /// own). And the three at the end are read in the same actor turn as the `await`
+    /// on `acc2`'s task, before the pass started inside it can land. That is
+    /// a fact about today's assertions rather than a licence — an assertion added
+    /// here that does read the tick or the orange line off that pass then reads the
+    /// gateway, which is the whole of what this body buys.
+    ///
+    /// Mutation, 2026-09-06: drop the ask-instant guard from `applyRoutable` and
+    /// this is the one test of 668 that reddens — re-run the same day over the scene
+    /// above, once the settling pass had stopped being answered with the fleet from
+    /// before the two clicks, and it is still the one and only, now of 671.
+    func testTheCountThatStandsIsTheOneAskedForLast() async throws {
+        let counter = RequestCounter()
+        let acc2Gate = Gate()
+        let mainGate = Gate()
+        // The fleet the two answers below are derived against is not `status` but
+        // `statusWithTwoRoutableAccounts`, where the derivation is written down.
+        let history = UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            counter.record(request.url)
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            let body: String
+            if url.path.hasSuffix("/history") {
+                body = UsageFixtures.history
+            } else if url.path == "/gw/status" {
+                // A pass reads the accounts table the POSTs write to, so it reports
+                // the switches that had landed by the time it was asked. Keyed on the
+                // switch requests already recorded — this pass is none of them — which
+                // is the same question for the two passes the healthy program asks
+                // here: the sitting's own, with nothing switched yet, and the settling
+                // one after both of the burst's clicks were answered.
+                body = counter.urls.contains { $0.path.hasPrefix("/gw/accounts/") }
+                    ? UsageFixtures.statusWithBothRoutableAccountsSwitchedOff
+                    : UsageFixtures.statusWithTwoRoutableAccounts
+            } else if url.path.hasPrefix("/gw/accounts/acc2/") {
+                await acc2Gate.wait()
+                try Task.checkCancellation()
+                body = UsageFixtures.switchAnswer
+            } else {
+                await mainGate.wait()
+                try Task.checkCancellation()
+                body = UsageFixtures.switchAnswerWithWarning
+            }
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            return (Data(body.utf8), response)
+        }, defaults: freshDefaults())
+        history.open(labels: ["acc2", "main"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        XCTAssertNil(history.fleetWarning, "the fleet had somewhere to route before either click")
+
+        // Asked in this order, both still in the air.
+        history.setAccount(label: "acc2", enabled: false)
+        history.setAccount(label: "main", enabled: false)
+        XCTAssertEqual(history.inFlight, ["acc2", "main"],
+                       "both clicks have to be out at once for either order to exist")
+
+        // And answered in the other one.
+        mainGate.open()
+        await history.switchTasks["main"]?.value
+        let raised = try XCTUnwrap(history.fleetWarning,
+                                   "the switch that emptied the fleet never raised the line")
+
+        acc2Gate.open()
+        await history.switchTasks["acc2"]?.value
+
+        XCTAssertEqual(history.fleetWarning, raised, """
+            the answer asked for first landed last and took the line down with a count from \
+            before the second click, and nothing but another click could put it back
+            """)
+        // The control: that answer did land, so the assertion above is a rule and
+        // not a request that quietly failed on its way.
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, true,
+                       "the older answer never reached the model, so it was refused by nothing")
+        XCTAssertEqual(history.switches?["main"]?.disabled, true)
+    }
+
+    /// And the count is settled by **asking**, once the last click of two that
+    /// overlapped has landed.
+    ///
+    /// The guard above orders two answers by the moment this app asked for them,
+    /// which is the nearest thing this side has to the order the gateway measured
+    /// in — and only the nearest. The gateway counts inside the handler that writes
+    /// the switch, with no suspension between the two, so each answer is consistent
+    /// in itself; which of two handlers ran first was settled by two connections
+    /// arriving at one single-threaded loop. Processed out of send order, the true
+    /// final count is in the answer to the *earlier* question, and the ask-instant
+    /// refuses it either way round. So what closes the class is not an ordering rule
+    /// but an observation: one pass, asked when nothing is in the air any more, and
+    /// the gateway counts the fleet once for everybody.
+    ///
+    /// **And not before.** While another click is out, `isStale` refuses whatever
+    /// count a pass brings back, so a pass fired then is 208 KB spent to be ignored
+    /// — and the click still out there brings its own settling pass when it lands.
+    ///
+    /// **And not for a click that went out alone**, which is the other half of the
+    /// gate and lives in `testALoneClickIsSettledByItsOwnAnswer` next door: two
+    /// POSTs in the air at once is the whole of what the ask-instant cannot order,
+    /// and `fetch` cancels the pass in flight, so settling after every click would
+    /// take `isStale`'s ordering half out of reach altogether. Both clicks here
+    /// overlap, which is what puts this test on the settling side of that gate.
+    ///
+    /// Counted in `/gw/status` requests, which is one per pass and the one thing on
+    /// this path nothing else sends. A gate per label makes the middle state a fact
+    /// rather than a likelihood: `acc2` is let through while `main` is still held,
+    /// so the assertion about "a click still in the air" is asked in the one
+    /// arrangement it is about. Each assertion is made after awaiting `fetchTask`,
+    /// because a pass fired here would be a `Task` whose request has not necessarily
+    /// reached the counter yet — without that wait the "no pass" half would pass
+    /// under its own mutation about half the time.
+    ///
+    /// **And the settling pass is answered with the fleet the burst left behind**,
+    /// for the reason recorded next door and at
+    /// `UsageFixtures.statusWithBothRoutableAccountsSwitchedOff`: it is asked once
+    /// both switches have landed, so an always-routable body is one the gateway
+    /// could not have sent. **No assertion here reads that body either**, which is
+    /// why putting it right moved no number: this test counts `/gw/status` requests
+    /// and reads `inFlight`, and neither of those asks what a pass answered. An
+    /// assertion added here that does read the tick or the count off that pass then
+    /// reads the gateway rather than the fixture.
+    ///
+    /// Mutations, re-run 2026-09-06 against a suite of 671 — this test,
+    /// `testALoneClickIsSettledByItsOwnAnswer` and
+    /// `testABurstsOverlapIsNotChargedToTheNextLoneClick`, the last of
+    /// which reddens under both of these and did not exist when they were first run
+    /// at 670. (Every record that says 668 — one above this line, three below it and
+    /// one in `UsageTests` — is older still, from the same morning, before any of
+    /// the three. Counted as records, not as mentions: the one at
+    /// `testNoStringOnScreenNamesTheMetricByItsInternalWord` says 668 three times
+    /// and is a single sitting.) Both were run again the same day over that
+    /// third test's reworked scene: its stub now answers the settling pass with the
+    /// fleet the burst had just written, and it has gained a control on that pass, so
+    /// which of its assertions move had to be measured rather than carried over.
+    /// Deleting the settling `fetch()` reddens the last assertion here at 1 pass
+    /// against 2, and in the third test its settling control and its final count,
+    /// both at 1 against 2 — 2 tests, 3 assertions, nothing else in the suite.
+    /// Dropping only the `inFlight.isEmpty` half of `settle` reddens the middle
+    /// assertion here at 2 against 1 — a pass asked with `main` still out — and then
+    /// the last one too, at 3 against 2, because the extra pass is still counted when
+    /// the burst ends; the third test reddens on those same two of its three counts
+    /// for the same reason, both at 3 against 2, so 2 tests and 4 assertions. Its
+    /// `disabled` control stands through both, and through the other two mutations of
+    /// that machine as well: it falls only to its own, which is recorded with it. The
+    /// third mutation of `settle` belongs to the other half of the gate and is
+    /// recorded next door. The deletion and the dropped half were then run a third
+    /// time, over the scene **this**
+    /// test now sets — its settling pass answered with the fleet the burst had
+    /// written, as the third test's already was — and every count above came back
+    /// unchanged, which is what a change that moves only what a body says is allowed
+    /// to do. Allowed, not guaranteed: it was measured because the scene moved, not
+    /// carried over because the reasoning said it could not.
+    func testTheCountIsSettledByAPassOnceTheLastClickHasLanded() async {
+        let counter = RequestCounter()
+        let acc2Gate = Gate()
+        let mainGate = Gate()
+        func passes() -> Int { counter.urls.filter { $0.path == "/gw/status" }.count }
+        let history = UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            counter.record(request.url)
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            let body: String
+            if url.path.hasSuffix("/history") {
+                body = UsageFixtures.history
+            } else if url.path == "/gw/status" {
+                // A pass reads the accounts table the POSTs write to, so it reports
+                // the switches that had landed by the time it was asked. Keyed on the
+                // switch requests already recorded — this pass is none of them — which
+                // is the same question for the two passes the healthy program asks
+                // here: the sitting's own, with nothing switched yet, and the settling
+                // one after both of the burst's clicks were answered.
+                body = counter.urls.contains { $0.path.hasPrefix("/gw/accounts/") }
+                    ? UsageFixtures.statusWithBothRoutableAccountsSwitchedOff
+                    : UsageFixtures.statusWithTwoRoutableAccounts
+            } else if url.path.hasPrefix("/gw/accounts/acc2/") {
+                await acc2Gate.wait()
+                try Task.checkCancellation()
+                body = UsageFixtures.switchAnswer
+            } else {
+                await mainGate.wait()
+                try Task.checkCancellation()
+                body = UsageFixtures.switchAnswerWithWarning
+            }
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            return (Data(body.utf8), response)
+        }, defaults: freshDefaults())
+        history.open(labels: ["acc2", "main"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        let opening = passes()
+        XCTAssertEqual(opening, 1, "the sitting's own first pass did not happen")
+
+        history.setAccount(label: "acc2", enabled: false)
+        history.setAccount(label: "main", enabled: false)
+        XCTAssertEqual(history.inFlight, ["acc2", "main"],
+                       "both clicks have to be out at once for either half of this to exist")
+
+        acc2Gate.open()
+        await history.switchTasks["acc2"]?.value
+        XCTAssertEqual(history.inFlight, ["main"], "the other click was not still in the air")
+        await history.fetchTask?.value
+        XCTAssertEqual(passes(), opening, """
+            a pass was asked with a click still in the air, where `isStale` refuses whatever \
+            count it brings back — bytes spent to be ignored
+            """)
+
+        mainGate.open()
+        await history.switchTasks["main"]?.value
+        XCTAssertTrue(history.inFlight.isEmpty, "a click is still out, so nothing settles yet")
+        await history.fetchTask?.value
+        XCTAssertEqual(passes(), opening + 1, """
+            the last click landed and nobody asked the gateway to count the fleet again, so the \
+            standing count is whichever of the two answers the ask-instant happened to admit
+            """)
+    }
+
+    /// And a click that went out **alone** is settled by its own answer: no pass.
+    ///
+    /// The settling pass next door exists for the one arrangement the ask-instant
+    /// cannot order — two POSTs in the air at once, whose handlers the gateway may
+    /// have run in either order. A lone POST is never ordered against another POST.
+    /// The only other count it can meet is a pass's, and those two are ordered
+    /// correctly in both directions already: `isStale` refuses a pass whose
+    /// ask-instant is older than this answer's confirmation, and `applyRoutable`
+    /// refuses a count asked for earlier than the one already on screen.
+    ///
+    /// So a pass here would be paid for nothing — and not only in bytes. `fetch`
+    /// cancels `fetchTask`, so a settling pass after **every** click destroys
+    /// whatever pass is in the air, and that pass is precisely what `isStale`'s
+    /// second half is written to refuse. Settle after every click and no pass asked
+    /// before a confirmation can ever land, while a pass asked after one is younger
+    /// than it by construction: the half stops being able to fire at all. That is
+    /// what the two `testAPassThatLeftBeforeTheClick…` tests read as when it is
+    /// tried — their subject becomes unreachable rather than wrong.
+    ///
+    /// Counted in `/gw/status` requests, one per pass. `fetchTask` is awaited before
+    /// the count for the reason given next door: a pass fired here would be a `Task`
+    /// whose request has not necessarily reached the counter yet.
+    ///
+    /// Mutation, re-run 2026-09-06 against a suite of 671 and again the same day over
+    /// the reworked scene of the fourth test below: dropping the `clicksOverlapped`
+    /// half of `settle`, so that every click settles, reddens **four** tests. This one
+    /// by name, at 2 passes against 1; both
+    /// `testAPassThatLeftBeforeTheClickDoesNotPutTheTickBack` — the tick reading
+    /// `false` where the click put `true` — and `…DoesNotTakeTheWarningDown`, whose
+    /// warning comes back `nil`, the pair of them having had their pass cancelled by
+    /// the settling one and replaced by a pass asked after the click, which is then
+    /// admitted and writes the pre-click fixture; and
+    /// `testABurstsOverlapIsNotChargedToTheNextLoneClick` on its final count **alone**,
+    /// at 3 against 2 — that one is the fourth, added after the **three** this record
+    /// used to say, and the count is the whole of what its arrival changed. Alone is
+    /// the half of it worth measuring twice: the settling control that test has since
+    /// gained stays green here, where the neighbour's two mutations both redden it, so
+    /// the shape of the failure inside that test is what separates this half of the
+    /// gate from the other. The `testAPassThatLeftBeforeTheClick…` pair reddening is
+    /// the price stated above, measured: the guard is not weakened by the mutation, it
+    /// is left with nothing to refuse.
+    func testALoneClickIsSettledByItsOwnAnswer() async {
+        let counter = RequestCounter()
+        func passes() -> Int { counter.urls.filter { $0.path == "/gw/status" }.count }
+        let history = UsageHistoryModel(client: rotationClient(counter),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        let opening = passes()
+        XCTAssertEqual(opening, 1, "the sitting's own first pass did not happen")
+
+        history.setAccount(label: "acc2", enabled: false)
+        await history.switchTasks["acc2"]?.value
+        // The control: the click really was answered, so the count below is about
+        // a burst that ended rather than one that never started.
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, true,
+                       "the answer to the click never landed")
+        await history.fetchTask?.value
+
+        XCTAssertEqual(passes(), opening, """
+            a click sent on its own asked the gateway to count the fleet again, which costs \
+            a pass to settle what its own answer already settled — and cancels the pass in \
+            flight, the one `isStale` exists to refuse
+            """)
+    }
+
+    /// And "sent on its own" is a fact about **this** click, not about the sitting:
+    /// a burst that overlapped is charged to itself and to nothing after it.
+    ///
+    /// `clicksOverlapped` is recorded when the second click of a burst goes out —
+    /// by the time the answers come back `inFlight` has emptied and the overlap has
+    /// left no trace — so it is a flag with a life of its own, and the only place it
+    /// goes out again is the line beside the one that reads it. Delete that line and
+    /// the sitting's first overlapping burst arms it for good: every lone click
+    /// afterwards takes the settling path, which is not merely a wasted pass.
+    /// `fetch` begins with `fetchTask?.cancel()`, so each of those clicks destroys
+    /// whatever pass is in the air — and a pass asked before a confirmation is
+    /// exactly what `isStale`'s second half is written to refuse. That is the
+    /// mechanism `testALoneClickIsSettledByItsOwnAnswer` next door keeps out of the
+    /// code; without this test it walks back in through the one arrangement neither
+    /// of the two covers, because that one ends when the burst lands and this one
+    /// starts from a model that never had a burst.
+    ///
+    /// So the burst here is the neighbour's, and the third click is a *later* lone
+    /// one in the same sitting: `acc2` and `main` both switched off with both POSTs
+    /// in the air at once, the settling pass awaited, and then `main` put back on
+    /// its own.
+    ///
+    /// **Every body is one the gateway could have sent at that moment**, and the
+    /// count runs 2, 1, 0, 0, 1 across the five answers.
+    /// `statusWithTwoRoutableAccounts` opens the sitting — `acc2` and `main`
+    /// routable, `acc3` parked from the evening before, so 2. Taking `acc2` out
+    /// leaves 1 (`switchAnswer`), and `main` after it leaves 0
+    /// (`switchAnswerWithWarning`). The settling pass then reads the accounts table
+    /// those two POSTs have just written to, so what it gets is
+    /// `statusWithBothRoutableAccountsSwitchedOff`: both of them off, counting 0,
+    /// agreeing with the answer that took the last one out. Putting `main` back
+    /// gives 1 again (`switchAnswerPuttingTheAccountBack`).
+    ///
+    /// **That agreement is the whole of what the second control can read.** With
+    /// `statusWithTwoRoutableAccounts` answering the settling pass — which is what
+    /// stood here — `main` is back to `disabled: false` before the lone click is
+    /// ever sent: `inFlight` is empty by then and both confirmations are older than
+    /// that pass's `askedAt`, since it is asked from inside the last switch task
+    /// after that task wrote its own, so `holds` refuses both labels and
+    /// `applyRotation` overwrites the dictionary with the pass's body whole. The
+    /// control then read `false` whether the lone click's answer landed, failed, or
+    /// was never sent — while a *failed* click takes `setAccount`'s failure branch,
+    /// where `fetch()` is called unconditionally, which is precisely the 3 passes
+    /// against 2 the final assertion is written to catch. With the settling pass
+    /// answering for the fleet it was actually asked of, `main` stands at
+    /// `disabled: true` when the lone click goes out, and nothing but that click's
+    /// own answer puts it back.
+    ///
+    /// No gate holds either half of the burst: `setAccount` is synchronous up to
+    /// `inFlight.insert`, and the two calls stand side by side with nothing that
+    /// suspends between them, so both are in the air before either can be answered.
+    /// Counted in `/gw/status` requests, one per pass, and each count is taken after
+    /// awaiting `fetchTask` — a pass fired here would be a `Task` whose request has
+    /// not necessarily reached the counter yet.
+    ///
+    /// Mutations, 2026-09-06, against a suite of 671, every one of them run over the
+    /// scene above rather than inferred from the one it replaced — the settling pass
+    /// stopped being answered with the fleet from before the burst in the same round
+    /// that wrote this record. Deleting the reset — the `if inFlight.isEmpty {
+    /// clicksOverlapped = false }` of `setAccount` — still reddens this test and
+    /// nothing else in the suite, at 3 passes against 2, and both controls stay
+    /// green: the burst settles once as it should, and that click's answer lands —
+    /// it is only charged for a pass it did not ask for.
+    ///
+    /// And the control's own, which is what says it can fail and what it fails for:
+    /// have the stub throw for the lone `enable` instead of answering it, and the
+    /// control reddens on `main` still reading `disabled: true` — the settling
+    /// pass's — with the final assertion reddening after it at 3 against 2, because
+    /// the failure branch fetches unconditionally. Two failures in line order, and
+    /// the pair of them is what separates the two cases: a control that stands
+    /// while the count is wrong means the lone click was charged for the burst, and
+    /// one that falls means its own answer never landed. Against the body that
+    /// stood here before, the same thrown `enable` reddens the final assertion
+    /// **alone** — 1 failure, not 2 — which is exactly the reading the control was
+    /// meant to rule out; measured, not remembered, by putting that always-routable
+    /// `/gw/status` answer back under the same thrown `enable`, with everything else
+    /// of today's scene left standing.
+    ///
+    /// No mutation of the settling machine moves that control: it stands under all
+    /// four of them — the `fetch()` deleted, either half of `settle` dropped, the
+    /// reset deleted — and falls only to the stub above it. Which is what a control
+    /// is for, and it is measured across the four rather than assumed from the one
+    /// it was written beside.
+    func testABurstsOverlapIsNotChargedToTheNextLoneClick() async {
+        let counter = RequestCounter()
+        func passes() -> Int { counter.urls.filter { $0.path == "/gw/status" }.count }
+        let history = UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            counter.record(request.url)
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            let body: String
+            if url.path.hasSuffix("/history") {
+                body = UsageFixtures.history
+            } else if url.path == "/gw/status" {
+                // A pass reads the accounts table the POSTs write to, so it reports
+                // the switches that had landed by the time it was asked. Counted in
+                // the switch requests already recorded — this pass is none of them —
+                // and the healthy program asks exactly two: the sitting's own, with
+                // nothing switched yet, and the settling one after both of the
+                // burst's clicks.
+                body = counter.urls.contains { $0.path.hasPrefix("/gw/accounts/") }
+                    ? UsageFixtures.statusWithBothRoutableAccountsSwitchedOff
+                    : UsageFixtures.statusWithTwoRoutableAccounts
+            } else if url.path == "/gw/accounts/acc2/disable" {
+                body = UsageFixtures.switchAnswer
+            } else if url.path == "/gw/accounts/main/disable" {
+                body = UsageFixtures.switchAnswerWithWarning
+            } else {
+                body = UsageFixtures.switchAnswerPuttingTheAccountBack
+            }
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            return (Data(body.utf8), response)
+        }, defaults: freshDefaults())
+        history.open(labels: ["acc2", "main"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        let opening = passes()
+        XCTAssertEqual(opening, 1, "the sitting's own first pass did not happen")
+
+        history.setAccount(label: "acc2", enabled: false)
+        history.setAccount(label: "main", enabled: false)
+        XCTAssertEqual(history.inFlight, ["acc2", "main"],
+                       "both clicks have to be out at once for the flag to be set at all")
+        await history.switchTasks["acc2"]?.value
+        await history.switchTasks["main"]?.value
+        await history.fetchTask?.value
+        // The control: the burst really did settle, so what follows is about a flag
+        // that was set and then had to be cleared, rather than one never set.
+        XCTAssertEqual(passes(), opening + 1, "the burst never settled, so there is no flag to clear")
+
+        history.setAccount(label: "main", enabled: true)
+        await history.switchTasks["main"]?.value
+        // And the second control: the lone click was answered, so the count below
+        // is about a click that finished rather than one still in the air. The
+        // settling pass left `main` switched off — see the note above on why that
+        // is the body the gateway would have sent it — so nothing but this click's
+        // own answer can be what makes this read `false`.
+        XCTAssertEqual(history.switches?["main"]?.disabled, false,
+                       "the answer to the lone click never landed")
+        await history.fetchTask?.value
+
+        XCTAssertEqual(passes(), opening + 1, """
+            a lone click was charged for an earlier burst's ambiguity and asked for a settling \
+            pass of its own — which cancels the pass in flight, the one `isStale` exists to refuse
+            """)
+    }
+
+    /// A failed click's blame does not follow the operator into the next sitting.
+    ///
+    /// It is cleared by the next click on the same label and by nothing else, so
+    /// an hour after a dead WireGuard came back — the gateway answering, every
+    /// checkbox live — the grey line still read "acc2: unreachable" as though it
+    /// had just happened. A fact about the past shown as the present (§2.4), with
+    /// the operator's own control beside it.
+    ///
+    /// `open` and not `close`, which the message survives on purpose: a popover
+    /// closes on any click anywhere on the screen, including one that never came
+    /// near it. And nothing is lost by clearing on the way in, because `open`
+    /// fires a pass in the next line — what the blame stands for is a tick that
+    /// may no longer be the fleet's, and the pass is what settles that.
+    func testAFailedClicksBlameDoesNotSurviveIntoTheNextSitting() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(client: rotationClient(counter, switchAnswer: nil),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+
+        history.setAccount(label: "acc2", enabled: false)
+        await history.switchTasks["acc2"]?.value
+        await history.fetchTask?.value
+        XCTAssertNotNil(UsagePopoverView.switchBlame(history.switchFailures),
+                        "the click that could not go through left nothing to clear")
+
+        history.close()
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        XCTAssertTrue(history.switchFailures.isEmpty, """
+            an hour-old failure came back with the popover and reads as this sitting's: \
+            \(history.switchFailures)
+            """)
+        XCTAssertNil(UsagePopoverView.switchBlame(history.switchFailures))
+    }
+
+    /// And neither do the fleet's own two, for the same reason and with the same
+    /// remedy one line below them.
+    ///
+    /// Nothing runs while the popover is shut, so on the way back in all three of
+    /// these lines stand for a tick that may be an hour old — the orange one
+    /// loudest of all, with no age drawn anywhere near it. The `open` that clears
+    /// them fires a pass in its next line, which is exactly the thing that settles
+    /// what they stand for.
+    ///
+    /// Both are put up first, and it takes two passes to do it: a pass that
+    /// answers a fleet with nowhere to route raises the warning, and a pass that
+    /// cannot ask writes the blame while **keeping** the warning — an answer
+    /// replaces what is held, a pass that got none leaves it alone. The assertions
+    /// after the reopen are made before the new pass has run: `open` starts it as a
+    /// `Task` on this actor, so nothing has landed yet and what is read is what the
+    /// operator sees on the way in.
+    func testTheFleetsOwnTwoMessagesDoNotSurviveIntoTheNextSitting() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            counter.record(request.url)
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            let isRotation = url.path == "/gw/status"
+            // The rotation request already counted is this one, so the first pass
+            // is answered and every pass after it is not.
+            if isRotation, counter.urls.filter({ $0.path == "/gw/status" }).count > 1 {
+                throw UsageError.unreachable("the gateway is not there")
+            }
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            let body = isRotation ? UsageFixtures.statusWithNowhereToRoute : UsageFixtures.history
+            return (Data(body.utf8), response)
+        }, defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        XCTAssertEqual(history.fleetWarning, UsageHistoryModel.noRouteWarning,
+                       "the fleet with nowhere to route said nothing, so there is nothing to clear")
+
+        history.fetch()
+        await history.fetchTask?.value
+        XCTAssertNotNil(history.rotationFailure, "the pass that had to fail did not")
+        XCTAssertNotNil(history.fleetWarning,
+                        "a failed pass took the warning with it, and the reopen below proves nothing")
+
+        history.close()
+        history.open(labels: ["acc2"])
+        defer { history.close() }
+
+        XCTAssertNil(history.fleetWarning, """
+            an hour-old "every client request is a 429" came back with the popover and reads as \
+            this second's, in orange and with no age beside it
+            """)
+        XCTAssertNil(history.rotationFailure, """
+            and an hour-old reason the boxes went inert came back with it: \
+            \(history.rotationFailure ?? "")
+            """)
+        await history.fetchTask?.value
+    }
+
+    /// Neither does the rotation itself, and it is the one of the four that binds
+    /// hardest.
+    ///
+    /// The other three are messages about a moment; this one is a **control**. An
+    /// hour-old reading survives a shut popover — `close` leaves it alone and
+    /// `NSPopover` keeps the content view controller — so on the way back in the
+    /// boxes would be drawn from it, ticked as current and clickable, with the two
+    /// lines that might have explained their age cleared in the statements just
+    /// above. §2.4's rule about a confidently wrong reading weighs more on a
+    /// control than on a number, because acting on one changes the fleet:
+    /// `disableAccount` sends no body, and the gateway's `_parse_disable_body`
+    /// reads no body, an empty body and `{}` alike as `DISABLED_NO_DEADLINE`, so a
+    /// click on a stale tick turns somebody's timed parking of an account into an
+    /// indefinite switch-off.
+    ///
+    /// Asked of the **model**, not of the paint, and that is not a shortcut: a
+    /// checkbox comes out of `ImageRenderer` as the same 784 inked pixels in all
+    /// four of its states, so no rendering on this surface can tell a cleared
+    /// rotation from a stale one. `switchAppearance` and `switchHelp` are asked
+    /// beside it because they are what `nil` costs on screen — a clear box nobody
+    /// may click, and a tooltip that says the gateway did not say.
+    ///
+    /// The pass afterwards is the control: cleared and then filled in again is the
+    /// state the operator meets, and without it the test would pass just as well
+    /// against a model that never learned a rotation at all.
+    ///
+    /// Mutation, 2026-09-06: leave the rotation alone in `open` — delete the two
+    /// lines that carry the labels in flight over and take everything else to
+    /// `nil` — and this test reddens, on all four of its assertions. It is not the
+    /// only one: `testAClickStillInTheAirKeepsItsRowAcrossTheReopen` next door
+    /// reddens with it, 2 of 668, because that mutation removes both halves of the
+    /// rule at once. The half this test owns is separated by the other mutation,
+    /// `switches = nil` written back unconditionally, which leaves this one green
+    /// and reddens only next door.
+    ///
+    /// And a third, run 2026-09-06 against a suite of 670: `switches = heldOver`
+    /// with no ternary, so that an empty carry-over stands as `[:]` — "the gateway
+    /// said nobody" written where this app was told nothing. It reddens the first
+    /// assertion here and four more tests, five in all, every one of them on an
+    /// `XCTAssertNil` reading `"[:]"`: `testARotationNobodyAnsweredIsNotAnEmpty`
+    /// `Fleet`, `testARotationBodyMissingASwitchLeavesEveryBoxUnknown`,
+    /// `testARotationWithNoRoutingFlagRaisesNoWarningAtAll` and, on the paint side,
+    /// `testTheReasonTheSwitchesWentInertIsDrawnWithNoAccountsToDrawItUnder`. They
+    /// all reach it the same way: `open` on a model that has never learned a
+    /// rotation carries nothing over, and the ternary is the only thing that keeps
+    /// that from becoming an answer.
+    func testTheRotationItselfDoesNotSurviveIntoTheNextSitting() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(client: rotationClient(counter), defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        XCTAssertEqual(history.switches?["acc3"]?.disabled, true,
+                       "the first sitting learned no rotation, so there is nothing to clear")
+
+        history.close()
+        history.open(labels: ["acc2"])
+        defer { history.close() }
+
+        // Read before the new pass has run: `open` starts it as a `Task` on this
+        // actor, so this is the surface the operator meets on the way in.
+        XCTAssertNil(history.switches, """
+            an hour-old rotation came back with the popover, and every box is drawn from it as \
+            this second's: \(history.switches ?? [:])
+            """)
+        let look = UsagePopoverView.switchAppearance(history.switches?["acc3"], busy: false)
+        XCTAssertEqual(look.ticked, false, "a box was ticked from a reading this app no longer has")
+        XCTAssertEqual(look.usable, false, "and it could be clicked")
+        XCTAssertEqual(UsagePopoverView.switchHelp(history.switches?["acc3"]),
+                       "The gateway did not say whether this account is in rotation")
+
+        await history.fetchTask?.value
+        XCTAssertEqual(history.switches?["acc3"]?.disabled, true,
+                       "the pass `open` fires never filled the rotation back in")
+    }
+
+    /// With one exception, and it is the label the operator is waiting on: a click
+    /// still in the air carries its reading across the reopen, and the new
+    /// sitting's first pass may not write under it.
+    ///
+    /// `close` does not cancel a switch already sent — the operator asked for it —
+    /// so a POST can be in the air for as long as `UsageClient.timeoutSeconds`
+    /// behind a shut popover, and the popover can be opened again inside that. The
+    /// hold `applyRotation` puts on an in-flight label works by laying the value
+    /// this app **already has** over the pass's, so with the rotation wiped there
+    /// was nothing to lay and the first half of `holds` did nothing at all: the
+    /// pass `open` fires answers in a fraction of a second, well before the POST,
+    /// and the box the operator is at that moment switching was drawn from the
+    /// gateway's pre-click reading. Inert, so no wrong click could come of it —
+    /// and confidently wrong all the same, which is the thing the whole control is
+    /// built not to be (§2.4).
+    ///
+    /// **How this differs from `testAPassLeavesAloneALabelWithAClickStillInTheAir`,
+    /// which the same hold is supposed to cover:** there the successful pass runs
+    /// *before* the click and the popover never closes, so the rotation is
+    /// populated when the second pass lands and the hold has something to lay.
+    /// That is why it went on passing with the wipe in place. Here the close and
+    /// the reopen fall between the click and the pass, which is the only order in
+    /// which the dictionary is empty underneath a label in flight.
+    ///
+    /// The scene: `acc3` was parked for 22 hours from the command line the evening
+    /// before (`status`), the operator clicks to put it back, closes the popover
+    /// by clicking elsewhere and opens it again — and by then the parking has
+    /// expired on its own, so the pass has something **else** to say about `acc3`.
+    /// Without that difference a pass that rewrote the row with what was already
+    /// there and one that left it alone would draw the very same picture.
+    ///
+    /// Asked of `switchAppearance` rather than of the paint, for the reason
+    /// `testTheRotationItselfDoesNotSurviveIntoTheNextSitting` gives: the checkbox
+    /// renders as the same blank plate in all four of its states.
+    ///
+    /// Mutation, 2026-09-06: go back to wiping the rotation unconditionally
+    /// (`switches = nil`) and this is the one test of 668 that reddens — on the
+    /// carry-over assertion and on the tick under the click alike, which is the
+    /// pair that says the rule is worth something rather than only present.
+    func testAClickStillInTheAirKeepsItsRowAcrossTheReopen() async {
+        let counter = RequestCounter()
+        let gate = Gate()
+        let history = UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+            counter.record(request.url)
+            let url = request.url ?? Config.default.resolvedUsageBaseURL
+            let body: String
+            if url.path.hasSuffix("/history") {
+                body = UsageFixtures.history
+            } else if url.path == "/gw/status" {
+                // The rotation request already counted is this one, so the first
+                // sitting gets the fixture and the second gets the change: the
+                // 22-hour parking of `acc3` ran out between the two sittings —
+                // `disabled: false` with the past deadline and the operator's
+                // reason still standing beside it, which is how the gateway
+                // reports an expiry nobody clicked (see the fixture).
+                body = counter.urls.filter { $0.path == "/gw/status" }.count == 1
+                    ? UsageFixtures.status
+                    : UsageFixtures.statusWithTheParkingExpired
+            } else {
+                await gate.wait()
+                try Task.checkCancellation()
+                body = UsageFixtures.switchAnswerPuttingAcc3Back
+            }
+            guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                 httpVersion: nil, headerFields: nil) else {
+                throw UsageError.unreachable("no test response")
+            }
+            return (Data(body.utf8), response)
+        }, defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        XCTAssertEqual(history.switches?["acc3"]?.disabled, true,
+                       "the first sitting learned no rotation, so there is nothing to carry")
+
+        history.setAccount(label: "acc3", enabled: true)
+        XCTAssertTrue(history.inFlight.contains("acc3"), "there is no click in the air to carry")
+
+        history.close()
+        history.open(labels: ["acc2"])
+
+        // Read before the new pass has run, and it is the whole of what survives:
+        // the label in flight and nothing beside it. The confirmed ones are not
+        // carried because this sitting's pass is asked after this line and is
+        // newer than every one of them, which `holds` decides on its own.
+        XCTAssertEqual(history.switches?.keys.sorted(), ["acc3"], """
+            the reopen was supposed to carry the one row nobody could settle yet and nothing \
+            else; it carried \(history.switches.map { "\($0.keys.sorted())" } ?? "nothing at all")
+            """)
+
+        await history.fetchTask?.value
+        let look = UsagePopoverView.switchAppearance(history.switches?["acc3"],
+                                                     busy: history.inFlight.contains("acc3"))
+        XCTAssertFalse(look.ticked, """
+            the pass wrote the gateway's own reading under a box whose click is still in the \
+            air, and it is drawn as this second's state of an account being switched
+            """)
+        XCTAssertFalse(look.usable, "a label with a click in the air took a second one")
+        // The control that the pass landed at all: `acc2` has no click on it and
+        // carries the pass's own reading.
+        XCTAssertEqual(history.switches?["acc2"]?.disabled, false, "the pass never reached the model")
+        XCTAssertNotNil(history.switches?["main"], "the pass never reached the model")
+
+        // And the answer, when it comes, is what moves it.
+        gate.open()
+        await history.switchTasks["acc3"]?.value
+        defer { history.close() }
+        XCTAssertEqual(history.switches?["acc3"]?.disabled, false)
+        XCTAssertTrue(UsagePopoverView.switchAppearance(history.switches?["acc3"],
+                                                        busy: history.inFlight.contains("acc3")).usable,
+                      "the row stayed inert after its own answer landed")
+    }
+
+    /// The three stamps that decide whether a pass is older news than the operator
+    /// run on a clock that cannot step backwards.
+    ///
+    /// None of them is ever drawn — they exist only to be compared with each other
+    /// — and the wall clock does step back: an NTP correction, a wake from sleep. A
+    /// step back just after a switch answer leaves that answer stamped in the
+    /// future, and from then on every pass looks older than it, so the gateway
+    /// stops being allowed to refresh the label until the clock catches up.
+    ///
+    /// Asked of `Rotation.askedAt`, which reaches the other two for free.
+    /// `holds` compares `switchConfirmedAt[label]` with this very field, and
+    /// `applyRoutable(_:askedAt:)` takes a `ContinuousClock.Instant` and is handed
+    /// this field by a pass and `setAccount`'s own local by a click — so the
+    /// compiler will not let any of the three be drawn from a different clock than
+    /// the rest. What a mutation back to `Date()` therefore has to change is this
+    /// type, and this is where it is read.
+    ///
+    /// **One question, and one is enough.** An `XCTAssertFalse(askedAt is Date)`
+    /// stood under the assertion below and was deleted: a value cannot be both
+    /// types, so it could only fail where the first has already failed — a check
+    /// that cannot answer "no" on its own, carrying the louder message of the two
+    /// and reading to the next person like a working control. What it said is
+    /// worth keeping, so it is said here and in the message that is left.
+    func testTheStampsThatDecideAStalePassCannotStepBackwards() throws {
+        let rotation = UsageHistoryModel.Rotation(state: nil, routable: nil, failure: nil,
+                                                  askedAt: UsageHistoryModel.stamp())
+        let askedAt = try XCTUnwrap(Mirror(reflecting: rotation).children
+            .first { $0.label == "askedAt" }?.value)
+        XCTAssertTrue(askedAt is ContinuousClock.Instant, """
+            the hold is decided on \(type(of: askedAt)), and a wall clock steps back: one \
+            correction after a switch answer and that label stops taking the gateway's word \
+            until the clock catches up
+            """)
+    }
+
+    /// A switch must not need the main thread either.
+    ///
+    /// `load` has been asked this since it existed; `switchAccount` had not, and it
+    /// is the half that runs from a `Task` started inside a `@MainActor` method,
+    /// which inherits the main actor. Only `nonisolated` on the declaration keeps
+    /// the request off it, nothing warns under `-strict-concurrency=complete` when
+    /// that is lost, and what it costs is up to `UsageClient.timeoutSeconds` — five
+    /// seconds — of a popover that is open on screen and has stopped redrawing.
+    ///
+    /// Timed rather than open, so a regression is a red test and not a run that
+    /// never comes back (§6).
+    func testSwitchingAnAccountDoesNotNeedTheMainThread() {
+        let counter = RequestCounter()
+        let client = rotationClient(counter)
+        let semaphore = DispatchSemaphore(value: 0)
+        Task.detached {
+            _ = await UsageHistoryModel.switchAccount(client: client, label: "acc2", enabled: false)
+            semaphore.signal()
+        }
+        XCTAssertEqual(semaphore.wait(timeout: .now() + 5), .success,
+                       "the switch waited for a main thread that is standing right here")
+        XCTAssertEqual(switchRequests(counter).count, 1, "the switch finished without asking for anything")
     }
 
     /// Inked pixels, over an area the size the popover gives the plot.
@@ -5625,15 +7241,176 @@ final class UsagePopoverLabelTests: XCTestCase {
     }
 
     /// The word this metric is called by inside the app is internal vocabulary
-    /// and appears in no string a person reads (§4). Asked of every string these
-    /// two surfaces can put on screen, because the rule is about the strings and
-    /// not about the one that happened to be written last.
-    func testNoStringOnScreenNamesTheMetricByItsInternalWord() {
+    /// and appears in no string a person reads (§4). Asked of the strings on the
+    /// list below, which is every string these two surfaces write themselves.
+    ///
+    /// **The list is built by hand and cannot be built any other way.** A string
+    /// on screen is whatever some `Text`, `help` or `accessibilityLabel` was
+    /// handed, and there is no reading a SwiftUI body from a test: `some View` is
+    /// opaque, its children are not enumerable, and `ImageRenderer` gives back
+    /// pixels rather than words. So what is swept is the functions the views call,
+    /// and the wire from a view to its function is held by reading it — which is
+    /// the same wire, and the same argument, as `switchAppearance`'s. Two rules
+    /// follow, and they are the price of the arrangement: a new string on either
+    /// surface is covered only once it has been typed in here, and a string is
+    /// only reachable at all if it lives in a named function rather than as a
+    /// literal in a `@ViewBuilder`. `switchAccessibilityLabel` was a literal until
+    /// this sweep asked for it.
+    ///
+    /// **What is deliberately not swept, and why.** Three strings on this surface
+    /// carry words this app did not write and cannot reword: `switchNote`'s
+    /// `disabled_reason`, `switchBlame`'s transport failures, and `failureText`'s.
+    /// Each of those is swept for the frame this app puts around the text — the
+    /// word `off`, the separators, `as of` — and not for the text itself, which is
+    /// a question decided where the value is taken rather than where it is drawn:
+    /// the one gateway sentence that was a constant, the switch answer's
+    /// `warning`, is decoded and dropped instead of printed
+    /// (`SwitchResult.warning`), and the account labels beside them are names the
+    /// operator chose. Two literals stay in the view as well, the `5h` and `7d`
+    /// of `windowRow`'s titles: they are a digit and a unit, they are the argument
+    /// this function's own callers pass, and pulling them out would buy a sweep of
+    /// four characters that cannot hold a word.
+    ///
+    /// **And a frame is only swept if the model built it.** Two of those frames are
+    /// written in `UsageHistoryModel` rather than in the view — `"status: \(error)"`
+    /// for a pass that could not ask and `"\(label): \(error)"` for a click that
+    /// would not go through — so handing this sweep a finished literal that looks
+    /// like one would be asking whether the test's own typing says the word. They
+    /// are produced below by running a refusing client through `load` and
+    /// `switchAccount`, which is where those strings are actually made.
+    ///
+    /// **Proved by mutation, in two sittings of 2026-09-06 — and the sitting, not
+    /// the suite size beside it, is what tells the two apart.** The first, on the
+    /// two entries the switch surface put on this list
+    /// (`switchAccessibilityLabel` and `switchNote`), was taken before
+    /// `testTheCountIsSettledByAPassOnceTheLastClickHasLanded` and
+    /// `testALoneClickIsSettledByItsOwnAnswer` existed, which is the whole of why
+    /// its counts read 668. Writing the word into `switchAccessibilityLabel`
+    /// reddens this test and nothing else of the 668 — that one is the whole proof
+    /// of the extraction, because as a literal in the view it was a string no test
+    /// could reach at all. Writing it into `switchNote`'s `off` reddens this one on
+    /// all three of that label's shapes and
+    /// `testASwitchedOffAccountNamesItsDeadlineAndItsReason` beside it, 2 of 668:
+    /// that test pins the wording, this one holds the rule the wording has to
+    /// satisfy, and a wording test is not one — it would go on passing over any
+    /// wording somebody chose to write down.
+    ///
+    /// The second sitting, later the same day and with that pair of settling tests
+    /// in, covers the two entries the headline and the model put on the list:
+    /// `spendRateCaption` and `"status: \(error)"`. The word written into
+    /// `spendRateCaption` reddens this test and nothing else — that caption is the
+    /// third of the headline's three, and it had no test of any kind on it before
+    /// this line. Written into the model's `"status: \(error)"` frame it reddens
+    /// this one and
+    /// `testTheReasonTheSwitchesWentInertIsDrawnWithNoAccountsToDrawItUnder`, 2 of
+    /// 670, the second on both its strings — that one pins the frame's wording where
+    /// it is drawn, this one holds the rule, and the pair divides the same way as
+    /// `switchNote`'s above.
+    func testNoStringOnScreenNamesTheMetricByItsInternalWord() async {
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
         var strings = [UsagePopoverView.headlineCaption,
                        UsagePopoverView.ratioCaption,
-                       UsagePopoverView.ratioLabel(for: ratio(126, lowerBound: true))]
+                       // The third caption of the headline, and it was outside this
+                       // sweep while its two neighbours were in it.
+                       UsagePopoverView.spendRateCaption,
+                       UsagePopoverView.ratioLabel(for: ratio(126, lowerBound: true)),
+                       UsagePopoverView.ratioLabel(for: ratio(126))]
         strings.append(MenuBarIcon.describe(ratio(126)))
         strings.append(MenuBarIcon.describe(nil))
+        strings.append(UsagePopoverView.switchHelp(nil))
+        strings.append(UsagePopoverView.switchHelp(try? Self.rotationState()))
+        strings.append(UsagePopoverView.switchHelp(try? Self.rotationState(disabled: true)))
+        // What the checkbox is called with no eyes on it — as much a string on
+        // screen as the ones with pixels, and §4 draws no line between them.
+        strings.append(UsagePopoverView.switchAccessibilityLabel("acc2"))
+        // The line under a switched-off account, in all three of its shapes. The
+        // reason in the third is the gateway's word and is here to be carried
+        // rather than to be judged: what is asked is the frame around it.
+        if let off = try? Self.rotationState(disabled: true) {
+            strings.append(UsagePopoverView.switchNote(off, now: now))
+        }
+        if let timed = try? Self.rotationState(disabled: true, until: 1_786_803_600) {
+            strings.append(UsagePopoverView.switchNote(timed, now: now))
+        }
+        if let blamed = try? Self.rotationState(disabled: true, reason: "quota cool-down") {
+            strings.append(UsagePopoverView.switchNote(blamed, now: now))
+        }
+        // Every click that would not go through, joined. The failures themselves
+        // are `UsageError` descriptions, which this app does write.
+        strings.append(UsagePopoverView.switchBlame(["acc2": "acc2: HTTP 500",
+                                                     "main": "main: unreachable: timed out"]) ?? "")
+        // The orange line, and this is the whole of it: `applyRoutable` writes
+        // this string and nothing else, so the sweep covers the surface again.
+        // The gateway's own sentence used to reach that line through a click and
+        // was let through here by a comment — a rule revoked in a comment while
+        // §4 went on stating it. It is decoded and dropped now
+        // (`SwitchResult.warning`).
+        strings.append(UsageHistoryModel.noRouteWarning)
+        // The two sections that can be empty, in all three states each: not asked
+        // yet, asked and refused, asked and answered with nothing.
+        var landed = UsageSnapshot.empty
+        landed.quotaFetchedAt = now
+        var failed = UsageSnapshot.empty
+        failed.quotaFailure = "/gw/usage: HTTP 500"
+        for snapshot in [UsageSnapshot.empty, landed, failed] {
+            strings.append(UsagePopoverView.accountsEmptyLabel(snapshot))
+            strings.append(UsagePopoverView.plotEmptyLabel(snapshot: snapshot,
+                                                           seriesFetchedAt: nil,
+                                                           seriesPeriod: nil,
+                                                           period: .day,
+                                                           historyFailure: nil))
+        }
+        // The lead figure and its supporting readings, with and without a number
+        // to print.
+        strings.append(UsagePopoverView.headlineFigureLabel(for: .empty, now: now))
+        strings.append(UsagePopoverView.headlineFigureLabel(for: landed, now: now))
+        strings.append(UsagePopoverView.quotaLabel(for: .empty))
+        strings.append(UsagePopoverView.rateLabel(3_400_000))
+        strings.append(UsagePopoverView.rateLabel(0))
+        strings.append(UsagePopoverView.percentLabel(58.667))
+        strings.append(UsagePopoverView.percentLabel(nil))
+        // Both shapes of the popover's one countdown, and the tab titles above the
+        // chart — `CaseIterable`, so this half of the sweep is the one part of it
+        // that cannot fall behind.
+        strings.append(UsagePopoverView.resetLabel(now.addingTimeInterval(5400), now: now))
+        strings.append(UsagePopoverView.resetLabel(now, now: now))
+        strings.append(contentsOf: HistoryPeriod.allCases.map(\.title))
+        // The footer: the age line in each of its units, and the reasons under it.
+        for seconds in [30.0, 600.0, 7200.0, 200_000.0] {
+            strings.append(UsagePopoverView.ago(now.addingTimeInterval(-seconds), now: now))
+        }
+        strings.append(UsagePopoverView.footerAgeLabel(quotaFetchedAt: now.addingTimeInterval(-600),
+                                                       quotaFailed: false,
+                                                       chartFetchedAt: now.addingTimeInterval(-600),
+                                                       seriesPeriod: .day,
+                                                       period: .day,
+                                                       chartFailed: false,
+                                                       historiesFailed: false,
+                                                       now: now) ?? "")
+        strings.append(UsagePopoverView.failureText(quota: "/gw/usage: HTTP 500",
+                                                    chart: "/gw/usage/main/history: HTTP 500",
+                                                    histories: "/gw/usage/acc2/history: HTTP 500") ?? "")
+        // The two frames the model writes, produced by the model. A refusing
+        // client gives the rotation's blame (`status: …`), the histories' blame
+        // and a click's blame in one go; what is swept is the frame — the word in
+        // front of the colon and the colon — because the reason inside it is a
+        // `UsageError` description, which this app does write and which the entries
+        // above already cover.
+        let refusing = UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { _ in
+            throw UsageError.unreachable("nothing is listening")
+        }
+        let refused = await UsageHistoryModel.load(client: refusing, labels: ["acc2"],
+                                                   since: now.addingTimeInterval(-86_400))
+        let refusedClick = await UsageHistoryModel.switchAccount(client: refusing, label: "acc2",
+                                                                 enabled: false)
+        // Without this the three below could be `nil`, and a sweep over three
+        // empty strings reads as covered while covering nothing.
+        XCTAssertNotNil(refused.rotation.failure, "the refusing client answered the rotation")
+        XCTAssertNotNil(refused.failure, "the refusing client answered a history")
+        XCTAssertNotNil(refusedClick.failure, "the refusing client answered the click")
+        strings.append(refused.rotation.failure ?? "")
+        strings.append(refused.failure ?? "")
+        strings.append(refusedClick.failure ?? "")
         for text in strings {
             XCTAssertFalse(text.lowercased().contains("fleet"),
                            "\"\(text)\" says \"fleet\" to somebody who does not work on this app")
@@ -5684,6 +7461,141 @@ final class UsagePopoverLabelTests: XCTestCase {
         XCTAssertEqual(label(0), "resets now")
         XCTAssertEqual(label(-60), "resets now")
         XCTAssertEqual(UsagePopoverView.resetLabel(nil, now: now), "")
+    }
+
+    /// One account's switch, built the only way there is: `AccountSwitch` decodes
+    /// and does nothing else, so a state in a test is a body from the gateway.
+    ///
+    /// `eligible` is written into every body even though this type has no field
+    /// for it, and that is the point: it is the field next door, it is what the
+    /// gateway folds a quota cool-down and a token backoff into, and a fixture
+    /// that leaves it out cannot tell a reader of `disabled` from a reader of it.
+    /// It defaults to the opposite of `disabled` — the ordinary fleet, where the
+    /// two agree — and `main` on the morning of 2026-09-06 is what it looks like
+    /// when they do not: `rotationState(eligible: false)`.
+    static func rotationState(disabled: Bool = false,
+                              eligible: Bool? = nil,
+                              until: Int? = nil,
+                              reason: String = "") throws -> AccountSwitch {
+        try UsageFixtures.decode("""
+            {"label": "acc2", "disabled": \(disabled), "eligible": \(eligible ?? !disabled), \
+            "disabled_until": \(until.map(String.init) ?? "null"), \
+            "disabled_reason": "\(reason)"}
+            """, as: AccountSwitch.self)
+    }
+
+    /// The line under a switched-off account says the two things the gateway can
+    /// add to "off", and says nothing where there is nothing to say.
+    ///
+    /// The deadline is drawn and never set: this app's own switch sends no body,
+    /// which is the gateway's "until somebody puts it back", so a moment here can
+    /// only have come from somewhere else — the command line, or a rule of the
+    /// gateway's own. Showing it is the difference between an account that comes
+    /// back by itself and one that waits for a person.
+    ///
+    /// Written by `resetLabel`, the popover's one countdown, so the wording is
+    /// the wording of every other moment on this surface — and it goes in
+    /// brackets because that countdown has two shapes and the bare one (`resets
+    /// now`) would otherwise run straight into the word before it.
+    func testASwitchedOffAccountNamesItsDeadlineAndItsReason() throws {
+        let now = Date(timeIntervalSince1970: 1_786_800_000)
+        func note(_ state: AccountSwitch) -> String { UsagePopoverView.switchNote(state, now: now) }
+
+        XCTAssertEqual(note(try Self.rotationState(disabled: true)), "off",
+                       "off until somebody comes back, which is all this app can ask for")
+        XCTAssertEqual(note(try Self.rotationState(disabled: true,
+                                                   until: 1_786_800_000 + 5 * 86_400 + 20 * 60)),
+                       "off (in 5d 0h)")
+        XCTAssertEqual(note(try Self.rotationState(disabled: true, reason: "rate limited")),
+                       "off · rate limited")
+        XCTAssertEqual(note(try Self.rotationState(disabled: true,
+                                                   until: 1_786_800_000 + 3600,
+                                                   reason: "rate limited")),
+                       "off (in 1h 0m) · rate limited")
+        XCTAssertEqual(note(try Self.rotationState(disabled: true, until: 1_786_799_000)),
+                       "off (resets now)",
+                       "a deadline already past reads as one word and needs its brackets most")
+    }
+
+    /// And the switch may not claim a state nobody reported.
+    ///
+    /// Three states rather than two: with no answer from `/gw/status` the box is
+    /// clear and inert, and its tooltip has to say that rather than offer to do
+    /// the thing the box cannot do. The other two name the *action*, because the
+    /// state is what the box itself is drawing.
+    func testTheSwitchSaysWhichWayItWouldGoAndAdmitsWhenItCannotSay() throws {
+        XCTAssertEqual(UsagePopoverView.switchHelp(nil),
+                       "The gateway did not say whether this account is in rotation")
+        XCTAssertEqual(UsagePopoverView.switchHelp(try Self.rotationState()),
+                       "Take this account out of the gateway rotation")
+        XCTAssertEqual(UsagePopoverView.switchHelp(try Self.rotationState(disabled: true)),
+                       "Put this account back into the gateway rotation")
+        // An account nobody switched off that the gateway will not route to: the
+        // switch on offer is still the operator's own, because that is the only
+        // one a click here can throw.
+        XCTAssertEqual(UsagePopoverView.switchHelp(try Self.rotationState(eligible: false)),
+                       "Take this account out of the gateway rotation")
+    }
+
+    /// Every click that would not go through, on one line, ordered by label.
+    ///
+    /// Two accounts can each be carrying their own bad news, and the order has to
+    /// come from the labels rather than from a dictionary: a line that reshuffles
+    /// itself under the pointer as a second answer lands is a line nobody finishes
+    /// reading. Nothing to say is `nil` and not an empty line.
+    func testEveryClickThatWouldNotGoThroughIsOnOneLineInLabelOrder() {
+        XCTAssertNil(UsagePopoverView.switchBlame([:]))
+        XCTAssertEqual(UsagePopoverView.switchBlame(["acc2": "acc2: down"]), "acc2: down")
+        XCTAssertEqual(UsagePopoverView.switchBlame(["main": "main: down", "acc2": "acc2: refused"]),
+                       "acc2: refused; main: down")
+    }
+
+    /// And the box itself draws those same three states: unknown is **not**
+    /// "in the rotation", and a box this app cannot fill in cannot be clicked
+    /// either.
+    ///
+    /// Asked of the function rather than of the picture because the picture
+    /// cannot answer: `ImageRenderer` draws this checkbox as a blank plate —
+    /// ticked, clear, inert and inert-and-ticked all came out as the same 784
+    /// inked pixels, 784 of them chromatic (measured 2026-09-06, scale 2.0, a
+    /// 40×24 frame). So the tick has no ink of its own to compare, "two values
+    /// of the same field" has nothing to widen, and `?? true` in place of
+    /// `?? false` was invisible to every test on this surface until this one.
+    /// What is still held by reading and not by a test is the one line that
+    /// wires the view to this function.
+    func testTheBoxIsClearUntilTheGatewaySaysOtherwiseAndInertUntilItAnswersAtAll() throws {
+        func look(_ state: AccountSwitch?, busy: Bool = false) -> (ticked: Bool, usable: Bool) {
+            UsagePopoverView.switchAppearance(state, busy: busy)
+        }
+
+        XCTAssertFalse(look(nil).ticked,
+                       "a tick means \"in the rotation\", and nobody said that")
+        XCTAssertFalse(look(nil).usable,
+                       "a box that cannot say what it shows must not send anything either")
+
+        XCTAssertTrue(look(try Self.rotationState()).ticked)
+        XCTAssertTrue(look(try Self.rotationState()).usable)
+        XCTAssertFalse(look(try Self.rotationState(disabled: true)).ticked)
+        XCTAssertTrue(look(try Self.rotationState(disabled: true)).usable,
+                      "switched off is a state to click out of, not a reason to freeze")
+
+        // The live `main` of the morning of 2026-09-06: nobody switched it off and
+        // the gateway will not route to it all the same. The box follows the
+        // operator's switch, because that is the thing a click here can change —
+        // bound to `eligible` it would clear itself when a quota window filled and
+        // then send an `enable` that changes nothing visible. It is the one shape
+        // in which the two flags disagree, so it is the only one that can tell a
+        // reader of either apart.
+        XCTAssertTrue(look(try Self.rotationState(eligible: false)).ticked,
+                      "a quota cool-down was drawn as an operator having switched the account off")
+        XCTAssertTrue(look(try Self.rotationState(eligible: false)).usable,
+                      "and the one switch an operator could still throw was taken away from them")
+
+        XCTAssertFalse(look(try Self.rotationState(), busy: true).usable,
+                       "a switch already in the air takes no second click")
+        XCTAssertTrue(look(try Self.rotationState(), busy: true).ticked,
+                      "in flight the box keeps showing the state the gateway last confirmed")
+        XCTAssertFalse(look(nil, busy: true).usable)
     }
 
     /// And no input at all writes a floor on its own, a unit that overflowed, or a
@@ -6527,9 +8439,11 @@ final class UsagePopoverPaintTests: XCTestCase {
     private func popover(named: [String],
                          asked: [String],
                          readings: [String: Double],
+                         rotation: String = quietRotation,
                          fetched: Date = Date()) async throws -> (UsagePopoverView, UsageStore, UsageHistoryModel) {
         let history = UsageHistoryModel(client: flatHistoryClient(readings: readings,
-                                                                  silentOnUnknown: true),
+                                                                  silentOnUnknown: true,
+                                                                  rotation: rotation),
                                         defaults: freshDefaults())
         let store = try store(named: named, fetched: fetched)
         history.open(labels: asked)
@@ -7177,6 +9091,300 @@ final class UsagePopoverPaintTests: XCTestCase {
             widths.append(Double(current.maxX - current.minX + 1) / canvas.scale)
         }
         return widths
+    }
+
+    // MARK: - The line under a switched-off account
+
+    /// The row of an account the gateway is not routing to says so, and the row
+    /// of one it is says nothing extra.
+    ///
+    /// Asked with **two values of the same field, of different widths** rather
+    /// than with the note and without it (§4). "With it and without it" answers a
+    /// different question — "do these two pictures differ" — and the two states
+    /// differ in the checkbox's own tick as well, so a note deleted outright
+    /// would still leave the pictures unequal and the probe would report it
+    /// drawn. Two reasons of different lengths hold the rest of the row fixed:
+    /// the note is drawn and the wider reason takes more room, or it is not and
+    /// the two pictures are the same to the pixel.
+    ///
+    /// Measured over every band of ink in the popover rather than at a
+    /// coordinate: the row's place moves with any change of font or inset, while
+    /// "exactly one line of this picture got wider" survives all of them.
+    func testTheRowOfASwitchedOffAccountSaysSoAndTheRowOfALiveOneDoesNot() async throws {
+        func bands(disabled: Bool, reason: String) async throws -> [Double] {
+            // `elsewhere` is here so the fleet has somewhere to route and no orange
+            // line joins the picture: `acc1` alone would be zero routable accounts
+            // in the switched-off half and one line more than in the other.
+            let rotation = """
+            {"accounts": [{"label": "acc1", "eligible": \(!disabled), "disabled": \(disabled), \
+            "disabled_until": null, "disabled_reason": "\(reason)"}, \
+            {"label": "elsewhere", "eligible": true, "disabled": false, \
+            "disabled_until": null, "disabled_reason": ""}]}
+            """
+            let (view, _, history) = try await popover(named: ["acc1"], asked: ["acc1"],
+                                                       readings: ["acc1": 40], rotation: rotation)
+            defer { history.close() }
+            return inkBands(in: try canvas(view))
+        }
+        // Short enough that neither is truncated: the note is one line with a
+        // tail truncation, and two reasons both cut off at the popover's width
+        // would be the same width for a reason that has nothing to do with this.
+        let narrow = try await bands(disabled: true, reason: "z")
+        let wide = try await bands(disabled: true, reason: "zzzzzzzzzz")
+
+        XCTAssertEqual(narrow.count, wide.count,
+                       "the two rotations drew a different number of lines: \(narrow) / \(wide)")
+        let moved = zip(narrow, wide).enumerated().filter { abs($0.element.1 - $0.element.0) > 0.5 }
+        XCTAssertEqual(moved.count, 1,
+                       "\(moved.count) lines of the popover follow the reason, not one: "
+                       + "\(narrow) / \(wide)")
+        let note = try XCTUnwrap(moved.first?.element)
+        XCTAssertGreaterThan(note.1, note.0 + 10,
+                             "nine more characters bought \(note.1 - note.0) pt of line")
+
+        // And in the rotation the field is not drawn at all, so the same two
+        // values give the same picture.
+        let live = try await bands(disabled: false, reason: "z")
+        let liveWide = try await bands(disabled: false, reason: "zzzzzzzzzz")
+        XCTAssertEqual(live, liveWide,
+                       "an account in the rotation drew a reason it is not disabled for")
+    }
+
+    /// The window the warning's own orange occupies in a rendering, measured.
+    ///
+    /// `Color.orange` asked directly reports hue 0.10136; drawn as text at 10 pt
+    /// and read back off the bitmap it lands between 0.09681 and 0.09797 over the
+    /// 5179 pixels the two lines of the sentence cover (2026-09-06, scale 2.0,
+    /// popover width). The band below is wide enough to hold that spread and
+    /// nowhere near the rest of the surface's colour, which in the same rendering
+    /// runs 0.00886…0.21144.
+    private static let warningHue: ClosedRange<Double> = 0.09...0.105
+
+    /// Lines of the popover drawn entirely in the fleet warning's orange.
+    ///
+    /// A **line**, not a count of pixels, because this surface has other colour on
+    /// it and part of that colour's range straddles the orange: the rest of the
+    /// chromatic ink spans 0.00886…0.21144 in the very rendering the caller
+    /// measures, and one band of it holds hues on both sides of the warning's own.
+    /// A band of ink every coloured pixel of which is that orange
+    /// cannot be assembled out of a wider spread, and the floor below keeps a band
+    /// with no colour in it at all from answering yes by vacuity — the sentence's
+    /// two lines carry 2613 and 2566 such pixels, so 100 is far under either and
+    /// far over anything a rounded edge could leave behind.
+    private func orangeLines(in canvas: Canvas) -> Int {
+        inkBandRows(in: canvas).filter { band in
+            var coloured = 0
+            for y in band {
+                for x in 0..<canvas.width {
+                    guard let pixel = canvas.colour(x, y), isChromatic(pixel),
+                          pixel.alpha > 0.5 else { continue }
+                    guard Self.warningHue.contains(pixel.hue) else { return false }
+                    coloured += 1
+                }
+            }
+            return coloured > 100
+        }.count
+    }
+
+    // MARK: - The fleet's own lines with no accounts to draw them under
+
+    /// The orange line is drawn when the account list is empty.
+    ///
+    /// The rows come from the quota poll and the rotation from `/gw/status`, and
+    /// they fail apart: with `/gw/usage` answering HTTP 500 the popover used to say
+    /// "/gw/usage: HTTP 500" and nothing else, while every client request was being
+    /// answered 429 and the line saying so had been drawn inside the branch that
+    /// needs a list. That is not a state on the way to somewhere — it is a gateway
+    /// half up, and the half that is up is the one with something to report.
+    ///
+    /// Asked of the line's **colour**, not of two pictures differing (§4). The
+    /// usual remedy here — two values of one field, of different widths — has
+    /// nothing to work with any more: since the sentence stopped arriving from the
+    /// gateway, `fleetWarning` has exactly one non-`nil` value it can ever hold,
+    /// `noRouteWarning`, which is one string and one width. So the question is put
+    /// to the picture directly. This surface draws its warning in `.orange` and
+    /// nothing else in it, and `orangeLines` says how many lines of ink are wholly
+    /// that colour — a measurement that answers "the line is not there" by
+    /// returning nothing, which is the property "these two pictures differ" never
+    /// had.
+    ///
+    /// Two lines rather than one because the sentence is 114 characters at 10 pt
+    /// and the popover is 320 pt wide before its padding: it wraps, and
+    /// `fixedSize(horizontal: false, vertical: true)` on it is what lets it wrap
+    /// rather than be cut. A truncated single line would answer 1 here, and that is
+    /// worth being told about.
+    ///
+    /// The control is the same picture over a fleet with somewhere to route, and it
+    /// is a control on the **method** and not the question: it says the count can
+    /// come back zero, so the two above are the line and not an artefact of the
+    /// measurement.
+    ///
+    /// Proved by mutation, 2026-09-06: moving the three fleet lines back inside the
+    /// `else` takes the raised count from 2 to 0 and reddens this test together
+    /// with the two below it — three of the suite as it stood that morning, 666,
+    /// and nothing else in it. Not re-run since; the suite has grown past that
+    /// number, and the figure dates the mutation rather than describing today.
+    func testTheFleetWarningIsDrawnWithNoAccountsToDrawItUnder() async throws {
+        func lines(rotation: String) async throws -> (orange: Int, warning: String?) {
+            let history = UsageHistoryModel(client: flatHistoryClient(readings: [:],
+                                                                      silentOnUnknown: true,
+                                                                      rotation: rotation),
+                                            defaults: freshDefaults())
+            let cache = UsageCache()
+            cache.store(try snapshot(labels: []))
+            history.open(labels: [])
+            await history.fetchTask?.value
+            defer { history.close() }
+            let store = UsageStore(config: .default, cache: cache)
+            XCTAssertTrue(store.snapshot.accounts.isEmpty,
+                          "the popover has accounts to list, so this is not the empty branch")
+            let picture = try canvas(UsagePopoverView(usage: store, history: history))
+            return (orangeLines(in: picture), history.fleetWarning)
+        }
+        // A pass, not a click: `/gw/status` reporting a fleet with nowhere left to
+        // route is the whole of what raises this line now.
+        let raised = try await lines(rotation: UsageFixtures.statusWithNowhereToRoute)
+        XCTAssertEqual(raised.warning, UsageHistoryModel.noRouteWarning,
+                       "the pass did not raise the line this test is about")
+        XCTAssertEqual(raised.orange, 2, """
+            the warning is 114 characters over a 320 pt popover, so it is two lines of orange \
+            and this picture has \(raised.orange) — with no accounts to list, the fleet's own \
+            line is drawn nowhere
+            """)
+
+        let quiet = try await lines(rotation: quietRotation)
+        XCTAssertNil(quiet.warning,
+                     "the control fleet has somewhere to route, so nothing may have raised this")
+        XCTAssertEqual(quiet.orange, 0,
+                       "the measurement answers yes to a picture with no warning in it")
+    }
+
+    /// And the blame for a click that would not go through is drawn there too.
+    ///
+    /// Same argument as the orange line above and the same failure it was moved
+    /// out of the `else` to stop: the rows come from `/gw/usage` and this line from
+    /// the operator's own click, which needs no rows to have happened. A quota poll
+    /// answering HTTP 500 while somebody clicks a checkbox would take the only
+    /// statement that the click did not go through off the screen and leave the
+    /// popover saying `/gw/usage: HTTP 500`, with the tick sitting where it was.
+    ///
+    /// Asked with **two values of the same field, of different widths** (§4): one
+    /// unreachable reason of one character against one of ten, so the blame is
+    /// `acc1: unreachable: z` against `acc1: unreachable: zzzzzzzzzz` and every
+    /// other thing in the picture is held fixed. Never with the line and without
+    /// it — a click that fails and a click that does not differ in more than this
+    /// line, and "the two pictures differ" is a different question. Both strings
+    /// are short enough to stay on one line and to be cut by nothing, so the number
+    /// of bands is the same in both and exactly one of them may follow the field.
+    ///
+    /// Two mutations, 2026-09-06. Deleting this block outright reddens exactly this
+    /// test and leaves the other 665 of that morning's 666 green — before it was
+    /// written the block could be taken out for nothing. Moving the three lines back
+    /// inside the `else` reddens this one, the orange line's above and the pass's
+    /// below. Neither has been re-run since the suite grew past 666, so both counts
+    /// date the mutation rather than describing today.
+    func testTheBlameForAFailedClickIsDrawnWithNoAccountsToDrawItUnder() async throws {
+        func bands(reason: String) async throws -> [Double] {
+            let client = UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+                let url = request.url ?? Config.default.resolvedUsageBaseURL
+                guard !url.path.hasPrefix("/gw/accounts/") else {
+                    throw UsageError.unreachable(reason)
+                }
+                guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                     httpVersion: nil, headerFields: nil) else {
+                    throw UsageError.unreachable("no test response")
+                }
+                // Somewhere to route, so no orange line joins the picture and the
+                // pass leaves nothing else to move.
+                return (Data(quietRotation.utf8), response)
+            }
+            let history = UsageHistoryModel(client: client, defaults: freshDefaults())
+            let cache = UsageCache()
+            cache.store(try snapshot(labels: []))
+            history.open(labels: [])
+            await history.fetchTask?.value
+            defer { history.close() }
+            history.setAccount(label: "acc1", enabled: false)
+            await history.switchTasks["acc1"]?.value
+            // The failure path asks again on its way out, and that pass has to be
+            // finished with before the picture is taken.
+            await history.fetchTask?.value
+            XCTAssertEqual(UsagePopoverView.switchBlame(history.switchFailures),
+                           "acc1: unreachable: \(reason)",
+                           "the click this test is about did go through")
+            XCTAssertNil(history.fleetWarning, "an orange line joined the picture")
+            XCTAssertNil(history.rotationFailure, "the pass this test holds fixed did not answer")
+            let store = UsageStore(config: .default, cache: cache)
+            return inkBands(in: try canvas(UsagePopoverView(usage: store, history: history)))
+        }
+        let narrow = try await bands(reason: "z")
+        let wide = try await bands(reason: "zzzzzzzzzz")
+
+        XCTAssertEqual(narrow.count, wide.count,
+                       "the two reasons drew a different number of lines: \(narrow) / \(wide)")
+        let moved = zip(narrow, wide).enumerated().filter { abs($0.element.1 - $0.element.0) > 0.5 }
+        XCTAssertEqual(moved.count, 1, """
+            \(moved.count) lines of the popover follow the blame rather than one: with no \
+            accounts to list, the line saying the click failed is drawn nowhere \
+            (\(narrow) / \(wide))
+            """)
+        let line = try XCTUnwrap(moved.first?.element)
+        XCTAssertGreaterThan(line.1, line.0 + 10,
+                             "nine more characters bought \(line.1 - line.0) pt of line")
+    }
+
+    /// And so is the reason the checkboxes went inert.
+    ///
+    /// The third of the three, and the one whose absence is worst: `/gw/status`
+    /// failing is exactly what empties `switches`, so every box on the surface is
+    /// drawn clear and unclickable — and drawn inside the `else`, the line that
+    /// says why would be missing in precisely the state it exists for, because a
+    /// gateway that cannot answer `/gw/status` is often a gateway that cannot
+    /// answer `/gw/usage` either and then there are no rows.
+    ///
+    /// Asked the same way as the blame: **two values of the same field, of
+    /// different widths**, one unreachable reason of one character against one of
+    /// ten, giving `status: unreachable: z` against `status: unreachable:
+    /// zzzzzzzzzz`. With the pass failing there is no rotation and no count, so the
+    /// other two fleet lines are `nil` in both halves and cannot move.
+    ///
+    /// Two mutations, 2026-09-06, the same pair as the blame's: deleting this block
+    /// reddens exactly this test out of that morning's 666, and moving the three
+    /// lines back inside the `else` reddens all three of them. Not re-run since the
+    /// suite grew past that number.
+    func testTheReasonTheSwitchesWentInertIsDrawnWithNoAccountsToDrawItUnder() async throws {
+        func bands(reason: String) async throws -> [Double] {
+            let client = UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { _ in
+                throw UsageError.unreachable(reason)
+            }
+            let history = UsageHistoryModel(client: client, defaults: freshDefaults())
+            let cache = UsageCache()
+            cache.store(try snapshot(labels: []))
+            history.open(labels: [])
+            await history.fetchTask?.value
+            defer { history.close() }
+            XCTAssertEqual(history.rotationFailure, "status: unreachable: \(reason)",
+                           "the pass this test is about answered")
+            XCTAssertNil(history.switches, "a failed pass left a rotation behind")
+            XCTAssertNil(history.fleetWarning, "an orange line joined the picture")
+            XCTAssertTrue(history.switchFailures.isEmpty, "a blame line joined the picture")
+            let store = UsageStore(config: .default, cache: cache)
+            return inkBands(in: try canvas(UsagePopoverView(usage: store, history: history)))
+        }
+        let narrow = try await bands(reason: "z")
+        let wide = try await bands(reason: "zzzzzzzzzz")
+
+        XCTAssertEqual(narrow.count, wide.count,
+                       "the two reasons drew a different number of lines: \(narrow) / \(wide)")
+        let moved = zip(narrow, wide).enumerated().filter { abs($0.element.1 - $0.element.0) > 0.5 }
+        XCTAssertEqual(moved.count, 1, """
+            \(moved.count) lines of the popover follow the pass's reason rather than one: with \
+            no accounts to list, the line saying why the boxes went inert is drawn nowhere \
+            (\(narrow) / \(wide))
+            """)
+        let line = try XCTUnwrap(moved.first?.element)
+        XCTAssertGreaterThan(line.1, line.0 + 10,
+                             "nine more characters bought \(line.1 - line.0) pt of line")
     }
 
     // MARK: - The mean line is ink
