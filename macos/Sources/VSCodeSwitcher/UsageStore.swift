@@ -115,11 +115,28 @@ final class UsageStore: ObservableObject {
     /// How often the accounts' histories are fetched, which is not how often the
     /// gateway is polled.
     ///
-    /// The figure they carry is an average over two days: it cannot move fast,
-    /// and nothing is gained by asking ten times an hour. What is spent is real —
-    /// one request per account of roughly 150 KB, which at the once-a-minute
-    /// cadence of the rest of the pass is tens of megabytes an hour on a laptop
-    /// that is often on a phone's tether.
+    /// **Bandwidth is the whole argument, and it used to have a second half that
+    /// is now false.** "The figure they carry is an average over two days: it
+    /// cannot move fast, and nothing is gained by asking ten times an hour" stood
+    /// here; since 2026-09-09 the ratio is measured over a trailing
+    /// `FleetCapacity.burnWindowHours` = 8 h, and a window that short does move
+    /// inside ten minutes. Replaying the live series over the last 24 h
+    /// (histories fetched 2026-09-09 18:55Z, load average 3.0 to 4.0), the
+    /// printed integer changes **288** times at one-minute anchors against **45**
+    /// at ten-minute ones, and takes 24 distinct values against 19. A faster
+    /// cadence buys real freshness. What refuses to pay for it is the size of the
+    /// bodies: one round over the fleet is 248 015 B — three accounts over the
+    /// 48 h `historyWindowSeconds` asks for, measured 2026-09-09 17:54Z — which is
+    /// 1.5 MB/h at ten minutes and 14.9 MB/h at one, on a laptop that is often on
+    /// a phone's tether.
+    ///
+    /// So the cost of the cadence is named rather than argued away: what is on
+    /// screen is up to 600 s old, and it changes across 45 of that day's 144
+    /// ten-minute intervals — by 11 points at the median of the ones it changes
+    /// on and 74 at the worst (same sweep). Past two
+    /// intervals both surfaces take it down altogether
+    /// (`UsagePopoverView.historyStaleSeconds`), which is where staleness stops
+    /// being a cost and becomes an absence.
     ///
     /// `nonisolated` for the reason spelled out over `windowSeconds` — but what
     /// guards it is not the same thing, and the difference was found by taking
@@ -166,24 +183,56 @@ final class UsageStore: ObservableObject {
     /// is the shallowest now — so the rule is the mechanism and never the
     /// ordering.
     ///
-    /// **Why 48 and not less is the sawtooth divided by the span.** The figure is
-    /// a burn rate against a refill rate, so one endpoint landing on a tooth of
-    /// the ±1 pp sawtooth (§4) moves it by a point spread over the whole span.
-    /// Measured 2026-09-05 02:50Z on the live histories, adding and subtracting
-    /// one point from each account's last reading in turn:
+    /// **The argument for 48 was the ratio's, and since 2026-09-09 the ratio does
+    /// not use it. Nothing has replaced it, and this says so rather than
+    /// inventing one.**
     ///
-    ///     window   answer    what one point of sawtooth moves it by
-    ///       12 h   378.5%    ±7.01 pp
-    ///       24 h   149.5%    -2.34 … +5.59 pp
-    ///       48 h   112.8%    ±1.65 pp
-    ///        6 h   no answer at all
+    /// It used to be the ±1 pp sawtooth (§4) divided by the span: the figure was
+    /// measured over whatever each series held, so this constant set its depth,
+    /// and one endpoint landing on a tooth moved the answer by ±7.01 pp at a 12 h
+    /// window against ±1.65 at 48 (measured 2026-09-05 02:50Z, adding and
+    /// subtracting a point from each account's last reading in turn). The figure
+    /// is now measured over a trailing `FleetCapacity.burnWindowHours` = 8 h, so
+    /// that cost is set there and the table that prices it lives there.
     ///
-    /// The 6 h row is not noise but a refusal: a series asked for six hours comes
-    /// back 5.99 h long and every account falls under
-    /// `FleetCapacity.minimumMeasuredHours`. So 48 h is where the binding
-    /// contributor is already saturated and the steadiest of the windows below
-    /// it: deeper buys nothing for the account that limits the answer, and buys
-    /// the others hours their neighbours cannot match.
+    /// **What is left is a fetch four times deeper than its only reader**, and the
+    /// tempting justification — "the popover's chart draws the other 40 hours" —
+    /// is false: the chart asks for `HistoryPeriod.seconds`, one of 1 h, 6 h, 24 h,
+    /// a week or a month, defaulting to the day, and 48 h is a window it never
+    /// asks for at all (`UsageHistoryModel.applyRotation`, whose docblock carries
+    /// that probe: the day pass is 212713 bytes over status and three histories,
+    /// the hour pass 12346, and the 48 h column is named there as another
+    /// consumer's window). This series has exactly one reader, `FleetCapacity.burnAgainstRefill`
+    /// through `histories` below, and it now discards everything older than eight
+    /// hours.
+    ///
+    /// So the honest state of this constant is: **oversized, deliberately left
+    /// alone this round, and worth about 1.1 MB/h of the 1.5 it costs.** One round
+    /// over the live fleet, measured 2026-09-09 17:54Z at load average 3.40, the
+    /// same three accounts at three depths:
+    ///
+    ///     since   acc2      acc3       main      total     at one round / 10 min
+    ///       8 h   21666       131 B    22667      44464 B   0.27 MB/h
+    ///      12 h   32972       131 B    26843      59946 B   0.36 MB/h
+    ///      48 h   94769    126142      27104     248015 B   1.49 MB/h
+    ///
+    /// (acc3 sends 131 bytes at the two short depths because it is the
+    /// switched-off account and its series stopped 12 h before the probe — which
+    /// is also why the 48 h column is not simply six times the 8 h one. The
+    /// figures move with how much history the fleet holds: the same round was
+    /// 481 KB on 2026-08-18, and that reading is not in conflict with this one.)
+    ///
+    /// A shorter fetch still needs its own measurement — how much slack a window
+    /// anchored at the same `now` as its trim actually requires, and whether the
+    /// gateway's clamping of `since` eats any of it — which is a change to make on
+    /// purpose rather than as a side effect of this one. The test on this constant
+    /// asserts the value and this reasoning, so moving it is a deliberate act with
+    /// a place to read first.
+    ///
+    /// Deeper than 48 h is in any case not on offer: the accounts are capped at
+    /// `max_points` = 2000, so a week's request comes back truncated on all three
+    /// and covers 105.8 / 53.2 / 97.4 h (2026-09-09) — the *cap* against the
+    /// polling rate, never retention, which binds nobody.
     ///
     /// **And a constant rather than a setting, which it was until the demand
     /// estimators went.** `usageLoadWindowHours` chose between two ways of
@@ -327,12 +376,63 @@ final class UsageStore: ObservableObject {
             // that second body cost comes off the ten-minute cadence, taking it
             // from 3.2 back to 2.9 MB/h (bodies measured 2026-08-24, three
             // accounts over 48 h).
+            // Who is out of the rotation, asked on the histories' cadence and not
+            // on the minute: 6.4 KB against the 130–187 KB of the histories beside
+            // it (measured 2026-09-09), so it is 4% on a half that already exists
+            // rather than the 370 KB an hour it would cost on the minute poll.
+            //
+            // **It fails open, which is the opposite of what the rest of this half
+            // does, and what bounds the error is the clock rather than its
+            // direction.** "An absent account keeps a refill share it cannot burn
+            // against, so the figure reads calmer than the truth" stood here and is
+            // withdrawn: it assumes the account contributes a refill share and no
+            // burn, and an account contributing no burn is one whose frozen series
+            // reads flat, which is only sometimes what a frozen series does. What
+            // it carries for the two hours it is still inside the window is the
+            // rate it was burning at when the gateway stopped polling it, so
+            // leaving it in moves the unweighted mean towards that rate — up or
+            // down according to where it sat against its neighbours', which nothing
+            // here knows. Which is exactly what `FleetBurn.isLowerBound` says of
+            // the same exclusion one file over; this used to say the opposite.
+            //
+            // Measured over the live fleet, histories fetched 2026-09-09 18:55Z at
+            // load average 3.0 to 4.0, replaying the whole two hours the flag is
+            // worth — 25 anchors five minutes apart from acc3's last reading at
+            // 05:38:28Z to its fall through the coverage floor at 07:38:28Z, acc2
+            // the only other contributor because main was inside a 52.37 h hole:
+            //
+            //     12 anchors louder   worst +21.7 pp   21.1% -> 42.7%
+            //     12 anchors calmer   worst -29.0 pp   84.3% -> 55.3%
+            //      1 anchor  equal    the floor has just taken acc3 anyway
+            //
+            // So the price is up to about 30 points, in whichever direction the day
+            // picks, and "a couple of points" it is not. What makes it tolerable is
+            // that it cannot last: answering costs anything at all only when a
+            // switch-off happened inside the last
+            // `FleetCapacity.burnWindowHours - minimumMeasuredHours` = 2 h, after
+            // which the frozen series ages out of the measurement window on its
+            // own. Refusing, against that, costs the headline on every blip of a
+            // 6 KB endpoint, for as long as the blip lasts. A bounded, self-healing
+            // error beats a blank number here. The bound holds only as long as the
+            // gateway stops polling a switched-off account, which is what it did on
+            // 2026-09-09; if it ever keeps polling one, the error lasts as long as
+            // the outage, and the blame line below is how that becomes visible.
+            var switchedOff: Set<String> = []
+            do {
+                switchedOff = Set(try await client.status().accounts
+                    .filter(\.disabled).map(\.label))
+                result.rotationFailure = nil
+            } catch {
+                result.rotationFailure = "/gw/status: \(error)"
+            }
             do {
                 let series = try await histories(client: client,
                                                  labels: result.accounts.map(\.label),
                                                  since: now.addingTimeInterval(-historyWindowSeconds))
                 result.fleetBurn = FleetCapacity.burnAgainstRefill(histories: series,
-                                                                   accounts: result.accounts)
+                                                                   accounts: result.accounts,
+                                                                   switchedOff: switchedOff,
+                                                                   now: now)
                 // The other stamp goes on the arrival, like `quotaFetchedAt` —
                 // and a `nil` from `burnAgainstRefill` is an arrival too. It is
                 // the answer "there is no figure", which is a thing the fleet can

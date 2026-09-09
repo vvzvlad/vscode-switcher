@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 
 /// The status item's picture: one bar for the ratio the popover leads with —
-/// percentage points of quota burned over the last two days against the points
-/// the week refills over the same two days — and that ratio as a number under it.
+/// percentage points of quota burned over the trailing
+/// `FleetCapacity.burnWindowHours` against the points the week refills over the
+/// same hours — and that ratio as a number under it.
 ///
 /// Stacked rather than side by side, and that is the user's call: side by side
 /// the item was 57 points wide and took a visible slice of a menu bar it shares
@@ -370,7 +371,13 @@ enum MenuBarIcon {
     /// The age half is not ceremony up here, and the argument that used to stand
     /// in this comment — "the figure is an average over two days, refreshed
     /// every ten minutes on purpose, and ten minutes cannot move it enough to
-    /// matter" — assumed the refreshing. A `/gw/usage` outage skips the whole
+    /// matter" — assumed the refreshing. (Both its premises are dead now: since
+    /// 2026-09-09 the figure is a mean over eight hours, not two days, and it
+    /// changes across 45 of a day's 144 ten-minute intervals, by 11 points at the
+    /// median of those — `UsageStore.historyIntervalSeconds` carries the sweep.
+    /// Neither death
+    /// weakens what follows, which is about the case where nothing refreshes at
+    /// all.) A `/gw/usage` outage skips the whole
     /// histories block (`UsageStore.poll`), so nothing is refreshed at all, no
     /// `historiesFailure` is set, and a guard on the failure alone left this
     /// picture with a red frame nothing could clear over a figure last confirmed

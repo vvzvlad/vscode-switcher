@@ -626,25 +626,51 @@ final class FleetCapacityBurnTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    /// 2026-08-14 00:00:00 UTC. An arbitrary instant, but a fixed one: a reset
-    /// schedule is placed relative to it in one test, and a fixture that moved
-    /// with the clock would place it somewhere else on every run.
-    private let start = Date(timeIntervalSince1970: 1_786_665_600)
+    /// 2026-08-14 00:00:00 UTC, and every fixture below **ends** here rather than
+    /// starting here. An arbitrary instant, but a fixed one: a reset schedule is
+    /// placed relative to it in one test, and a fixture that moved with the clock
+    /// would place it somewhere else on every run.
+    ///
+    /// It is the instant handed to `burnAgainstRefill` as `now`, so it is also
+    /// the right-hand edge of the trailing `FleetCapacity.burnWindowHours` the
+    /// figure is measured over. Series that used to run forward from a start had
+    /// to be turned round when that window arrived: one built forward from a fixed
+    /// start and measured backward from a fixed `now` puts its readings wherever
+    /// the two constants happen to leave them, which is not a fixture but a
+    /// coincidence.
+    private let now = Date(timeIntervalSince1970: 1_786_665_600)
 
-    /// One account's series: `readings` spread evenly over `overHours`, decoded
-    /// through the wire format because that is the only initialiser
-    /// `HistorySeries` has.
+    /// One account's series: `readings` spread evenly over the `overHours` ending
+    /// at `now`, decoded through the wire format because that is the only
+    /// initialiser `HistorySeries` has.
+    ///
+    /// `overHours: 8` therefore fills the measurement window exactly, and anything
+    /// less starts late inside it — which is how an account that went quiet is
+    /// written here, and the only way the contributors' spans can differ now that
+    /// they all share one window.
     private func history(_ label: String, _ readings: [Double?],
                          overHours: Double) throws -> HistorySeries {
         let step = readings.count > 1 ? overHours * 3600 / Double(readings.count - 1) : 0
+        let start = now.timeIntervalSince1970 - overHours * 3600
         let points = readings.enumerated().map { index, value in
-            "{\"ts\": \(start.timeIntervalSince1970 + Double(index) * step), " +
+            "{\"ts\": \(start + Double(index) * step), " +
             "\"util_7d\": \(value.map { "\($0)" } ?? "null")}"
         }
         return try UsageFixtures.decode("""
-        {"label": "\(label)", "since": \(start.timeIntervalSince1970), \
+        {"label": "\(label)", "since": \(start), \
         "points": [\(points.joined(separator: ","))]}
         """, as: HistorySeries.self)
+    }
+
+    /// The figure over a fleet nobody has switched off, anchored at `now`. Named
+    /// so the two arguments this suite almost never varies stay out of the way of
+    /// the two it does.
+    private func burn(_ all: [HistorySeries], _ labels: [String],
+                      switchedOff: Set<String> = []) throws -> FleetCapacity.FleetBurn? {
+        FleetCapacity.burnAgainstRefill(histories: histories(all),
+                                        accounts: try fleet(labels),
+                                        switchedOff: switchedOff,
+                                        now: now)
     }
 
     /// The fleet as `/gw/usage` names it: labels and nothing else, which is all
@@ -668,21 +694,24 @@ final class FleetCapacityBurnTests: XCTestCase {
 
     /// The whole division in one fixture, every number redoable on paper.
     ///
-    /// 50 pp over 48 h is 1.0417 pp/h; one account refills 100 pp over 168 h,
-    /// which is 0.5952 pp/h; the quotient is exactly 1.75. A fleet burning its
-    /// week's worth in four days.
+    /// 10 pp over the 8 h window is 1.25 pp/h; one account refills 100 pp over
+    /// 168 h, which is 0.5952 pp/h; the quotient is exactly 2.1. A fleet burning a
+    /// week's quota in eighty hours.
+    ///
+    /// The arithmetic is the window's: at `burnWindowHours` a burn of `B` points
+    /// reads `21 x B` per cent, which is what makes every expectation in this file
+    /// a whole number.
     func testTheFigureIsTheBurnRateOverTheWeeksRefillRate() throws {
-        let answer = try XCTUnwrap(FleetCapacity.burnAgainstRefill(
-            histories: histories([try history("main", [0, 25, 50], overHours: 48)]),
-            accounts: try fleet(["main"])))
+        let answer = try XCTUnwrap(try burn([try history("main", [0, 5, 10], overHours: 8)],
+                                            ["main"]))
 
-        XCTAssertEqual(answer.burnRate, 50.0 / 48, accuracy: 0.0001, "50 pp over 48 measured hours")
+        XCTAssertEqual(answer.burnRate, 10.0 / 8, accuracy: 0.0001, "10 pp over 8 measured hours")
         XCTAssertEqual(answer.refillRate, refillPerAccount, accuracy: 0.0001,
                        "one account is one quota a week and no more")
-        XCTAssertEqual(answer.percent, 175, accuracy: 0.01,
-                       "1.0417 pp/h burned against 0.5952 refilled")
+        XCTAssertEqual(answer.percent, 210, accuracy: 0.01,
+                       "1.25 pp/h burned against 0.5952 refilled")
         XCTAssertEqual(answer.accounts, 1)
-        XCTAssertEqual(answer.measuredHours, 48, accuracy: 0.001)
+        XCTAssertEqual(answer.measuredHours, 8, accuracy: 0.001)
         XCTAssertFalse(answer.isLowerBound, "nothing was blocked, so nothing is being under-reported")
     }
 
@@ -698,22 +727,27 @@ final class FleetCapacityBurnTests: XCTestCase {
     /// 43.09 / 47.88 / 47.91 h — but the spread outlived it, so the form does
     /// too (`FleetBurn.measuredHours`).
     ///
-    /// The fixture is that shape with the arithmetic made checkable: 96 pp over
-    /// 48 h is 2.0 pp/h and 12 pp over 24 h is 0.5, so the mean of the rates is
-    /// 2.5 against a refill of 1.1905 — 210%. Pooled it is 108 pp over the
-    /// 42.857 pp those two spans refill between them, which is 252%.
+    /// **The spans still differ under one window**, which is what keeps this test
+    /// reachable: an account the gateway stopped polling part-way through the
+    /// window holds readings over only the end of it. That is the ordinary case
+    /// rather than a contrivance — on 2026-09-09 main's series had a 52.37 h hole
+    /// in it and acc2's a 25.54 h one.
+    ///
+    /// The fixture is that shape with the arithmetic made checkable: 10 pp over
+    /// the full 8 h is 1.25 pp/h and 3 pp over the 6 h an account was awake for is
+    /// 0.5, so the mean of the rates is 1.75 against a refill of 1.1905 — 147%.
+    /// Pooled it is 13 pp over the 8.333 pp those two spans refill between them,
+    /// which is 156%.
     func testTheRatesAreSummedPerAccountRatherThanPooledOverOneSpan() throws {
-        let deep = try history("main", [0, 48, 96], overHours: 48)
-        let shallow = try history("acc3", [0, 6, 12], overHours: 24)
-        let answer = try XCTUnwrap(FleetCapacity.burnAgainstRefill(
-            histories: histories([deep, shallow]), accounts: try fleet(["main", "acc3"])))
+        let deep = try history("main", [0, 5, 10], overHours: 8)
+        let shallow = try history("acc3", [0, 1.5, 3], overHours: 6)
+        let answer = try XCTUnwrap(try burn([deep, shallow], ["main", "acc3"]))
 
-        XCTAssertEqual(answer.burnRate, 2.5, accuracy: 0.0001,
-                       "2.0 pp/h and 0.5 pp/h, each measured over its own span")
-        XCTAssertEqual(answer.percent, 210, accuracy: 0.01, """
-            one total over the pooled refill answers 252% here: the shallow account is credited \
-            with 24 hours nobody watched it over, and on the live fleet that is 7.4 points of \
-            difference in the direction of alarm
+        XCTAssertEqual(answer.burnRate, 1.75, accuracy: 0.0001,
+                       "1.25 pp/h and 0.5 pp/h, each measured over the span it was awake for")
+        XCTAssertEqual(answer.percent, 147, accuracy: 0.01, """
+            one total over the pooled refill answers 156% here: the account that was quiet for the \
+            first two hours is credited with hours nobody watched it over
             """)
     }
 
@@ -723,17 +757,16 @@ final class FleetCapacityBurnTests: XCTestCase {
     /// contributes no burn, so counting it in the refill would widen a
     /// denominator its own numerator is missing from — a fleet reading calmer
     /// for having an account nobody can see. Here that is the difference between
-    /// 175% and 87.5%.
+    /// 210% and 105%.
     func testTheRefillCountsTheContributorsAndNobodyElse() throws {
-        let answer = try XCTUnwrap(FleetCapacity.burnAgainstRefill(
-            histories: histories([try history("main", [0, 25, 50], overHours: 48)]),
-            accounts: try fleet(["main", "acc3"])))
+        let answer = try XCTUnwrap(try burn([try history("main", [0, 5, 10], overHours: 8)],
+                                            ["main", "acc3"]))
 
         XCTAssertEqual(answer.accounts, 1, "acc3 sent no history: nobody measured it")
         XCTAssertEqual(answer.refillRate, refillPerAccount, accuracy: 0.0001,
                        "one contributor refills one quota a week")
-        XCTAssertEqual(answer.percent, 175, accuracy: 0.01, """
-            counting the silent account in the refill answers 87.5% for the same burn, which is a \
+        XCTAssertEqual(answer.percent, 210, accuracy: 0.01, """
+            counting the silent account in the refill answers 105% for the same burn, which is a \
             fleet made to look calm by an account nobody could see
             """)
     }
@@ -742,22 +775,19 @@ final class FleetCapacityBurnTests: XCTestCase {
     /// are lying around: a series under a label the fleet does not have is not a
     /// contributor.
     func testAHistoryUnderALabelTheFleetDoesNotHaveIsNotCounted() throws {
-        XCTAssertNil(FleetCapacity.burnAgainstRefill(
-            histories: histories([try history("retired", [0, 25, 50], overHours: 48)]),
-            accounts: try fleet(["main"])),
-            "a retired account's series was counted as a live account's burn")
+        XCTAssertNil(try burn([try history("retired", [0, 5, 10], overHours: 8)], ["main"]),
+                     "a retired account's series was counted as a live account's burn")
     }
 
     /// The shortest span, not the longest and not the mean: the answer is only
     /// as well measured as its worst-measured contributor, and what the surfaces
     /// print beside the figure is how much watching stands behind it.
     func testTheMeasuredSpanIsTheShortestContributorsAndNotTheLongest() throws {
-        let answer = try XCTUnwrap(FleetCapacity.burnAgainstRefill(
-            histories: histories([try history("main", [0, 25, 50], overHours: 48),
-                                  try history("acc3", [0, 6, 12], overHours: 24)]),
-            accounts: try fleet(["main", "acc3"])))
-        XCTAssertEqual(answer.measuredHours, 24, accuracy: 0.001,
-                       "the deeper account's 48 h says nothing about the hours the shallow one missed")
+        let answer = try XCTUnwrap(try burn([try history("main", [0, 5, 10], overHours: 8),
+                                             try history("acc3", [0, 1.5, 3], overHours: 6)],
+                                            ["main", "acc3"]))
+        XCTAssertEqual(answer.measuredHours, 6, accuracy: 0.001,
+                       "the awake account's 8 h says nothing about the hours the quiet one missed")
     }
 
     // MARK: - When there is no figure, and when it is only a floor
@@ -769,41 +799,51 @@ final class FleetCapacityBurnTests: XCTestCase {
     /// bar would ask the ramp about it and the bar's fill would be a length
     /// nobody can compute.
     ///
-    /// Both ways in are asked, because they are different facts about a pass and
-    /// the guard has to catch either: a gateway that named no accounts at all,
-    /// and a gateway that named accounts whose every history is too short to
-    /// measure.
+    /// **All three ways in are asked**, because they are different facts about a
+    /// pass and the guard has to catch each: a gateway that named no accounts at
+    /// all, a gateway that named accounts whose every history is too short to
+    /// measure, and — since 2026-09-09 — a fleet the operator has switched off
+    /// entirely.
+    ///
+    /// The third is not a rewording of the second. It reaches the guard past a
+    /// series that would otherwise answer perfectly well, which is the shape a
+    /// `switchedOff` set that was gathered but never consulted would leave
+    /// green.
     func testAFleetWithNoContributorHasNoFigure() throws {
-        XCTAssertNil(FleetCapacity.burnAgainstRefill(histories: [:], accounts: []),
+        XCTAssertNil(FleetCapacity.burnAgainstRefill(histories: [:], accounts: [],
+                                                     switchedOff: [], now: now),
                      "no accounts is nothing to divide, not nought per cent")
 
         let brief = try history("main", [0, 50], overHours: 4)
         XCTAssertNil(FleetCapacity.measure(brief.points, resetsAt: nil),
                      "the fixture has to be unmeasurable, or it proves nothing")
-        XCTAssertNil(FleetCapacity.burnAgainstRefill(histories: histories([brief]),
-                                                     accounts: try fleet(["main"])),
+        XCTAssertNil(try burn([brief], ["main"]),
                      "an account too shallow to measure is not a contributor either")
+
+        let measurable = try history("main", [0, 5, 10], overHours: 8)
+        XCTAssertNotNil(try burn([measurable], ["main"]),
+                        "the fixture has to answer while it is switched on, or the half below proves nothing")
+        XCTAssertNil(try burn([measurable], ["main"], switchedOff: ["main"]),
+                     "a fleet whose every account is switched off has nobody to measure, not 0%")
     }
 
     /// An account pinned at its ceiling for the whole window is not an account
     /// that spent nothing, it is one whose spending was refused and never
     /// measured — so it takes its refill out with it (§2.7).
     ///
-    /// What that saves is the direction of the error. Two accounts burning 50 pp
-    /// each over 48 h read 175%; add an exhausted third whose refill is counted
-    /// and whose burn cannot be, and the same fleet reads 116.7% — the most
-    /// alarming fact about it moving the figure 58 points towards calm.
+    /// What that saves is the direction of the error. Two accounts burning 10 pp
+    /// each over the window read 210%; add an exhausted third whose refill is
+    /// counted and whose burn cannot be, and the same fleet reads 140% — the most
+    /// alarming fact about it moving the figure 70 points towards calm.
     func testAnAccountPinnedAtItsCeilingThroughoutIsNotCounted() throws {
-        let spending = [try history("main", [0, 25, 50], overHours: 48),
-                        try history("acc2", [0, 25, 50], overHours: 48)]
-        let pinned = try history("acc3", [100, 100, 100, 100, 100], overHours: 48)
+        let spending = [try history("main", [0, 5, 10], overHours: 8),
+                        try history("acc2", [0, 5, 10], overHours: 8)]
+        let pinned = try history("acc3", [100, 100, 100, 100, 100], overHours: 8)
 
-        let answer = try XCTUnwrap(FleetCapacity.burnAgainstRefill(
-            histories: histories(spending + [pinned]),
-            accounts: try fleet(["main", "acc2", "acc3"])))
+        let answer = try XCTUnwrap(try burn(spending + [pinned], ["main", "acc2", "acc3"]))
         XCTAssertEqual(answer.accounts, 2, "the exhausted account was measured over nothing at all")
-        XCTAssertEqual(answer.percent, 175, accuracy: 0.01, """
-            counting the blocked account's refill answers 116.7% for the same two spending \
+        XCTAssertEqual(answer.percent, 210, accuracy: 0.01, """
+            counting the blocked account's refill answers 140% for the same two spending \
             accounts: a fleet with an exhausted member in it reading calmer than the same fleet \
             without one
             """)
@@ -815,9 +855,9 @@ final class FleetCapacityBurnTests: XCTestCase {
     /// The guard that excludes a pinned account is a one-sample probe —
     /// `everBelowCeiling` — so a series that touches 99 once is measured and one
     /// that never leaves 100 is refused outright. Beside the same spending
-    /// account those two answer **87.5% with `≥`** and **175% without**: one
+    /// account those two answer **105% with `≥`** and **210% without**: one
     /// reading, of exactly the width the ±1 pp sawtooth produces (§4), moves the
-    /// published figure by 87.5 points and takes the caveat off it. Both halves
+    /// published figure by 105 points and takes the caveat off it. Both halves
     /// were already asserted, in two different tests about two different things
     /// (`UsageTests.testTheFigureIsBuiltFromRawPointsRatherThanSmoothedOnes` for
     /// the smoothing, `testAnAccountPinnedAtItsCeilingThroughoutIsNotCounted` for
@@ -833,22 +873,20 @@ final class FleetCapacityBurnTests: XCTestCase {
     /// calibrate it against (§2.7 records why: no account came near its ceiling
     /// at all on the day it was asked).
     func testOneReadingBelowTheCeilingIsTheWholeDifferenceBetweenMeasuredAndRefused() throws {
-        let spending = try history("main", [0, 25, 50], overHours: 48)
-        let touched = try history("acc2", [100, 99, 100, 100, 100], overHours: 48)
-        let pinned = try history("acc2", [100, 100, 100, 100, 100], overHours: 48)
+        let spending = try history("main", [0, 5, 10], overHours: 8)
+        let touched = try history("acc2", [100, 99, 100, 100, 100], overHours: 8)
+        let pinned = try history("acc2", [100, 100, 100, 100, 100], overHours: 8)
 
-        let measured = try XCTUnwrap(FleetCapacity.burnAgainstRefill(
-            histories: histories([spending, touched]), accounts: try fleet(["main", "acc2"])))
+        let measured = try XCTUnwrap(try burn([spending, touched], ["main", "acc2"]))
         XCTAssertEqual(measured.accounts, 2, "one reading below the ceiling is a measured account")
-        XCTAssertEqual(measured.percent, 87.5, accuracy: 0.01,
+        XCTAssertEqual(measured.percent, 105, accuracy: 0.01,
                        "acc2 brings a week of refill and a burn of nothing")
         XCTAssertTrue(measured.isLowerBound, "and the burn it was blocked from is missing")
 
-        let refused = try XCTUnwrap(FleetCapacity.burnAgainstRefill(
-            histories: histories([spending, pinned]), accounts: try fleet(["main", "acc2"])))
+        let refused = try XCTUnwrap(try burn([spending, pinned], ["main", "acc2"]))
         XCTAssertEqual(refused.accounts, 1, "a series that never leaves its ceiling is not measured")
-        XCTAssertEqual(refused.percent, 175, accuracy: 0.01, """
-            deleting a single 99 from acc2's series moves the fleet from 87.5% to 175%: the account \
+        XCTAssertEqual(refused.percent, 210, accuracy: 0.01, """
+            deleting a single 99 from acc2's series moves the fleet from 105% to 210%: the account \
             leaves with its refill share, and the figure it was dragging down doubles
             """)
         XCTAssertFalse(refused.isLowerBound, """
@@ -867,18 +905,16 @@ final class FleetCapacityBurnTests: XCTestCase {
     /// Without it this would pass on an implementation that raises the flag for
     /// every fleet.
     func testAnAccountBlockedForPartOfTheWindowMakesTheFigureAFloor() throws {
-        let blocked = try history("acc2", [50, 70, 100, 100], overHours: 48)
-        let answer = try XCTUnwrap(FleetCapacity.burnAgainstRefill(
-            histories: histories([blocked]), accounts: try fleet(["acc2"])))
+        let blocked = try history("acc2", [50, 70, 100, 100], overHours: 8)
+        let answer = try XCTUnwrap(try burn([blocked], ["acc2"]))
         XCTAssertTrue(answer.isLowerBound, """
             the account sat at 100 for the second half of the window: what it would have burned \
             there is missing from this figure, and the surfaces owe the reader a mark saying so
             """)
         XCTAssertEqual(answer.accounts, 1, "and it is still a contributor, unlike one blocked throughout")
 
-        let free = try history("acc2", [50, 70, 90, 99], overHours: 48)
-        let control = try XCTUnwrap(FleetCapacity.burnAgainstRefill(
-            histories: histories([free]), accounts: try fleet(["acc2"])))
+        let free = try history("acc2", [50, 70, 90, 99], overHours: 8)
+        let control = try XCTUnwrap(try burn([free], ["acc2"]))
         XCTAssertFalse(control.isLowerBound, "nothing touched the ceiling, so nothing was suppressed")
     }
 
@@ -886,10 +922,9 @@ final class FleetCapacityBurnTests: XCTestCase {
     /// figure and the figure is one sum, so an account whose burn was suppressed
     /// understates the whole of it.
     func testOneBlockedAccountIsEnoughToMakeTheWholeFigureAFloor() throws {
-        let answer = try XCTUnwrap(FleetCapacity.burnAgainstRefill(
-            histories: histories([try history("main", [0, 25, 50], overHours: 48),
-                                  try history("acc2", [50, 70, 100, 100], overHours: 48)]),
-            accounts: try fleet(["main", "acc2"])))
+        let answer = try XCTUnwrap(try burn([try history("main", [0, 5, 10], overHours: 8),
+                                             try history("acc2", [50, 70, 100, 100], overHours: 8)],
+                                            ["main", "acc2"]))
         XCTAssertTrue(answer.isLowerBound,
                       "a sum with a suppressed term in it is a floor, whatever the other terms did")
     }
@@ -906,20 +941,189 @@ final class FleetCapacityBurnTests: XCTestCase {
     /// this test is for — passing the wrong account's schedule, or none, is a
     /// mistake nothing else here can see.
     func testTheResetScheduleReachesTheFigureThroughItsOwnAccount() throws {
-        let series = try history("main", [95, nil, nil, nil, 92], overHours: 48)
-        let boundaryInside = start.addingTimeInterval((24 + 168) * 3600)
+        let series = try history("main", [95, nil, nil, nil, 92], overHours: 8)
+        // Four hours before `now`, so a week before that is a window boundary
+        // strictly inside the measured interval — which is the only placement
+        // `measure` will act on.
+        let boundaryInside = now.addingTimeInterval((168 - 4) * 3600)
         let scheduled = try UsageFixtures.decode("""
         {"accounts": {"main": {"seven_day": {"utilization": 92, \
         "resets_at": "\(ISO8601DateFormatter().string(from: boundaryInside))"}}}}
         """, as: UsageReport.self).accounts
 
         let answer = try XCTUnwrap(FleetCapacity.burnAgainstRefill(histories: histories([series]),
-                                                                   accounts: scheduled))
-        XCTAssertEqual(answer.burnRate, 97.0 / 48, accuracy: 0.0001,
+                                                                   accounts: scheduled,
+                                                                   switchedOff: [], now: now))
+        XCTAssertEqual(answer.burnRate, 97.0 / 8, accuracy: 0.0001,
                        "the window that turned over inside the hole is 97 pp, not −3")
 
-        XCTAssertNil(FleetCapacity.burnAgainstRefill(histories: histories([series]),
-                                                     accounts: try fleet(["main"])),
+        XCTAssertNil(try burn([series], ["main"]),
                      "with no schedule to place that fall there is no figure, and this fleet has one")
+    }
+
+    // MARK: - The trailing window
+
+    /// **The figure is measured over the trailing `burnWindowHours` and not over
+    /// whatever the series happens to hold**, which is the whole of what the user
+    /// reported: "many agents running, the per cent is stuck at 93".
+    ///
+    /// The fixture is that complaint. An account holds 46 h of series — the depth
+    /// acc2 actually had on 2026-09-09 — of which the first 38 h are flat and the
+    /// last 8 burn 10 pp. Over the whole span that is 10 pp / 46 h = 0.217 pp/h and
+    /// the fleet reads 37%; over the trailing window it is 1.25 pp/h and 210%. The
+    /// account is burning at the same rate in both readings, and only one of them
+    /// says so.
+    ///
+    /// It has to be checked with a series that *reaches past* the window rather
+    /// than one that fits inside it: an implementation that ignores the trim
+    /// entirely gives the same answer as a correct one on every other fixture in
+    /// this file, because they are all 8 h long. Mutation: dropping the `filter`
+    /// in `burnAgainstRefill` reddens this test's first assertion (37.0 against an
+    /// expected 210) and `testReadingsOlderThanTheWindowDoNotMoveTheAnswer`
+    /// below, and nothing else in the 33 tests of this file.
+    func testAnAccountIsMeasuredOverTheTrailingWindowAndNotItsWholeSeries() throws {
+        // 47 readings an hour apart: 38 flat hours, then a point every 48 min over
+        // the last 8. The window's left edge lands inside the flat stretch.
+        var readings: [Double?] = Array(repeating: 0, count: 39)
+        readings += (1...8).map { Double($0) * 1.25 }
+        let long = try history("acc2", readings, overHours: 46)
+
+        let answer = try XCTUnwrap(try burn([long], ["acc2"]))
+        XCTAssertEqual(answer.percent, 210, accuracy: 1.0, """
+            the trailing window is what makes this figure about now: read over the whole 46 h of \
+            series the same account answers 37%, because 38 quiet hours are averaged in with the \
+            8 busy ones. A 2 h burst at three times the refill rate moves an 8 h window by 50 \
+            points and a 48 h one by 8
+            """)
+        // A literal, not `burnWindowHours`. Built from the constant this assertion
+        // rides it — every value of the window makes it true — and the two above
+        // do not pin the value either: the fixture burns at a constant rate over
+        // its last 8 h, so any window inside that stretch reads the same 210%.
+        XCTAssertEqual(answer.measuredHours, 8, accuracy: 0.2, """
+            the span the answer is divided by is the window's and not the series', or the rate is \
+            a burn over 8 h spread across 46
+            """)
+
+        // And the value itself, because nothing above can fail for 7 h or 9.
+        XCTAssertEqual(FleetCapacity.burnWindowHours, 8, """
+            8 h, and it is chosen inside a measured band rather than at a plateau — the docblock \
+            on the constant says so out loud. Below, the floor forbids it: a 6.00 h window held \
+            5.912 h of readings on the live acc2 and every account was refused (2026-09-09 \
+            17:43Z). Above, the burst the figure exists to show is diluted — busy stretches on \
+            this fleet run 3.0 h at the median and 7.0 h at p90, and a window shows a burst at \
+            min(1, T/W) of its strength. Move it and re-measure both ends
+            """)
+        XCTAssertGreaterThan(FleetCapacity.burnWindowHours, FleetCapacity.minimumMeasuredHours, """
+            a window no wider than the floor can never answer at all: the first reading inside it \
+            always falls after its left edge, so the readings always span less than the width. \
+            The two constants are one decision and this is the half that is not a preference
+            """)
+    }
+
+    /// The other half of the same rule, and the one that says the readings are
+    /// *dropped* rather than merely under-weighted: moving the old part of a
+    /// series about does not move the answer at all.
+    ///
+    /// Two series with the same last 8 h and wildly different histories before
+    /// them — one flat, one that burned 90 pp — answer the same figure to the last
+    /// decimal. Anything that lets an old reading through, including reading the
+    /// span from `first` while summing burn from the window, separates them.
+    func testReadingsOlderThanTheWindowDoNotMoveTheAnswer() throws {
+        let recent: [Double?] = (0...8).map { Double($0) * 1.25 + 90 }
+        var quietBefore: [Double?] = Array(repeating: 90, count: 38)
+        quietBefore += recent
+        var busyBefore: [Double?] = (0..<38).map { Double($0) * 90 / 38 }
+        busyBefore += recent
+
+        let quiet = try XCTUnwrap(try burn([try history("acc2", quietBefore, overHours: 46)],
+                                           ["acc2"]))
+        let busy = try XCTUnwrap(try burn([try history("acc2", busyBefore, overHours: 46)],
+                                          ["acc2"]))
+        XCTAssertEqual(quiet.percent, busy.percent, accuracy: 0.0001, """
+            one of these accounts burned 90 pp before the window opened and the other burned \
+            nothing, and the figure is about neither: it is about the eight hours they share
+            """)
+        XCTAssertEqual(quiet.percent, 210, accuracy: 1.0, "and that shared stretch is 10 pp over 8 h")
+    }
+
+    // MARK: - The operator's switch
+
+    /// **An account the operator has switched off leaves both sides of the
+    /// division**, and the fixture is built so that a half-done implementation
+    /// answers something visibly wrong rather than something right by luck.
+    ///
+    /// Three accounts. Two burn 10 pp over the window (1.25 pp/h each) and the
+    /// switched-off one burned 2 pp (0.25 pp/h) before the switch was thrown —
+    /// **deliberately not the same rate as its neighbours**, because a fleet whose
+    /// members all burn alike answers the same with the account in or out and
+    /// proves nothing. Here:
+    ///
+    ///     excluded from both sides   2.50 / (2 x 0.5952) = 210%   <- correct
+    ///     left in both sides         2.75 / (3 x 0.5952) = 154%   <- no exclusion
+    ///     burn dropped, refill kept  2.50 / (3 x 0.5952) = 140%   <- half done
+    ///
+    /// Three separable answers, so the assertion can only be satisfied by taking
+    /// the account out of the numerator *and* the denominator. The middle row is
+    /// the defect this change was reported for: on the live fleet of 2026-09-09
+    /// the app printed 90% with a switched-off acc3 holding a full refill share.
+    ///
+    /// Mutation: dropping the `switchedOff` guard answers 154% and reddens this;
+    /// skipping the account's burn but counting it in `contributors` answers 140%
+    /// and reddens it too.
+    func testASwitchedOffAccountLeavesTheNumeratorAndTheDenominatorTogether() throws {
+        let all = [try history("main", [0, 5, 10], overHours: 8),
+                   try history("acc2", [0, 5, 10], overHours: 8),
+                   try history("acc3", [0, 1, 2], overHours: 8)]
+        let labels = ["main", "acc2", "acc3"]
+
+        let answer = try XCTUnwrap(try burn(all, labels, switchedOff: ["acc3"]))
+        XCTAssertEqual(answer.accounts, 2, "the switched-off account is not a contributor")
+        XCTAssertEqual(answer.refillRate, 2 * refillPerAccount, accuracy: 0.0001, """
+            an account nobody can route to refills nothing the fleet can spend: leaving its share \
+            in the denominator is what made the live fleet read 90% instead of 210
+            """)
+        XCTAssertEqual(answer.burnRate, 2.5, accuracy: 0.0001,
+                       "and its own 0.25 pp/h is not in the numerator either")
+        XCTAssertEqual(answer.percent, 210, accuracy: 0.01, """
+            leaving it in both sides answers 154% and taking only its burn out answers 140%: three \
+            different numbers, so this can pass only by removing the account from both
+            """)
+
+        let included = try XCTUnwrap(try burn(all, labels))
+        XCTAssertEqual(included.percent, 154, accuracy: 0.5,
+                       "the fixture has to move when the switch is thrown, or it proves nothing")
+    }
+
+    /// **And it must not raise `≥`**, which is where the switch differs from every
+    /// other reason a figure is a floor.
+    ///
+    /// An excluded account takes a burn term and a refill share out together, so
+    /// the mean moves whichever way that account's rate sat against its
+    /// neighbours' — up here, because the switched-off account was burning less
+    /// than they were, and down on the live fleet at 2026-09-09 17:44Z, where
+    /// excluding acc3 took the figure from 89.7% to 55.0% because its window had
+    /// turned over inside the span. Same fleet, same switch, opposite directions.
+    /// A mark that says "at least this much" is a claim about a direction nobody
+    /// knows (`FleetBurn.isLowerBound`).
+    ///
+    /// The control half is the same call with the account left in: without it this
+    /// would pass on an implementation that never raises the flag at all.
+    func testASwitchedOffAccountDoesNotMakeTheFigureAFloor() throws {
+        let all = [try history("main", [0, 5, 10], overHours: 8),
+                   try history("acc3", [0, 1, 2], overHours: 8)]
+
+        let answer = try XCTUnwrap(try burn(all, ["main", "acc3"], switchedOff: ["acc3"]))
+        XCTAssertFalse(answer.isLowerBound, """
+            excluding an account moves the mean either way, so `≥` would be a claim about a \
+            direction that reverses inside a day on the live fleet
+            """)
+
+        let blocked = [try history("main", [0, 5, 10], overHours: 8),
+                       try history("acc3", [50, 70, 100, 100], overHours: 8)]
+        let control = try XCTUnwrap(try burn(blocked, ["main", "acc3"]))
+        XCTAssertTrue(control.isLowerBound, """
+            the flag has to be raisable by this suite at all, or the assertion above is green for \
+            an implementation that has no flag
+            """)
     }
 }

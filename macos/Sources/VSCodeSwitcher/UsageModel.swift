@@ -606,6 +606,22 @@ struct UsageSnapshot: Sendable {
     /// tried. Same rule as the other two halves: the previous `fleetBurn` stays
     /// where it is and only the blame changes.
     var historiesFailure: String?
+    /// Why `/gw/status` did not answer on the last pass that asked — which is the
+    /// histories' pass, on the histories' cadence.
+    ///
+    /// **It is the one failure string that does not remove anything from the
+    /// screen**, and that is the whole reason it is a field of its own rather than
+    /// another sentence in `historiesFailure`. The surfaces drop the burn figure
+    /// when that one is set (`UsagePopoverView.historiesAreFresh`), and this half
+    /// answers a narrower question — which accounts the operator has switched out
+    /// of the rotation — whose absence degrades the figure by at most a couple of
+    /// points for at most a couple of hours (`UsageStore.poll` works out the
+    /// bound). Blanking the headline over that would be the larger harm.
+    ///
+    /// It is still collected by `failureText`, so `--dump` names it: a half that
+    /// fails silently is a half nobody can debug, and this one is invisible on
+    /// every other surface by design.
+    var rotationFailure: String?
     /// Why `/gw/usage` did not answer on the last pass. The account figures next
     /// to it are the previous ones, kept on purpose: slightly stale beats blank.
     var quotaFailure: String?
@@ -652,12 +668,14 @@ struct UsageSnapshot: Sendable {
     /// and the old single field let a failure of `/gw/sessions` blank out a
     /// perfectly fresh quota figure.
     ///
-    /// All three halves, because its one reader is `--dump`, and a half that
-    /// fails without saying so there is a half nobody can debug: the histories
-    /// half's own request is the only one the app makes that no surface blames
-    /// out loud.
+    /// All four requests, because its one reader is `--dump`, and a half that
+    /// fails without saying so there is a half nobody can debug: the histories'
+    /// two requests are the ones the app makes that no surface blames out loud —
+    /// the series itself, which at least removes the figure when it fails, and
+    /// `/gw/status`, which removes nothing at all (`rotationFailure`).
     var failureText: String? {
-        let all = [quotaFailure, sessionsFailure, historiesFailure].compactMap { $0 }
+        let all = [quotaFailure, sessionsFailure, historiesFailure, rotationFailure]
+            .compactMap { $0 }
         return all.isEmpty ? nil : all.joined(separator: "; ")
     }
 
