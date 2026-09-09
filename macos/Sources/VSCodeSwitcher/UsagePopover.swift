@@ -1432,9 +1432,10 @@ struct UsagePopoverView: View {
     static let ratioCaption = "of the weekly refill rate"
 
     /// What the token rate is a figure of, in the supporting reading under the
-    /// lead. It is the one measurement on this surface that is about *now*
-    /// rather than about the last two days, and the caption is the whole of what
-    /// says so.
+    /// lead. It is the one measurement on this surface that is about *now* —
+    /// five minutes of it — rather than about the trailing
+    /// `FleetCapacity.burnWindowHours` the lead is measured over, and the caption
+    /// is the whole of what says so.
     static let spendRateCaption = "spent right now"
 
     /// The headline's bar, taller than the ones on the account rows because it
@@ -1598,8 +1599,9 @@ struct UsagePopoverView: View {
     /// has the whole width and one line is one line whatever the figure says.
     ///
     /// **What stands in the lead three is one division in one unit**: percentage
-    /// points of quota burned over the last two days against the percentage
-    /// points the week refills over the same two days. `112%` over `of the weekly
+    /// points of quota burned over the trailing `FleetCapacity.burnWindowHours`
+    /// against the percentage points the week refills over the same hours.
+    /// `112%` over `of the weekly
     /// refill rate`, and the bar is that ratio clamped at one. Both sides are
     /// per cents of a seven-day window, so the model mix cancels and nothing has
     /// to be converted for the reader either (`FleetCapacity.burnAgainstRefill`).

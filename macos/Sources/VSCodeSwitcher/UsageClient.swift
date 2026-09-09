@@ -90,18 +90,24 @@ struct UsageClient: Sendable {
 
     /// Which accounts an operator has switched out of the rotation.
     ///
-    /// Asked by the popover's own model while the popover is open, and never by
-    /// `UsageStore.poll`: the answer is 6.2 KB (measured 2026-09-06) and the one
-    /// thing this app reads out of it is drawn nowhere else, so on the minute
-    /// poll it would be some 370 KB an hour of a fact nobody is looking at.
+    /// Two callers, and neither of them is on the poll's own minute. The answer
+    /// is 6.2 to 6.4 KB (measured 2026-09-06 and 2026-09-09), which once a minute
+    /// is some 370 KB an hour; and what each caller wants out of it is a state an
+    /// operator sets by hand, so the minute buys neither of them anything. The
+    /// one moment freshness does matter — just after a click — is served by a
+    /// pass asked for on the spot rather than by the cadence.
     ///
-    /// The same argument as `history` above, and **not** the same schedule. That
-    /// one is on `UsageStore.poll` as well, at `UsageStore.historyIntervalSeconds`;
-    /// this one is on no poll at all. Its only caller is
-    /// `UsageHistoryModel.fetchRotation`, one per pass — so it goes out on `open`,
-    /// on a change of period or of the account list, on the popover's own
-    /// `UsageHistoryModel.refreshSeconds` timer, and on the passes `setAccount`
-    /// asks for.
+    /// `UsageHistoryModel.fetchRotation` asks it once per pass while the popover
+    /// is open — on `open`, on a change of period or of the account list, on the
+    /// popover's own `UsageHistoryModel.refreshSeconds` timer, and on the passes
+    /// `setAccount` asks for. `UsageStore.poll` asks it too, since 2026-09-09,
+    /// for who is out of the rotation: **on the histories' schedule and not on the
+    /// poll's own minute**, which is exactly `history`'s arrangement — the same
+    /// `UsageStore.historyIntervalSeconds`, in the same half, 6.4 KB against the
+    /// 130 to 187 KB of the histories beside it. ("Never by `UsageStore.poll` …
+    /// on no poll at all … its only caller is `UsageHistoryModel.fetchRotation`"
+    /// stood here through that change and is withdrawn; this file was not touched
+    /// by the round that added the second caller.)
     func status() async throws -> GatewayStatus {
         try await fetch(pathSegments: ["gw", "status"], since: nil)
     }

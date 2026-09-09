@@ -360,7 +360,8 @@ enum ConsoleDump {
     ///
     /// It is the numerator of nothing since the lead became a burn against a
     /// refill, and it is still printed because it is the only measurement in this
-    /// section that is about *now* rather than about the last two days.
+    /// section that is about *now* — five minutes of it — rather than about the
+    /// trailing `FleetCapacity.burnWindowHours` the lead is measured over.
     ///
     /// Raw digits rather than the `23.8M/h` the surface writes: this line exists
     /// to be checked against the gateway by hand, and a rounded million cannot

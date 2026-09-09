@@ -27,9 +27,14 @@ import Foundation
 /// something the gateway now measures". That reasoning was wrong in one specific
 /// way worth writing down: the `tokens` block of `GET /gw/usage` measures a
 /// *five-minute token rate*, which is a different quantity from *the burn rate
-/// against the refill rate over two days*. Two questions, not two answers to
-/// one. The token rate is still measured and still drawn — as a second reading
-/// that is the numerator of nothing and colours nothing (§4).
+/// against the refill rate over the trailing `burnWindowHours`*. Two questions,
+/// not two answers to one. (That last window was two days when the sentence was
+/// written: the figure was measured over whatever span each series held, up to
+/// the 48 h the fetch asks for. Since 2026-09-09 it is eight hours, and the
+/// argument is untouched by which — what makes the two questions two is the unit
+/// and the subject, not the width.) The token rate is still measured and still
+/// drawn — as a second reading that is the numerator of nothing and colours
+/// nothing (§4).
 ///
 /// What went instead is the allowance that replaced it, and everything it was
 /// built from: the hour-by-hour decomposition, the split of the day into working
@@ -70,22 +75,123 @@ enum FleetCapacity {
     /// its quota, and its burn comes out negative.
     static let resetDropThreshold: Double = 5
 
-    /// The shortest interval `measure` will answer over, and it is back on the
-    /// app's path with the justification it was originally chosen for.
+    /// The trailing stretch every account is measured over, and the whole of what
+    /// the figure is about: **how fast the fleet is burning now**, not on average
+    /// since the gateway started keeping records.
     ///
-    /// The rate this function produces is compared against a *week* of refill, so
-    /// a short span is a large multiplier over a small measurement. At two hours
-    /// of history a single percentage point — the exact width of the sawtooth
-    /// (§4) — is 84 pp/week per account, four fifths of a whole quota; six hours
-    /// hold that at 28.
+    /// Until 2026-09-09 there was no window here at all — each account was
+    /// measured over whatever span its own series happened to hold, up to the
+    /// 48 h `UsageStore.historyWindowSeconds` asks for. That is a mean over two
+    /// days, and a burst cannot move one: a moving average of width `W` shows a
+    /// burst of duration `T` at strength `min(1, T/W)`, so an hour of three agents
+    /// burning at three times the refill rate moves a 48 h figure by 4 points and
+    /// an 8 h figure by 25. The user's report was "many agents running, the per
+    /// cent is stuck at 93", and that arithmetic is the whole of it.
     ///
-    /// It is what refuses the 6 h row of the table over
-    /// `UsageStore.historyWindowSeconds`: a series asked for six hours comes back
-    /// 5.99 h long, every account falls under this floor, and the fleet has no
-    /// figure at all. While the allowance existed nothing on the app's path
-    /// reached this line — the day split refused a whole day first, four times
-    /// this — and the comment here said as much. The allowance is gone and this
-    /// is the floor again.
+    /// **Eight hours, and the floor under it is measured rather than preferred.**
+    /// The reading is integer percentage points, so a window of `W` hours can only
+    /// answer in multiples of `100 / (W x 0.5952 x n)` per cent for `n`
+    /// contributors — the quantum below. Measured 2026-09-09 17:43Z (load average
+    /// 3.04), acc2 alone over 145 anchors 10 minutes apart across the last 24 h,
+    /// the floor of `minimumMeasuredHours` lifted so that short windows can answer
+    /// at all:
+    ///
+    ///     W(h)  levels  quantum%  range over 24 h  p90 jump  read exactly 0
+    ///        1     0.6     168.0    0.0 … 364.1      175.9      101 of 145
+    ///        2     1.2      84.0    0.0 … 340.3       84.1       84
+    ///        4     2.4      42.0    0.0 … 215.1       41.9       69
+    ///        6     3.6      28.0    0.0 … 171.6       28.2       67
+    ///        8     4.8      21.0    0.0 … 149.1       21.1       67
+    ///       12     7.1      14.0    0.0 … 140.5        0.4       67
+    ///       24    14.3       7.0    0.0 …  70.3        7.0       13
+    ///       48    28.6       3.5   24.5 …  54.7        0.3        0
+    ///
+    /// "levels" is `W x 0.5952` — the points an account burns over the window at
+    /// exactly 100%, and therefore how many distinct answers exist at the anchor
+    /// of the scale. At one hour it is 0.6: the answer is 0% or 168% and there is
+    /// nothing in between, which is not a noisy reading of the fleet but no
+    /// reading of it. The last column is the same fact from the other side — a
+    /// short window spends most of its time pinned at exactly 0, which is the
+    /// calmest thing this scale can draw.
+    ///
+    /// **The table is one account's, and the last column is the one that moves
+    /// most when it is not.** `n` divides the quantum, so contributors buy levels
+    /// the same way hours do. Re-swept 2026-09-09 18:55Z at the shipped floor: a
+    /// fleet of three contributors reads exactly 0% at **0** anchors of 145 over
+    /// 24 h and 3 of 349 over 58 h, while today's fleet — acc3 switched off,
+    /// leaving acc2 alone at 101 of the 145 anchors — reads it at 59. Every zero
+    /// in both sweeps landed on a single-contributor anchor and not one on a
+    /// two-contributor anchor, so the confident zero is a property of `W x n`
+    /// rather than of `W`.
+    ///
+    /// **A short window does not read negative, and the premise that it does is
+    /// withdrawn.** It was put to this round that a seven-day *rolling* window
+    /// sheds old usage on its own, so a short span would see a fall with no reset
+    /// in it and answer a negative burn. Neither half survives measurement. The
+    /// series does not decay: over 5997 consecutive steps on the three week-deep
+    /// histories (2026-09-09 17:43Z) every negative step is either exactly −1 pp,
+    /// the ±1 sawtooth of §4 (141 / 154 / 137 on acc2 / acc3 / main), or the one
+    /// reset each account holds (−65 / −83 / −97); not one step falls in between,
+    /// where a window shedding usage would land. And `measure` has no way to
+    /// express a negative anyway — a series fabricated to drift −7 pp over 8 h with
+    /// no reset in the schedule is *refused* (`nil`), and a −1 tooth is served as
+    /// 0 pp by the `max(0, …)` clamp. What a short window actually costs is the
+    /// two columns above: quantisation, and a confident zero.
+    ///
+    /// **What picks 8 and not 7 or 12 is a band, not a plateau**, and saying so is
+    /// the point — the constant is honest about being chosen inside a range whose
+    /// ends are measured. Below, `minimumMeasuredHours` forbids it outright: a
+    /// window of exactly 6.00 h holds 5.912 h of readings and every account is
+    /// refused (acc2, same probe), so the window has to clear the floor by more
+    /// than the gap between its left edge and the first reading inside it. Above,
+    /// the burst the figure exists to show gets diluted: the busy stretches on this
+    /// fleet run 3.0 h at the median and 7.0 h at p90 (21 bursts over the
+    /// week-deep series, an hour counting as busy when the account burned a whole
+    /// point in it — 1 h x7, 2 h x3, 3 h x3, 4 h, 5 h x2, 6 h x2, 7 h, 8 h, 18 h),
+    /// so a window of 8 h shows the median burst at 3/8 of its strength where 48 h
+    /// shows it at 3/48. Eight is the round number in that band: two hours of slack
+    /// over the floor, a quantum of 10.5% at two contributors and 21% at one.
+    static let burnWindowHours: Double = 8
+
+    /// The least of `burnWindowHours` an account has to have been *watched* over
+    /// to be counted, and with the window above it has become a coverage rule.
+    ///
+    /// It used to mean "a series shorter than this says too little": the rate is
+    /// compared against a *week* of refill, so a short span is a large multiplier
+    /// over a small measurement, and at two hours one percentage point of the
+    /// sawtooth (§4) is 84 pp/week per account against 28 at six. That reasoning
+    /// still holds and is now doing a different job. The span is no longer
+    /// whatever the account's series happened to hold — every account is measured
+    /// over the same trailing 8 h — so what this refuses is an account that went
+    /// **quiet inside that window**: 6 h of readings inside 8 is 75% coverage, and
+    /// an account the gateway stopped polling more than two hours ago cannot say
+    /// what it is burning now.
+    ///
+    /// That is the case the live fleet was in on 2026-09-09, and the minute this
+    /// line did the refusing can be pointed at. The gateway stopped polling acc3
+    /// at 05:38:28Z, so its coverage of the window shrank an hour per hour:
+    /// replaying the day's series, at the 07:30Z anchor it held 112 readings
+    /// spanning 6.06 h and was measured, and at 07:35Z it held 111 spanning
+    /// 5.98 h and this guard turned it away. From 07:35Z on the account is out by
+    /// silence; for the not-quite two hours before that the switch
+    /// (`switchedOff`) was the only thing keeping it out. Later in the day the
+    /// refusal is not this
+    /// line's at all, and the paragraph used to be pinned to that hour: by 18:55Z
+    /// acc3's last reading is 13.29 h old and the window holds no readings of it
+    /// whatever, so `measure` returns at `readings.first` and never reaches the
+    /// floor. An example with nothing inside the window is an example this guard
+    /// cannot run on. Holes are
+    /// not rare and they are not small — main's series had a 52.37 h gap and acc2's
+    /// a 25.54 h one that same day, against a median gap between readings of 60 to
+    /// 63 s and a p99 of 0.08 h. An account is either polled densely or missing for
+    /// hours; there is very little in between, which is why the slack over this
+    /// floor is not sized against ordinary jitter (the shortfall on a densely
+    /// polled account is 0.09 h at the median and 0.16 h at the worst over the
+    /// 145-anchor sweep) but against holes no margin could cover anyway.
+    ///
+    /// It also caps the noise of an admitted account: at the floor the quantum is
+    /// 28% for one contributor rather than the 21% a full window gives, and that
+    /// is the worst the figure can carry.
     static let minimumMeasuredHours: Double = 6
 
     /// The reading at which an account is out of quota and its demand stops
@@ -384,10 +490,10 @@ enum FleetCapacity {
         // served nothing it was asked for, so its series is flat at 100 and its
         // burn reads as zero — a demand of nought and a whole window of capacity
         // handed to the fleet by the one account that certainly had none to
-        // spare. Three accounts, one exhausted throughout and two burning 50 pp
-        // each over 48 h, answer 116.7% that way against the 175% the two
+        // spare. Three accounts, one exhausted throughout and two burning 10 pp
+        // each over the 8 h window, answer 140% that way against the 210% the two
         // measurable ones read: the most alarming fact about a fleet moving the
-        // number 58 points towards calm. So it goes out the way a too-short
+        // number 70 points towards calm. So it goes out the way a too-short
         // history does, contributing neither demand nor capacity — its demand
         // was not zero, it was blocked and invisible, and unknown is not zero
         // (§2.7). A ceiling over *part* of the interval is a different thing and
@@ -544,27 +650,33 @@ enum FleetCapacity {
         let accounts: Int
         /// The shortest per-account span that went in: how much watching stands
         /// behind the answer. The answer is only as well measured as its
-        /// worst-measured contributor, and the depths differ — 43.09 / 47.88 /
-        /// 47.91 h over main / acc3 / acc2, measured 2026-09-05 15:35Z over the
-        /// 48 h the app asks for. Earlier the same day, at 02:50Z, the same three
-        /// read 48.0 / 34.0 / 48.0 h: acc3's series was stale by 14 h that
-        /// morning and was fresh to the second by the afternoon (§2.7). Two
-        /// measurements of a moving thing, not a contradiction — which is why
-        /// both carry a time and not just a date.
+        /// worst-measured contributor.
         ///
-        /// **The mechanism is the `max_points` cap, and the illustration of it
-        /// flipped between August and September.** The cap counts points, not
-        /// hours, so the same 2000 points cover the fewer hours the harder the
-        /// gateway polls an account: 46.4, 38.7 and 13.2 readings an hour over
-        /// main, acc2 and acc3 at 2026-09-05 15:35Z — 47.1, 40.8 and 14.1 at
-        /// 17:01Z the same day, which is why the time is part of the citation —
-        /// and main, the most watched, is
-        /// both the `truncated` one and the shallowest. On 2026-08-17 it was the
-        /// other way round: main came back at 1581 points, *not* truncated, and
-        /// was the deepest of the three, against 38.6 and 38.1 readings an hour
-        /// on acc2 and acc3. That dated shape is kept here as the counter-example
-        /// it now is: the rule is the cap against the polling rate, never the
-        /// ordering of the three accounts, which is a property of the day.
+        /// **Since 2026-09-09 it is capped at `burnWindowHours`**, and what it
+        /// reports is no longer how deep the gateway's records go but how much of
+        /// the window each account was awake for. A fleet polled densely reads the
+        /// window itself — 7.9 h on the live pair, 2026-09-09 18:20Z — and
+        /// anything less is an account that went quiet inside it, refused
+        /// altogether once it drops under `minimumMeasuredHours`.
+        ///
+        /// **The spread it exists to report survives the window**, which is the
+        /// only reason the field does. Holes are what make it: main's series held a
+        /// 52.37 h gap and acc2's a 25.54 h one on 2026-09-09, against a median gap
+        /// between readings of 60 to 63 s. An account that lost two hours of an 8 h
+        /// window is measured over 6 and averaged, unweighted, beside one measured
+        /// over 8.
+        ///
+        /// What this field used to carry was the depth of the *fetch*, and the
+        /// numbers are kept as dated history because the mechanism behind them is
+        /// still live one level up (`UsageStore.historyWindowSeconds`): 43.09 /
+        /// 47.88 / 47.91 h over main / acc3 / acc2 at 2026-09-05 15:35Z, against
+        /// 48.0 / 34.0 / 48.0 h at 02:50Z the same morning when acc3's series was
+        /// stale by 14 h. The `max_points` cap counts points and not hours, so the
+        /// same 2000 points cover the fewer hours the harder an account is polled —
+        /// 46.4, 38.7 and 13.2 readings an hour over main, acc2 and acc3 at 15:35Z
+        /// — and in August the ordering was the other way round. The rule is the
+        /// cap against the polling rate, never the ordering, which is a property of
+        /// the day. None of that reaches this field any more.
         let measuredHours: Double
         /// An account sat at its ceiling while it was measured, so the points it
         /// was blocked from burning never entered its series at all: the real
@@ -607,10 +719,31 @@ enum FleetCapacity {
         /// is unknown, so there is nothing to assert, and a `≥` that may point
         /// the wrong way is worse than none (§2.7).
         ///
+        /// **There are two ways out of the fleet now and the argument covers both
+        /// the same way.** Since 2026-09-09 an account the operator has switched
+        /// off leaves as well (`switchedOff`), and it leaves for a reason that has
+        /// nothing to do with ceilings — but it leaves by the same door, dropping
+        /// a burn term and a refill share together, so the mean moves in a
+        /// direction nothing here knows either. That is not a guess: measured on
+        /// the live fleet at 2026-09-09 17:44Z, excluding the switched-off acc3
+        /// moved the whole-span figure **down**, 89.7% to 55.0%, because acc3's
+        /// window had turned over inside the span and it was carrying more burn
+        /// than its neighbours. Earlier the same day the same exclusion moved the
+        /// figure the other way, **up** from 92% to 137% — that pair is the report
+        /// this round opened with rather than a reading taken here, and it is
+        /// quoted as such. Same fleet, same switch, opposite directions hours
+        /// apart. A `≥` on either would have been a claim about a direction that
+        /// reverses within a day.
+        ///
+        /// So the rule is about the shape of the exclusion and not about its
+        /// cause: **an account that leaves the fleet takes its refill with it and
+        /// raises nothing**, whether it left at its ceiling or at the operator's
+        /// hand. Only an account still inside the fleet can be a floor.
+        ///
         /// The boundary between the two is a single reading — `everBelowCeiling`
         /// is a one-sample probe — and what that reading is worth is measured:
-        /// `[100, 99, 100, 100, 100]` beside a spending account answers 87.5%
-        /// with the mark, the same series without the 99 answers 175% without it.
+        /// `[100, 99, 100, 100, 100]` beside a spending account answers 105%
+        /// with the mark, the same series without the 99 answers 210% without it.
         /// Both sides are held together in one place, by
         /// `testOneReadingBelowTheCeilingIsTheWholeDifferenceBetweenMeasuredAndRefused`.
         /// Whether the sawtooth actually
@@ -635,32 +768,78 @@ enum FleetCapacity {
     /// depths, and pooling credits the shallow account's missing hours to the
     /// others. Measured 2026-09-05 02:50Z over spans of 48.0 / 34.0 / 48.0 h the
     /// two forms answer 112.8% and 120.2%, and the whole of the difference is
-    /// acc3, whose series stopped 14 h before the other two **that morning** —
-    /// by 15:35Z the same three read 43.09 / 47.88 / 47.91 h and acc3 was the
-    /// freshest of them. The spread is what the form is for, and the spread does
-    /// not go away: it was 14 h of staleness then and it is 4.8 h of `max_points`
-    /// now (`measuredHours`).
+    /// acc3, whose series stopped 14 h before the other two **that morning**.
+    ///
+    /// **The trailing window narrowed the spread without closing it**, so the form
+    /// is still the right one and its reason has changed. Depth of the *fetch* no
+    /// longer reaches the figure at all, so `max_points` and staleness of a
+    /// fortnight-old record are somebody else's problem now; what is left is an
+    /// account that went quiet *inside* the eight hours, which is common — main's
+    /// series held a 52.37 h hole and acc2's a 25.54 h one on 2026-09-09. Six hours
+    /// of readings inside the window against eight is the widest spread the floor
+    /// admits, and pooling would still credit the quiet account's two hours to its
+    /// neighbours (`measuredHours`).
     ///
     /// Contributors are the accounts `measure` could answer for, and the refill
     /// counts them and nobody else: an account we could not measure must never
     /// widen a denominator its own burn is missing from (§2.7).
     ///
+    /// **Every account is measured over the same trailing `burnWindowHours`**, and
+    /// the same-ness is as load-bearing as the length. The rates are averaged
+    /// unweighted, so accounts answering about different stretches of time are
+    /// averaged across epochs — which is what the whole-span form did until
+    /// 2026-09-09, when acc2 answered about 46.9 h, main about 11.9 and acc3 about
+    /// 36 h that had ended twelve hours earlier. Trimming here rather than inside
+    /// `measure` is deliberate: which stretch the fleet is asked about is a fleet
+    /// decision, while `measure` goes on answering "what does this series say
+    /// about its own span".
+    ///
+    /// **An account the operator has switched off is not a contributor** and its
+    /// refill share leaves with it. The flag is `disabled` from `/gw/status` and
+    /// never `eligible`, which is a different question wearing the same shape:
+    /// `eligible` goes false the moment a five-hour window fills, over an account
+    /// that is in the rotation and will be back by itself within the hour, and
+    /// dropping that one would take a live account's burn out of the numerator
+    /// (`AccountSwitch` carries the measurement).
+    ///
+    /// It costs less than it looks like it should, because the window above
+    /// already evicts most of what the switch names: the gateway stops polling a
+    /// switched-off account altogether — measured 2026-09-09, acc3's own
+    /// background poll and its header readings both stop at the same instant,
+    /// 12.17 h before the probe — so its series freezes and ages out of the window
+    /// `burnWindowHours - minimumMeasuredHours` = 2 h later. What the flag buys is
+    /// those two hours, which are exactly the two hours after an operator takes an
+    /// account out because something is wrong and is therefore watching. It is not
+    /// left to the window on principle as well as on timing: "the gateway stops
+    /// polling a disabled account" is somebody else's incidental behaviour, and a
+    /// rule that holds only because of it is not a rule.
+    ///
     /// **One statement guards one division.** With no contributor the refill rate
     /// is zero and the answer would be `0 / 0` — a published `NaN` rather than a
     /// missing figure, and every surface would draw that as a reading. A fleet
-    /// the gateway named no accounts for and a fleet whose every history was too
-    /// short reach it by the same path, which is why the guard counts
-    /// contributors rather than accounts.
+    /// the gateway named no accounts for, a fleet whose every history was too
+    /// short, and a fleet whose every account the operator has switched off all
+    /// reach it by the same path, which is why the guard counts contributors
+    /// rather than accounts.
     static func burnAgainstRefill(histories: [String: HistorySeries],
-                                  accounts: [AccountUsage]) -> FleetBurn? {
+                                  accounts: [AccountUsage],
+                                  switchedOff: Set<String>,
+                                  now: Date) -> FleetBurn? {
         var burnPerHour = 0.0
         var contributors = 0
         var shortestHours = Double.greatestFiniteMagnitude
         var blocked = false
+        let since = now.addingTimeInterval(-burnWindowHours * 3600)
 
         for account in accounts {
-            guard let series = histories[account.label],
-                  let measured = measure(series.points,
+            guard !switchedOff.contains(account.label) else { continue }
+            guard let series = histories[account.label] else { continue }
+            // The window is closed at both ends rather than open at the top: a
+            // reading stamped after `now` is a clock disagreement rather than a
+            // measurement of the future, and letting one in would stretch the span
+            // the rate is divided by.
+            let inWindow = series.points.filter { $0.timestamp >= since && $0.timestamp <= now }
+            guard let measured = measure(inWindow,
                                          resetsAt: account.sevenDay?.resetsAt) else { continue }
             burnPerHour += measured.burnPP / measured.hours
             contributors += 1
