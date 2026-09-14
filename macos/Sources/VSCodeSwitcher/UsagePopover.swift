@@ -1998,16 +1998,57 @@ struct UsagePopoverView: View {
     }
 
     /// Not private, so a test can render this branch rather than only the
-    /// question it asks: which of the two it takes is the whole rule about lines
+    /// question it asks: which branch it takes is the whole rule about lines
     /// that answer the period being asked about, and the rule was missing here
     /// while the question it asks was under test.
     @ViewBuilder var plot: some View {
+        // Nothing is built while the popover is down, and that is a rule about
+        // cost rather than about looks: `NSPopover` keeps its content view
+        // controller for the life of the process — `AppDelegate` assigns it once
+        // beside `popover.behavior` and never writes it again — so this `body`
+        // goes on being rebuilt on every publication of `usage.snapshot`, once a
+        // minute for ever after the first open, with the popover shut as well.
+        // On live data that rebuild is 7325 marks and 62…86 ms of CPU spent on a
+        // picture nobody is looking at — 7325 being the marks as the gateway
+        // sent them, which is what the probe below drew; the collapse above
+        // takes today's repeats out and leaves 7252 of them. The probe: the
+        // same `Chart` with the same modifiers
+        // in an offscreen `NSHostingView`, 20 relayouts in 1.53…1.91 s of user
+        // CPU over a 0.19…0.28 s base (2026-09-14, load average 9.65–11.85, the
+        // `7d` period the popover stood on — `1d` is 2471 marks of the same
+        // work). The band is the bound the runs allow; the per-run pairs of
+        // total and base were not kept.
+        //
+        // `isOpen` rather than `onAppear`/`onDisappear` for the reason the
+        // schedule is on `isOpen` too: the controller outliving the sitting is
+        // exactly what makes AppKit's calls on the hosted view too flat a thing
+        // to hang a promise on.
+        //
+        // **What redraws this when `isOpen` moves is `open(labels:)`.** `isOpen`
+        // is not `@Published` itself, so what publishes is what `open` writes
+        // next: five published fields, unconditionally (`now`, `switchFailures`,
+        // `fleetWarning`, `rotationFailure`, `switches`), and an `@Published`
+        // write publishes without comparing. A round that ever puts those behind a `guard` takes
+        // the chart's first frame with it, and no test would notice — `plot` in
+        // a test is recomputed on every mention, so SwiftUI's invalidation is
+        // not what a rendering observes. `close()` publishes nothing at all, and
+        // that is right: the blank lands on the next publication there is — the
+        // minute tick of `usage.snapshot`, or the answer to a switch that
+        // outlived the close, which this class keeps in flight on purpose and
+        // which writes published fields of its own
+        // (`testASwitchAlreadySentOutlivesTheClose`) — whichever comes first.
+        //
+        // A blank rather than the words the empty branch puts up: a shut popover
+        // has nothing to say to anybody, and "no data" is a statement about the
+        // gateway. The height is the caller's (`chart`), so this needs none.
+        if !history.isOpen {
+            Color.clear
         // Lines are drawn only while they answer the period the picker names.
         // The picker moves first and the answer lands after — up to five seconds
         // later through the tunnel — and the lines in hand meanwhile are the
         // previous window's. `seriesPeriod` exists to tell the two apart, and
         // this is the place that has to ask it: `period.didSet` only refetches.
-        if history.seriesPeriod != history.period || history.series.allSatisfy(\.isEmpty) {
+        } else if history.seriesPeriod != history.period || history.series.allSatisfy(\.isEmpty) {
             Text(Self.plotEmptyLabel(snapshot: usage.snapshot,
                                      seriesFetchedAt: history.fetchedAt,
                                      seriesPeriod: history.seriesPeriod,

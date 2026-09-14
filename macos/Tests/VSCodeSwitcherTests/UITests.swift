@@ -4676,6 +4676,104 @@ final class UsageHistoryTests: XCTestCase {
                              "the lines never came back once they answered the new period")
     }
 
+    /// A popover nobody is looking at draws no chart at all.
+    ///
+    /// `NSPopover` keeps its content view controller for the life of the process
+    /// — `AppDelegate` assigns it once beside `popover.behavior` and never writes
+    /// it again — so this `body` is rebuilt on every publication of
+    /// `usage.snapshot` — once a minute for ever after the first open — and the
+    /// chart was being rebuilt with it behind a shut popover, thousands of marks
+    /// for a picture nobody can see.
+    ///
+    /// Asked with the lines already in hand, for the reason
+    /// `testAClosedPopoverAsksForNothing` records about the other end of the same
+    /// promise: a model that has fetched nothing draws nothing however broken the
+    /// guard is, so the state has to be one where the chart really would be drawn.
+    ///
+    /// **Counting the ink of the shut plot would not have asked anything**, and
+    /// the reason is a property of `ImageRenderer` worth writing down: content
+    /// that draws nothing at all comes back as the *previous* rendering. Measured
+    /// 2026-09-15 — a blank rendered first is 0 inked pixels, the same blank
+    /// after a line of text comes back with that text's 104, and the shut plot
+    /// came back with 2877 pixels of a picture that was not its own — the same
+    /// 2877 a bare `Color.clear` gave beside it. So the picture is taken over an
+    /// opaque ground, where every rendering is painted in full, and the question
+    /// becomes whether it differs from the ground alone: `XCTAssertNotEqual` for
+    /// the chart, `XCTAssertEqual` for the blank that stands in for it.
+    ///
+    /// The last assertion is the cost of that stand-in, and what it holds is not
+    /// the blank: the height of the slot comes from `chart` (`.frame(height:
+    /// 130)`), so the picture is the same size whatever the branch draws, and
+    /// the one mutation that reddens the assertion is the removal of that frame
+    /// — in the caller rather than here. That is also why it is measured on the
+    /// whole view: `plot` is handed a box by `plotBytes` itself and could not
+    /// move if it tried.
+    func testAShutPopoverDrawsNoChart() async throws {
+        let counter = RequestCounter()
+        let history = model(counter, defaults: freshDefaults())
+        let usage = UsageStore(config: .default, cache: UsageCache())
+        history.open(labels: ["acc1"])
+        // Cleanup for a throw out of the renderings below, which would otherwise
+        // leave the timer running; the `close()` in the middle is the subject of
+        // the test and stays where it is.
+        defer { history.close() }
+        await history.fetchTask?.value
+        let view = UsagePopoverView(usage: usage, history: history)
+
+        // The two questions the chart branch itself asks, asked here in the same
+        // words: a fixture that drifted into empty lines or into a period the
+        // answer does not match would take the "no data" branch, and the
+        // assertions below would then be measuring that branch rather than the
+        // chart. `allSatisfy` rather than `series.isEmpty`, because those are
+        // different questions in exactly the state `apply` documents — an
+        // account that answered with nothing but holes is an entry that is there
+        // and empty, and a non-empty list of such entries draws no lines at all.
+        XCTAssertFalse(history.series.allSatisfy(\.isEmpty), "the fixture left no lines to draw")
+        XCTAssertEqual(history.seriesPeriod, history.period,
+                       "the lines in hand answer another period, so no chart is drawn anyway")
+
+        let ground = try plotBytes(Color.clear)
+        XCTAssertNotEqual(try plotBytes(view.plot), ground,
+                          "the open popover drew nothing at all — the measurement is empty")
+        let openHeight = try pictureHeight(view)
+
+        history.close()
+        XCTAssertEqual(try plotBytes(view.plot), ground,
+                       "the chart was built behind a shut popover")
+        XCTAssertEqual(try pictureHeight(view), openHeight,
+                       "the blank standing in for the chart changed the height of the popover")
+    }
+
+    /// What a view puts down over an opaque ground, in the box the popover gives
+    /// the plot, as bytes: see `testAShutPopoverDrawsNoChart` for why the ground.
+    private func plotBytes(_ view: some View) throws -> [UInt8] {
+        let content = ZStack {
+            Color.white
+            view
+        }
+        .frame(width: UsagePopoverView.width, height: 130)
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = 2
+        let bitmap = try XCTUnwrap(renderer.cgImage, "ImageRenderer produced nothing")
+        var pixels = [UInt8](repeating: 0, count: bitmap.width * bitmap.height * 4)
+        let context = try XCTUnwrap(CGContext(data: &pixels,
+                                              width: bitmap.width,
+                                              height: bitmap.height,
+                                              bitsPerComponent: 8,
+                                              bytesPerRow: bitmap.width * 4,
+                                              space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(bitmap, in: CGRect(x: 0, y: 0, width: bitmap.width, height: bitmap.height))
+        return pixels
+    }
+
+    /// The height of a rendering of the whole popover, at its own natural size.
+    private func pictureHeight(_ view: some View) throws -> Int {
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        return try XCTUnwrap(renderer.cgImage, "ImageRenderer produced nothing").height
+    }
+
     /// A chart of the given flat accounts, drawn and read back.
     private func plotInk(flat readings: [String: Double],
                          band: ClosedRange<Double> = 0...1) async throws -> (inked: Int, coverage: Double) {
