@@ -69,7 +69,8 @@ struct AccountSeries: Identifiable, Sendable, Equatable {
         var readings: [UsageReading]
     }
 
-    /// Splits the gateway's samples into runs at every `null`.
+    /// Splits the gateway's samples into runs at every `null`, and collapses the
+    /// readings that share a second so that no run holds one stamp twice.
     ///
     /// The seven-day window is the one taken, because it is the quantity the
     /// headline and the menu bar show — a chart of a different window under the
@@ -82,6 +83,30 @@ struct AccountSeries: Identifiable, Sendable, Equatable {
             guard let value = point.sevenDay else {
                 if !current.isEmpty { segments.append(Segment(id: segments.count, readings: current)) }
                 current = []
+                continue
+            }
+            // Two readings stamped the same second collapse into one, so that no
+            // segment holds a timestamp twice: `ForEach(segment.readings, id:
+            // \.timestamp)` is keyed on it and tells its elements apart by that
+            // id alone, so two marks wearing one id are outside anything
+            // `ForEach` promises. The gateway does send
+            // repeats — its own poll and the reading off a response header
+            // landing in the same second — and they lie next to each other in
+            // the ascending series, so the last already added is the only one to
+            // compare against.
+            //
+            // The **last** value wins, because that is the one the mean is
+            // already drawn from: `FleetSeries.make` walks every sample at or
+            // before a moment and keeps the last non-null of them, so keeping
+            // the first here would put the account's line and the bold line over
+            // it on two different readings of the same second.
+            //
+            // Only the drawn series is collapsed. The raw samples keep their
+            // repeats, because they carry spend that `FleetCapacity` and
+            // `UsageStore` measure — a step of zero length keeps its own change
+            // (§2.7).
+            if current.last?.timestamp == point.timestamp {
+                current[current.count - 1] = UsageReading(timestamp: point.timestamp, value: value)
                 continue
             }
             current.append(UsageReading(timestamp: point.timestamp, value: value))

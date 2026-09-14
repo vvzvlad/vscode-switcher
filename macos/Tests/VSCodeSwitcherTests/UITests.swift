@@ -6664,6 +6664,63 @@ final class FleetMeanTests: XCTestCase {
         XCTAssertTrue(AccountSeries.make(label: "acc1", points: holes).isEmpty)
         XCTAssertTrue(FleetSeries.make(from: [holes]).isEmpty)
     }
+
+    /// Two readings stamped the same second are one point on the line, and it is
+    /// the last of them.
+    ///
+    /// The gateway sends such pairs — its own poll and the reading off a response
+    /// header landing in the same second — and the marks are keyed on the stamp
+    /// (`ForEach(segment.readings, id: \.timestamp)`), which tells its elements
+    /// apart by that id alone: two marks wearing one id are outside anything
+    /// `ForEach` promises. Measured against the
+    /// live gateway over the 7d window on 2026-09-14, the one the popover stood
+    /// on: 27 groups carrying 29 extra points of 1485 on one account, 16/17 of
+    /// 639 on the next, 26/27 of 1596 on the third, and the longest repeat was
+    /// three.
+    ///
+    /// Only the drawn series. The raw samples keep their repeats, because a step
+    /// of zero length carries spend `FleetCapacity` and `UsageStore` measure
+    /// (§2.7).
+    func testTwoReadingsOnOneSecondAreOnePointOnTheLine() throws {
+        let pair = AccountSeries.make(label: "acc1", points: try samples([(0, 10), (0, 12), (1, 20)]))
+        XCTAssertEqual(pair.segments.count, 1)
+        XCTAssertEqual(pair.segments.first?.readings.map(\.timestamp), [moment(0), moment(1)],
+                       "the repeated stamp is on the line twice")
+        XCTAssertEqual(pair.segments.first?.readings.map(\.value), [12, 20],
+                       "the earlier reading of the repeated second won")
+
+        // Three of them, which is as long as a repeat has been seen to run, and
+        // a hole beside them: the stamps of a segment are unique whatever the
+        // series does around them.
+        let triple = AccountSeries.make(label: "acc1",
+                                        points: try samples([(0, 10), (0, 11), (0, 12),
+                                                             (1, nil),
+                                                             (2, 30), (2, 33)]))
+        XCTAssertEqual(triple.segments.map { $0.readings.map(\.value) }, [[12], [33]])
+        for segment in triple.segments {
+            XCTAssertEqual(Set(segment.readings.map(\.timestamp)).count, segment.readings.count,
+                           "a segment holds one stamp twice: \(segment.readings)")
+        }
+    }
+
+    /// And the last of them is the one the mean is already drawn from, which is
+    /// why it is the one kept.
+    ///
+    /// `FleetSeries.make` eats every sample at or before a moment and keeps the
+    /// last non-null of them, so an account line built off the first reading of a
+    /// repeated second would sit at one value while the bold line over it sits at
+    /// another — at the same point of the same picture.
+    func testTheEndOfAnAccountLineAgreesWithTheMeanOnARepeatedSecond() throws {
+        let points = try samples([(0, 10), (1, 40), (1, 44)])
+        let line = try XCTUnwrap(AccountSeries.make(label: "acc1", points: points)
+            .segments.last?.readings.last)
+        let mean = try XCTUnwrap(FleetSeries.make(from: [points]).points.last)
+        XCTAssertEqual(line.timestamp, mean.timestamp, "the two lines end at different moments")
+        XCTAssertEqual(mean.accounts, 1, "the mean is over more accounts than the fixture has")
+        XCTAssertEqual(line.value, mean.value, accuracy: 0.001,
+                       "the account's line and the mean over it read the same second differently")
+        XCTAssertEqual(line.value, 44, accuracy: 0.001, "both of them read the repeat backwards")
+    }
 }
 
 /// The sawtooth the lag between the two measuring sources puts on the chart, and
