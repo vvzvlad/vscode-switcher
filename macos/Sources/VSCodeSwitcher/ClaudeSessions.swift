@@ -992,12 +992,20 @@ enum ClaudeSessions {
         var transcriptPath: String
     }
 
-    private static let subagentListCache = FileDerivedCache<[SubagentEntry]>()
+    /// One directory under `subagents/`: the agents in it and the directories
+    /// below it.
+    struct SubagentListing: Sendable {
+        var entries: [SubagentEntry] = []
+        var subdirectories: [String] = []
+    }
+
+    private static let subagentListCache = FileDerivedCache<SubagentListing>()
 
     /// Background subagents of a session.
     ///
     /// Each one is a pair of `agent-<id>.jsonl` and `agent-<id>.meta.json` inside
-    /// `<transcript dir>/<sessionId>/subagents/`. A subagent counts as active
+    /// `<transcript dir>/<sessionId>/subagents/` — or deeper: Workflow puts its
+    /// agents in `subagents/workflows/wf_<id>/`. A subagent counts as active
     /// while its transcript was touched within `subagentActiveSeconds` and its
     /// last record does not say it stopped — either a final answer (`end_turn`
     /// or `stop_sequence`) or the interrupt marker.
@@ -1015,11 +1023,11 @@ enum ClaudeSessions {
     /// well: one more `stat` and a 64 KB tail read each, across the same set of
     /// files the paragraph below counts.
     ///
-    /// The directory listing and the `.meta.json` parses are cached against the
-    /// directory's own mtime, which moves exactly when an entry is added or
-    /// removed. This was the last uncached hot path: nine live sessions meant
-    /// re-listing nine directories and re-parsing 152 metadata files on every
-    /// snapshot, about 9 ms of a 44 ms build. Only the freshness of each
+    /// The directory listings and the `.meta.json` parses are cached, each
+    /// against its own directory's mtime, which moves exactly when an entry is
+    /// added or removed. This was the last uncached hot path: nine live sessions
+    /// meant re-listing nine directories and re-parsing 152 metadata files on
+    /// every snapshot, about 9 ms of a 44 ms build. Only the freshness of each
     /// transcript is re-read, because that is what changes between snapshots.
     static func subagents(slug: String,
                           sessionId: String,
@@ -1029,9 +1037,7 @@ enum ClaudeSessions {
             .appendingPathComponent(slug)
             .appendingPathComponent(sessionId)
             .appendingPathComponent("subagents")
-        let entries = subagentListCache.value(atPath: directory.path) {
-            subagentEntries(in: directory)
-        }
+        let entries = subagentEntries(in: directory)
 
         var result: [SubagentInfo] = []
         for entry in entries {
@@ -1052,21 +1058,48 @@ enum ClaudeSessions {
         return result
     }
 
-    /// Lists a `subagents` directory and reads every `.meta.json` in it. A
-    /// missing directory is not an error: most sessions never spawn one.
+    /// Every subagent under a `subagents` directory, at any depth. A missing
+    /// directory is not an error: most sessions never spawn one.
+    ///
+    /// Each directory is cached on its own: adding an agent to
+    /// `workflows/wf_<id>/` moves the mtime of that directory and of no other,
+    /// so a single entry keyed on `subagents/` would hide it until something
+    /// else changed at the top.
     static func subagentEntries(in directory: URL) -> [SubagentEntry] {
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
-        var entries: [SubagentEntry] = []
-        for name in names.sorted() where name.hasPrefix("agent-") && name.hasSuffix(".jsonl") {
+        let listing = subagentListCache.value(atPath: directory.path) {
+            subagentListing(in: directory)
+        }
+        return listing.entries + listing.subdirectories.flatMap {
+            subagentEntries(in: directory.appendingPathComponent($0))
+        }
+    }
+
+    /// Lists one directory and reads every `.meta.json` in it.
+    private static func subagentListing(in directory: URL) -> SubagentListing {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else {
+            return SubagentListing()
+        }
+        var listing = SubagentListing()
+        for name in names.sorted() {
+            guard name.hasPrefix("agent-") else {
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: directory.appendingPathComponent(name).path,
+                                                  isDirectory: &isDirectory),
+                   isDirectory.boolValue {
+                    listing.subdirectories.append(name)
+                }
+                continue
+            }
+            guard name.hasSuffix(".jsonl") else { continue }
             let identifier = String(name.dropFirst("agent-".count).dropLast(".jsonl".count))
             let metaPath = directory.appendingPathComponent("agent-\(identifier).meta.json").path
             let meta = JSONC.object(atPath: metaPath)
-            entries.append(SubagentEntry(id: identifier,
-                                         agentType: meta?["agentType"] as? String,
-                                         description: meta?["description"] as? String,
-                                         transcriptPath: directory.appendingPathComponent(name).path))
+            listing.entries.append(SubagentEntry(id: identifier,
+                                                 agentType: meta?["agentType"] as? String,
+                                                 description: meta?["description"] as? String,
+                                                 transcriptPath: directory.appendingPathComponent(name).path))
         }
-        return entries
+        return listing
     }
 
     private static let subagentFinishedCache = FileDerivedCache<Bool>()
@@ -1082,7 +1115,18 @@ enum ClaudeSessions {
     }
 
     private static func uncachedIsFinished(transcriptPath: String) -> Bool {
-        let lines = tailLines(atPath: transcriptPath, maxBytes: 64 * 1024)
+        // A last record longer than the window leaves no whole line once the
+        // cut one is dropped — 33 of 2786 tails, 31 of them `end_turn` (SPEC
+        // §3.1). Only then read further back, doubling until a whole line fits
+        // or the window covers the file. The answer is cached by (size, mtime),
+        // so this runs once per change of such a file, and every other read
+        // stays at 64 KB.
+        var window = 64 * 1024
+        var lines = tailLines(atPath: transcriptPath, maxBytes: window)
+        while lines.isEmpty, let size = fileStamp(atPath: transcriptPath)?.size, UInt64(window) < size {
+            window *= 2
+            lines = tailLines(atPath: transcriptPath, maxBytes: window)
+        }
         guard let last = lines.last,
               let object = try? JSONC.parse(last),
               let record = object as? [String: Any]
