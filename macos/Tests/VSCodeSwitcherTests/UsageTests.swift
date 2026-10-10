@@ -1378,6 +1378,8 @@ final class UsageAttributionTests: XCTestCase {
 
     /// One subagent transcript of that session, in the place Claude Code puts it:
     /// `<slug>/<sessionId>/subagents/`, a level below the session's own file.
+    /// `nested` puts it further down, where workflow agents write:
+    /// `subagents/workflows/wf_<id>/`.
     ///
     /// It exists here because the gateway reports one aggregate for the whole
     /// `session_id` while a subagent's writing lands in a different file entirely,
@@ -1386,11 +1388,13 @@ final class UsageAttributionTests: XCTestCase {
     private func subagentFile(_ name: String,
                               of sessionId: String,
                               startedIn directory: String,
-                              writtenAt: Date) throws -> String {
+                              writtenAt: Date,
+                              nested: String? = nil) throws -> String {
         let slugName = ClaudeSessions.slug(forPath: directory)
-        let directory = transcripts.appendingPathComponent(slugName)
+        var directory = transcripts.appendingPathComponent(slugName)
             .appendingPathComponent(sessionId)
             .appendingPathComponent("subagents")
+        if let nested { directory = directory.appendingPathComponent(nested) }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let path = directory.appendingPathComponent("\(name).jsonl")
         try Data("not json at all".utf8).write(to: path)
@@ -1408,15 +1412,17 @@ final class UsageAttributionTests: XCTestCase {
     /// removed between the listing and the stamp looks like from inside
     /// `wasWrittenInWindow`. The alternative, removing the file after the listing,
     /// cannot be written from out here: the listing happens inside the function
-    /// under test.
+    /// under test. `nested` puts it further down, as `subagentFile` does.
     @discardableResult
     private func unstatableSubagentFile(_ name: String,
                                         of sessionId: String,
-                                        startedIn directory: String) throws -> String {
+                                        startedIn directory: String,
+                                        nested: String? = nil) throws -> String {
         let slugName = ClaudeSessions.slug(forPath: directory)
-        let subagents = transcripts.appendingPathComponent(slugName)
+        var subagents = transcripts.appendingPathComponent(slugName)
             .appendingPathComponent(sessionId)
             .appendingPathComponent("subagents")
+        if let nested { subagents = subagents.appendingPathComponent(nested) }
         try FileManager.default.createDirectory(at: subagents, withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(
             at: subagents.appendingPathComponent("\(name).jsonl"),
@@ -2030,6 +2036,89 @@ final class UsageAttributionTests: XCTestCase {
         XCTAssertEqual(survivors, [ClaudeSessions.slug(forPath: working.path)],
                        "the life being written to by a subagent was narrowed away, and the "
                        + "contest handed to the copy a resume had merely touched")
+    }
+
+    /// **A workflow agent writing keeps the life too**, although it writes two levels
+    /// further down than the other subagents: `subagents/workflows/wf_<id>/`.
+    ///
+    /// While a workflow runs the parent transcript stands still, and the flat
+    /// `subagents/` may hold nothing written in the window — here its one file is
+    /// stale, and the only fresh file is the workflow agent's. Both lives carry
+    /// the same nested layout, so what keeps the first is the date, not the shape.
+    ///
+    /// Checked by reverting the walk to the flat loop over `subagents/`, which
+    /// narrows the working life away and turns this test red.
+    func testAWorkflowAgentWritingKeepsALifeWhoseTranscriptStandsStill() throws {
+        let now = Date()
+        let longAgo = now.addingTimeInterval(-3 * 86_400)
+        let working = try makeProject("hammerola")
+        let quiet = try makeProject("cad_snapshot_hub")
+        for life in [working, quiet] {
+            try file("s1", startedIn: life.path, writtenAt: longAgo)
+            try subagentFile("agent-0", of: "s1", startedIn: life.path, writtenAt: longAgo)
+        }
+        try subagentFile("agent-1", of: "s1", startedIn: working.path, writtenAt: now,
+                         nested: "workflows/wf_x")
+        try subagentFile("agent-1", of: "s1", startedIn: quiet.path, writtenAt: longAgo,
+                         nested: "workflows/wf_x")
+
+        let contested = UsageIndex.fold(
+            sessions: [try session("s1", input: 12)],
+            slugsBySessionId: UsageIndex.slugsBySessionId(for: ["s1"],
+                                                          projectsDirectory: transcripts)).contested
+        XCTAssertEqual(contested.first?.slugs.count, 2, "the fixture has to be contested")
+
+        let survivors = narrow(contested,
+                               since: now.addingTimeInterval(-UsageStore.hourWindowSeconds))
+            .first?.slugs
+        XCTAssertEqual(survivors, [ClaudeSessions.slug(forPath: working.path)],
+                       "the life being written to by a workflow agent was narrowed away, and "
+                       + "the contest handed to the copy a resume had merely touched")
+    }
+
+    /// **A workflow agent's file that cannot be stat'ed keeps the claim as well** —
+    /// the rule of `testACopyThatCannotBeStatedKeepsItsClaimOnTheWindow`, at the
+    /// depth workflow agents write to.
+    ///
+    /// The racing life's `subagents/` holds nothing but `workflows/wf_x/` with a
+    /// dangling `agent-1.jsonl` in it. A fresh life and a stale one are the
+    /// controls, as in that test. Checked by reverting the walk to the flat loop,
+    /// which sees no `*.jsonl` at the top and drops the racing life.
+    func testAWorkflowAgentFileThatCannotBeStatedKeepsItsClaimOnTheWindow() throws {
+        let now = Date()
+        let longAgo = now.addingTimeInterval(-3 * 86_400)
+        let fresh = try makeProject("hammerola")
+        let stale = try makeProject("cad_snapshot_hub")
+        let racing = try makeProject("ukuetis_site")
+        try file("s1", startedIn: fresh.path, writtenAt: now)
+        try file("s1", startedIn: stale.path, writtenAt: longAgo)
+        try file("s1", startedIn: racing.path, writtenAt: longAgo)
+        let raced = try unstatableSubagentFile("agent-1", of: "s1", startedIn: racing.path,
+                                               nested: "workflows/wf_x")
+
+        let contested = UsageIndex.fold(
+            sessions: [try session("s1", input: 12)],
+            slugsBySessionId: UsageIndex.slugsBySessionId(for: ["s1"],
+                                                          projectsDirectory: transcripts)).contested
+        XCTAssertEqual(contested.first?.slugs.count, 3, "the fixture has to hold all three lives")
+
+        let workflow = transcripts.appendingPathComponent(raced)
+            .appendingPathComponent("s1/subagents/workflows/wf_x")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: workflow.path),
+                       ["agent-1.jsonl"], "the listing has to name the file for this to be the race")
+        XCTAssertNil(fileStamp(atPath: workflow.appendingPathComponent("agent-1.jsonl").path),
+                     "and the stamp has to be the half that fails")
+
+        let survivors = Set(narrow(contested,
+                                   since: now.addingTimeInterval(-UsageStore.hourWindowSeconds))
+            .first?.slugs ?? [])
+        XCTAssertTrue(survivors.contains(ClaudeSessions.slug(forPath: fresh.path)),
+                      "the life written inside the window lost its claim")
+        XCTAssertTrue(survivors.contains(raced),
+                      "a copy whose workflow agent's file could not be stat'ed was dropped")
+        XCTAssertFalse(survivors.contains(ClaudeSessions.slug(forPath: stale.path)),
+                       "a life three days out of the window kept its claim, so this fixture "
+                       + "would agree with a rule that narrows nothing")
     }
 
     /// A live session whose **own** life was narrowed out of the window, while a
