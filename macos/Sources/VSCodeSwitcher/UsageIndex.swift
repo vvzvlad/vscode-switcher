@@ -188,19 +188,33 @@ enum UsageIndex {
     /// misattributed today — which is luck, not a property: a subagent that runs
     /// longer than the window would drop the working life out of the survivors and
     /// leave a rival copy that a resume had merely touched. So the stamp of a life
-    /// is the newest of its transcript and of the `*.jsonl` files listed directly
-    /// in its `subagents/`.
+    /// is the newest of its transcript and of the `*.jsonl` files at any depth
+    /// under its `subagents/`.
     ///
-    /// **One level, and only the transcripts.** This used to promise "anything
-    /// under its `subagents/`", which is wider than the loop and would cost about
-    /// twice as much to make true. What is in there, counted 2026-08-28 over that
-    /// pass's 344 `subagents/` directories: 4483 `agent-*.jsonl`, one
-    /// `agent-*.meta.json` beside every one of them, and 7 nested `workflows/`
-    /// directories holding 1003 files between them. The negative result is what
-    /// keeps the loop flat: in **0** sessions is a file under one of those nested
-    /// directories newer than both the parent transcript and every flat `*.jsonl`,
-    /// so recursing would buy nothing that happens — while the `.meta.json` files
-    /// alone, being one per transcript, would double the stats.
+    /// **Every level, and only the transcripts.** The walk used to be one flat
+    /// listing, and why is kept as history: counted 2026-08-28 over that pass's
+    /// 344 `subagents/` directories, 4483 `agent-*.jsonl`, one `agent-*.meta.json`
+    /// beside every one of them, and 7 nested `workflows/` directories holding
+    /// 1003 files between them, with **0** sessions in which a file under one of
+    /// those nested directories was newer than both the parent transcript and
+    /// every flat `*.jsonl`. That no longer describes the machine. Workflow agents
+    /// write their transcripts only under `subagents/workflows/wf_<id>/`
+    /// (`agent-*.jsonl` and a `journal.jsonl`), not in `subagents/` itself, and
+    /// the parent transcript stands still for as long as the workflow runs.
+    /// Counted 2026-10-10 21:19 over 1045 session transcripts and 576
+    /// `subagents/` directories: 17 hold a `workflows/`, 2 of them hold no flat
+    /// `*.jsonl` at all, and the 52 `wf_<id>/` directories hold 1237 `*.jsonl`
+    /// (1185 `agent-*.jsonl`, 52 `journal.jsonl`). One session had a nested file
+    /// newer than the parent and every flat `*.jsonl` — a running workflow,
+    /// whose `subagents/` holds `workflows/` and nothing else — by 92.6 s at
+    /// 21:16 and 299.3 s at 21:19: the gap grows with the workflow, and a flat
+    /// listing sees nothing of it. So the walk recurses, as
+    /// `ClaudeSessions.subagentEntries(in:)` already does for the same reason.
+    /// The doubling of stats the flat loop refused is still not paid: a `.json`
+    /// name is skipped without a stat, and only a name that is neither a `.jsonl`
+    /// nor a `.json` is asked whether it is a directory — one extra check and one
+    /// listing per directory, 17 `workflows/` and 52 `wf_<id>/` on the whole machine
+    /// that day.
     ///
     /// **What that costs.** The subagents are consulted only when the parent
     /// transcript is already stale, which is the whole difference: of the copies of
@@ -272,8 +286,9 @@ enum UsageIndex {
     ///
     /// The parent transcript is asked first and answers alone whenever it is
     /// fresh, which is the common case and costs one `stat`. Only a life that
-    /// looks stale is worth a listing, and the loop stops at the first subagent
-    /// file inside the window rather than looking for the newest one: the question
+    /// looks stale is worth a walk of its `subagents/`, and the walk stops at the
+    /// first subagent file inside the window, at whatever depth, rather than
+    /// looking for the newest one: the question
     /// is whether *anything* was written, and the newest file is not needed to
     /// answer it.
     private static func wasWrittenInWindow(slug: String,
@@ -296,12 +311,32 @@ enum UsageIndex {
         // not a rule — the rule below it is the one held by a test.
         let subagents = base + "/subagents"
         guard fileStamp(atPath: subagents) != nil else { return false }
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: subagents)) ?? []
-        for name in names where name.hasSuffix(".jsonl") {
-            guard let stamp = fileStamp(atPath: subagents + "/" + name) else { return true }
-            if stamp.modificationDate >= since { return true }
+
+        // Recursive because workflow agents write further down, in
+        // `subagents/workflows/wf_<id>/` (`agent-*.jsonl` and a `journal.jsonl`),
+        // while the parent transcript stands still for as long as the workflow
+        // runs. A `.json` name is an `agent-*.meta.json` and is skipped without a
+        // stat; any other name is asked whether it is a directory, and walked if
+        // it is.
+        func writtenUnder(_ directory: String) -> Bool {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? []
+            for name in names {
+                let path = directory + "/" + name
+                if name.hasSuffix(".jsonl") {
+                    guard let stamp = fileStamp(atPath: path) else { return true }
+                    if stamp.modificationDate >= since { return true }
+                } else if !name.hasSuffix(".json") {
+                    var isDirectory: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+                       isDirectory.boolValue,
+                       writtenUnder(path) {
+                        return true
+                    }
+                }
+            }
+            return false
         }
-        return false
+        return writtenUnder(subagents)
     }
 }
 
