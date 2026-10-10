@@ -3252,6 +3252,37 @@ final class SubagentLivenessTests: XCTestCase {
         XCTAssertEqual(subagents(in: root, activeSeconds: 30).map(\.isActive), [false])
     }
 
+    /// A final answer longer than the 64 KB tail window: once the cut first line
+    /// is dropped no whole line is left, and the finished subagent kept spinning
+    /// until the clock retired it — 33 of 2786 tails, 31 of them `end_turn`
+    /// (SPEC §3.1). 128 KiB of text is past the first doubled window as well.
+    func testAFinalAnswerLongerThanTheTailWindowStillEndsTheSubagent() throws {
+        let root = try makeTemporaryDirectory()
+        let text = String(repeating: "x", count: 128 * 1024)
+        try writeTranscript(Self.toolResult
+                                + #"{"type":"assistant","message":{"content":[{"type":"text","text":"\#(text)"}],"stop_reason":"end_turn"}}"#
+                                + "\n",
+                            age: 0,
+                            in: root)
+
+        XCTAssertEqual(subagents(in: root, activeSeconds: 300).map(\.isActive), [false])
+    }
+
+    /// Workflow agents sit two levels down, in `subagents/workflows/wf_<id>/`.
+    /// Adding one there does not move the mtime of `subagents/`, so the agent
+    /// that starts after the listing was cached has to show up all the same.
+    func testWorkflowSubagentsAreListedEvenWhenAddedAfterTheListingWasCached() throws {
+        let root = try makeTemporaryDirectory()
+        try writeTranscript(Self.toolResult, age: 0, in: root)
+        try writeTranscript(Self.toolResult, age: 0, in: root, name: "workflows/wf_x/agent-y.jsonl")
+        XCTAssertEqual(Set(subagents(in: root, activeSeconds: 300).filter(\.isActive).map(\.id)),
+                       ["a48ba5a32f6185898", "y"])
+
+        try writeTranscript(Self.toolResult, age: 0, in: root, name: "workflows/wf_x/agent-z.jsonl")
+        XCTAssertEqual(Set(subagents(in: root, activeSeconds: 300).filter(\.isActive).map(\.id)),
+                       ["a48ba5a32f6185898", "y", "z"])
+    }
+
     private let slug = "-Users-x-Data-Projects-pebble"
     private let sessionID = "914f8824-0e0e-4a0a-9b0b-000000000000"
 
@@ -3266,13 +3297,17 @@ final class SubagentLivenessTests: XCTestCase {
 
     /// One `agent-<id>.jsonl` with an explicit mtime. Waiting out a real clock
     /// would make the age half untestable at any useful threshold.
-    private func writeTranscript(_ contents: String, age: TimeInterval, in projectsDirectory: URL) throws {
-        let directory = projectsDirectory
+    private func writeTranscript(_ contents: String,
+                                 age: TimeInterval,
+                                 in projectsDirectory: URL,
+                                 name: String = "agent-a48ba5a32f6185898.jsonl") throws {
+        let file = projectsDirectory
             .appendingPathComponent(slug)
             .appendingPathComponent(sessionID)
             .appendingPathComponent("subagents")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let file = directory.appendingPathComponent("agent-a48ba5a32f6185898.jsonl")
+            .appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
         try contents.write(to: file, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-age)],
                                               ofItemAtPath: file.path)
