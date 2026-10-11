@@ -7,14 +7,8 @@ import Foundation
 /// take the whole app down to defaults silently. The file is never created by
 /// the app.
 ///
-/// **A key this file does not know is read by nobody and reported to nobody.**
-/// `load` walks the keys it has and never the ones the file has, so an unknown
-/// key — a typo, or one that has been retired — is simply not looked at. That is
-/// what happened to `usageLoadWindowHours`, which chose between two ways of
-/// estimating the week's demand: nothing estimates demand any more (the gateway
-/// measures it), the key was removed, and a config that still carries it keeps
-/// working exactly as one that never had it. There is no warning, and there is
-/// nowhere to put one — this type is read before there is a surface.
+/// Unknown keys (typos, retired keys) are silently ignored: `load` walks the
+/// keys it knows, and this type is read before there is any surface to warn on.
 struct Config: Sendable, Equatable {
     /// Directories scanned for projects. Values may contain a leading `~`.
     var projectRoots: [String]
@@ -36,15 +30,10 @@ struct Config: Sendable, Equatable {
     /// A background subagent counts as active while its last record does not
     /// say it stopped and its transcript was touched within this many seconds.
     ///
-    /// The age half only guards the tails where the stop is not visible in the
-    /// shape: a subagent that ended normally is caught at once by its final
-    /// record (`end_turn` or `stop_sequence`), and one the user cut short by
-    /// the interrupt marker, whatever this is set to. Silence, on the other
-    /// hand, is not evidence of a stopped subagent — a thinking model writes
-    /// nothing for minutes — so a tight threshold costs much and buys little:
-    /// over a week of subagent transcripts, the working time a subagent spent
-    /// invisible to the panel was 17.4% of the corpus at 90 s against 2.3% at
-    /// 600 s, and the trade it buys is counted in hours in SPEC §3.1.
+    /// A normal stop (`end_turn`, `stop_sequence`) or an interrupt is seen in
+    /// the record itself; the age only covers the rest. A thinking model can
+    /// write nothing for minutes, so a tight threshold hides working subagents
+    /// (17.4% of working time at 90 s against 2.3% at 600 s; SPEC §3.1).
     var subagentActiveSeconds: Double
     /// How much of a session transcript is read from the end. Transcripts reach
     /// tens of megabytes, so they are never read in full.
@@ -56,9 +45,6 @@ struct Config: Sendable, Equatable {
     /// WireGuard; the alternative is the gateway itself,
     /// `http://<gateway address on the WireGuard network>:8787`, for when the
     /// relay is not running. Neither takes any authentication.
-    ///
-    /// The poll interval and the seven-day window are constants in the code:
-    /// nobody asked for them to be settings.
     var usageBaseURL: String
     static let `default` = Config(
         projectRoots: ["~/Data/Projects"],
@@ -96,10 +82,7 @@ struct Config: Sendable, Equatable {
     /// The gateway address as a `URL`.
     ///
     /// `load` only accepts a string with a scheme and a host, so the fallback
-    /// here is for a `Config` assembled in code. It is written as `??` rather
-    /// than as a force-unwrap because `URL` has no non-failing initialiser for a
-    /// string literal; that the default parses is held by a test, not by this
-    /// line.
+    /// is for a `Config` assembled in code; a test checks that the default parses.
     var resolvedUsageBaseURL: URL {
         URL(string: usageBaseURL) ?? URL(fileURLWithPath: "/")
     }
@@ -141,16 +124,9 @@ struct Config: Sendable, Equatable {
         if let value = dict["editorBundleID"] as? String, !value.isEmpty {
             config.editorBundleID = value
         }
-        // Validated by parsing it, and by insisting on an HTTP scheme and a
-        // host: `URL(string:)` alone accepts far more than it used to — `not a
-        // url at all` parses into a relative URL on macOS 14 — and an address
-        // with nothing to connect to would turn every poll into a failure line.
-        // The scheme is checked by name rather than merely for being present:
-        // `ftp://host/x` and `file://localhost/tmp` both have one and a host,
-        // and both are exactly the permanent failure this check exists to keep
-        // out — `URLSession` answers the first with an unsupported-URL error and
-        // the second with a body that is not the gateway's. The built-in default
-        // is the one that works on this machine.
+        // Requires an http(s) scheme and a host: `URL(string:)` accepts
+        // `not a url at all` as a relative URL on macOS 14, and `ftp://` or
+        // `file://` addresses would make every poll fail.
         if let value = dict["usageBaseURL"] as? String, !value.isEmpty,
            let url = URL(string: value), url.host() != nil,
            let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {

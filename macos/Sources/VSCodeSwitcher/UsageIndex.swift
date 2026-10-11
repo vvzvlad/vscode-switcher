@@ -9,19 +9,16 @@ import Foundation
 /// in this file opens a transcript; the *name of the directory* is the whole
 /// signal, and the directories are listed, never read.
 ///
-/// That is a deliberate retreat from reading the file, and it is worth spelling
-/// out why, because the head of a transcript looks like a better answer and is
-/// not one. `cwd` is a field of every record rather than a property of the
-/// session: a session walks between directories while it runs — 28 of the 30
-/// local sessions in the live 7-day window touched more than one, median 4 and
-/// maximum 18 (measured 2026-08-17). Worse, when a session is *resumed* in
-/// another directory Claude Code keeps the identifier, opens a file under the
-/// new slug and seeds it with a copy of the old history: both copies then begin
-/// with the same record, to the millisecond, and neither the first record nor
-/// the last of the new copy need name the directory it sits in. On the live pair
-/// `65f9afa1` the copy under the `research-mcp` slug opens on `home-network` and
-/// ends on `ukuetis_site`. A head read would have answered `home-network` for a
-/// file that belongs to `research-mcp` — confidently, and wrongly.
+/// The head of a transcript looks like a better answer than the directory name
+/// and is not one. `cwd` is a field of every record rather than a property of
+/// the session: a session walks between directories while it runs (in one
+/// 7-day window, 28 of 30 local sessions touched more than one, median 4,
+/// maximum 18). Worse, when a session is *resumed* in another directory Claude
+/// Code keeps the identifier, opens a file under the new slug and seeds it with
+/// a copy of the old history: both copies then begin with the same record, to
+/// the millisecond, and neither the first record nor the last of the new copy
+/// need name the directory it sits in. A head read can answer `home-network`
+/// for a file that belongs to `research-mcp` — confidently, and wrongly.
 ///
 /// The slug cannot be wrong that way: Claude Code writes the file under the slug
 /// of the directory the session was started in, so the directory name *is* the
@@ -43,10 +40,9 @@ enum UsageIndex {
     /// sessions — distinct and sorted.
     ///
     /// Usually one, and the list is the point: a `session_id` is **not** unique
-    /// across `~/.claude/projects/`. Five identifiers on this machine sit in two
-    /// slug directories each, and those are not two sessions that collided but
-    /// one session resumed in another directory. Taking whichever copy the walk
-    /// reached first attributed the spend to whichever project won a race nobody
+    /// across `~/.claude/projects/`. One session resumed in another directory
+    /// sits in two slug directories, and taking whichever copy the walk reaches
+    /// first would attribute the spend to whichever project won a race nobody
     /// was watching, and the winner could change between two polls.
     ///
     /// Sessions with no transcript here are simply absent from the result: the
@@ -67,12 +63,10 @@ enum UsageIndex {
         }
 
         var found: [String: [String]] = [:]
-        // Every slug directory is walked, always. The walk used to stop as soon
-        // as it had one directory per wanted session, which is exactly what made
-        // a duplicated identifier resolve to whichever copy came first. There is
-        // no count at which it may stop early — the next directory can always
-        // hold another copy — so the answer is only complete once the listing is
-        // exhausted. Subagent transcripts sit one level below, in
+        // Every slug directory is walked, always: there is no count at which the
+        // walk may stop early — the next directory can always hold another copy
+        // of a duplicated identifier — so the answer is only complete once the
+        // listing is exhausted. Subagent transcripts sit one level below, in
         // `<sessionId>/subagents/`, so a flat listing sees sessions and nothing
         // else.
         for slug in slugs.sorted() {
@@ -142,27 +136,14 @@ enum UsageIndex {
     /// during it.
     ///
     /// **Why the window decides anything.** The gateway hands back one aggregate
-    /// per session and nothing to split it by, so two lives of one session used to
-    /// mean "nobody may have this" for every window alike. That is right for a
-    /// window both lives were alive in and wrong for one only a single life
-    /// reaches. The live pair on this machine (2026-08-27) is exactly that:
-    /// `8fa4e946-…` sits under the slugs of `hammerola` and `cad_snapshot_hub` —
-    /// two real projects, both in the scan roots — and the `hammerola` copy was
-    /// 16.5 MB being written at 20:01 that day while the `cad_snapshot_hub` copy
-    /// stopped at 6.1 MB on 2026-08-24 17:20. Over the sliding hour that second
-    /// life is days out of the window and can have spent nothing in it; over the
-    /// week both lives are inside it and the aggregate genuinely holds spend from
-    /// both. Same rule, two windows, two different and correct answers — the hour
-    /// resolves and the week stays ambiguous.
-    ///
-    /// What it is worth is a *sliding* hour, so it is a reading and not a
-    /// constant, and the readings are far apart: 11.95M of 42.53M refused (28.1%
-    /// of the hour) at one moment of 2026-08-27, 17.75M of 64.30M (27.6%) at
-    /// another, and 0.98M of 5.12M (19.1%) on a quiet night hour of 2026-08-28.
-    /// §2.7 keeps them side by side. The absolute moves by more than an order of
-    /// magnitude with the machine's own load; the session behind it is
-    /// `8fa4e946-…` every time, and it is the largest single spender on the
-    /// machine.
+    /// per session and nothing to split it by, so two lives of one session mean
+    /// "nobody may have this" only for a window both lives were alive in. For a
+    /// window only one life reaches, the other can have spent nothing in it:
+    /// with one copy written today and the other stopped three days ago, the
+    /// hour resolves and the week stays ambiguous. Same rule, two windows, two
+    /// different and correct answers. What it is worth is a reading, not a
+    /// constant: roughly 19–28% of the hour's spend has been refused at different
+    /// moments (§2.7 keeps the readings side by side).
     ///
     /// **Only the timestamp, never the bytes.** A transcript runs to 40 MB (§2.4)
     /// and this layer never opens one; `stat(2)` and directory listings are all
@@ -174,101 +155,44 @@ enum UsageIndex {
     /// **A life is more than its own transcript.** Subagents write to
     /// `<slug>/<sessionId>/subagents/agent-*.jsonl` (§2.6.3) while the gateway
     /// still reports one aggregate for the whole `session_id`, so the parent file
-    /// can stand still through a long stretch of real spending. This is a live
-    /// table, and what moves is the population as well as the finding — one and the
-    /// same sample across two passes is what a moving table cannot deliver, and is
-    /// how this was written down. Four passes: 2026-08-27 and 2026-08-28 over 609
-    /// session transcripts with 344 `subagents/` directories found 10 and then 6
-    /// with a subagent file newer than their parent, the largest gap 917.5 s
-    /// (15.29 min) and 124.2 s; recounts on 2026-08-28 saw 613 transcripts and 345
-    /// directories both times, 5 such sessions, a gap of 355.8 s (5.93 min) at
-    /// 05:44 and 330.2 s at 05:58 — fourteen minutes moved the population by
-    /// nothing, a day moved it by four files. All
-    /// are under the hour, so nothing is
-    /// misattributed today — which is luck, not a property: a subagent that runs
-    /// longer than the window would drop the working life out of the survivors and
-    /// leave a rival copy that a resume had merely touched. So the stamp of a life
-    /// is the newest of its transcript and of the `*.jsonl` files at any depth
-    /// under its `subagents/`.
+    /// can stand still through a long stretch of real spending — subagent files
+    /// newer than their parent by up to 15 minutes are ordinary, and one that runs
+    /// longer than the window would drop the working life out of the survivors.
+    /// So the stamp of a life is the newest of its transcript and of the `*.jsonl`
+    /// files at any depth under its `subagents/`.
     ///
-    /// **Every level, and only the transcripts.** The walk used to be one flat
-    /// listing, and why is kept as history: counted 2026-08-28 over that pass's
-    /// 344 `subagents/` directories, 4483 `agent-*.jsonl`, one `agent-*.meta.json`
-    /// beside every one of them, and 7 nested `workflows/` directories holding
-    /// 1003 files between them, with **0** sessions in which a file under one of
-    /// those nested directories was newer than both the parent transcript and
-    /// every flat `*.jsonl`. That no longer describes the machine. Workflow agents
-    /// write their transcripts only under `subagents/workflows/wf_<id>/`
-    /// (`agent-*.jsonl` and a `journal.jsonl`), not in `subagents/` itself, and
-    /// the parent transcript stands still for as long as the workflow runs.
-    /// Counted 2026-10-10 21:19 over 1045 session transcripts and 576
-    /// `subagents/` directories: 17 hold a `workflows/`, 2 of them hold no flat
-    /// `*.jsonl` at all, and the 52 `wf_<id>/` directories hold 1237 `*.jsonl`
-    /// (1185 `agent-*.jsonl`, 52 `journal.jsonl`). One session had a nested file
-    /// newer than the parent and every flat `*.jsonl` — a running workflow,
-    /// whose `subagents/` holds `workflows/` and nothing else — by 92.6 s at
-    /// 21:16 and 299.3 s at 21:19: the gap grows with the workflow, and a flat
-    /// listing sees nothing of it. So the walk recurses, as
-    /// `ClaudeSessions.subagentEntries(in:)` already does for the same reason.
-    /// The doubling of stats the flat loop refused is still not paid: a `.json`
-    /// name is skipped without a stat, and only a name that is neither a `.jsonl`
-    /// nor a `.json` is asked whether it is a directory — one extra check and one
-    /// listing per directory, 17 `workflows/` and 52 `wf_<id>/` on the whole machine
-    /// that day.
+    /// **Every level, and only the transcripts.** Workflow agents write their
+    /// transcripts only under `subagents/workflows/wf_<id>/` (`agent-*.jsonl` and
+    /// a `journal.jsonl`), not in `subagents/` itself, and the parent transcript
+    /// stands still for as long as the workflow runs, so a flat listing sees
+    /// nothing of a running workflow. So the walk recurses, as
+    /// `ClaudeSessions.subagentEntries(in:)` does for the same reason. Every
+    /// `agent-*.jsonl` has an `agent-*.meta.json` beside it; a `.json` name is
+    /// skipped without a stat, and only a name that is neither a `.jsonl` nor a
+    /// `.json` is asked whether it is a directory — one extra check and one
+    /// listing per nested directory.
     ///
     /// **What that costs.** The subagents are consulted only when the parent
-    /// transcript is already stale, which is the whole difference: of the copies of
-    /// contested sessions the gateway actually reported, 27 of 31, then 26 of 29,
-    /// then 26 of 29 again on a third pass (2026-08-28), were fresh by their parent
-    /// alone over the week, and 1 of 2 over the hour all three times — so today's
-    /// week pass listed 3 directories holding 15 subagent files between them, and
-    /// the hour's listed 1 holding 47 files. The ceiling is the whole contested set
-    /// gone stale at once — all 47 copies (the same number as those files, by
-    /// coincidence), 42 of which have a `subagents/` directory holding 928 `*.jsonl`
-    /// between them and climbing — a floor with a direction, not a pair of bounds,
-    /// because the count only grows as the machine works, and a closed range written
-    /// here goes out of date the same day it is dated. `*.jsonl` is the quantity named on purpose: it is
-    /// what the loop stats, and the directories themselves hold twice as much —
-    /// 1882 entries at both readings of 2026-08-28, one `.meta.json` beside every
-    /// transcript and nothing else, which is the doubling the paragraph above
-    /// declines to pay for. A live table: 928…930 counted twice twenty minutes
-    /// apart, 936 earlier on 2026-08-28, 941 at 05:44 and again at 05:58 that day,
-    /// the 47 and the 42 reproducing exactly every time.
-    ///
-    /// **And that ceiling is a reading, not a constant: its condition is what else
-    /// the machine is doing.** 20 warm passes each, `swiftc -O`, with `getloadavg`
-    /// read at every pass, 10 cores. Quiet machine, two runs at load 6.1 and 6.9:
-    /// 4.74…7.21 ms and 4.68…6.73 ms, medians 5.39 and 5.21, of which the listings
-    /// are 3.52…5.55 ms and every stat together — 47 parents and 930 subagent
-    /// files — 1.13…1.62 ms. The same 20 passes
-    /// with the machine at work, load 44.4: 12.1…100.5 ms, median 23.5, listings
-    /// 8.8…79.1 and stats 3.1…38.6. That spread is the machine's and not the
-    /// algorithm's — which is exactly why the first range was written down here
-    /// without its condition and then failed to reproduce for a reviewer measuring
-    /// the next day. The actual path is 29 parent stats, 0.038…0.072 ms quiet and
-    /// 0.100…0.254 ms busy, plus those few listings. Once a minute, either way.
+    /// transcript is already stale, and most copies of contested sessions are
+    /// fresh by their parent alone, so a typical pass lists a handful of
+    /// directories. The ceiling is the whole contested set gone stale at once —
+    /// about 47 copies and some 930 subagent `*.jsonl`, a figure that only grows
+    /// as the machine works. Measured warm with `swiftc -O` on 10 cores, that
+    /// ceiling costs about 5 ms on a quiet machine (load ~6) and 12–100 ms with the
+    /// machine at work (load ~44): the spread is the machine's, not the
+    /// algorithm's. The actual path is a few dozen parent stats, well under a
+    /// millisecond, plus those few listings. Once a minute, either way.
     ///
     /// **Both ways of being wrong point the same way.** Resuming a session touches
     /// its transcript's mtime without appending a record, so a life that spent
     /// nothing can still look alive here — and that only ever keeps the entry
-    /// contested, which is the behaviour it had before this existed. A file that
-    /// cannot be stat'ed at all (a race with a write, a copy removed since the
-    /// listing) is kept for the same reason, and so is a subagent file that
-    /// vanishes between the listing and the stat. That rule used to live in this
-    /// comment and nowhere else, and is now held by
-    /// `testACopyThatCannotBeStatedKeepsItsClaimOnTheWindow` — **in both of the
-    /// places it is written**, which took two goes: the test held the parent
-    /// transcript's `else { return true }` and left the subagent file's, six lines
-    /// below, exactly as free as the whole rule had been. Measured all four ways
-    /// (2026-08-28, suite of 639): with the test deleted, flipping either failure
-    /// to `false` leaves 638 of 638 green; with it present, flipping the parent's
-    /// takes down 1 test case and 1 assertion, and flipping the subagent's takes
-    /// down the same case and a different assertion, also 1. (Recorded here before
-    /// as 2 assertions for the parent's half — the case's other assertions pass
-    /// under that mutation.) The window's start is
-    /// the one the pass *asked* for rather than the one the gateway echoed: the
-    /// echo is honest — zero drift on four windows, §2.9 — and if it ever stopped
-    /// being, an unclamped start is the direction that keeps entries ambiguous.
+    /// contested. A file that cannot be stat'ed at all (a race with a write, a
+    /// copy removed since the listing) is kept for the same reason, and so is a
+    /// subagent file that vanishes between the listing and the stat;
+    /// `testACopyThatCannotBeStatedKeepsItsClaimOnTheWindow` holds both places.
+    /// The window's start is the one the pass *asked* for rather than the one the
+    /// gateway echoed: the echo is honest (§2.9), and if it ever stopped being,
+    /// an unclamped start is the direction that keeps entries ambiguous.
     static func narrowToWindow(_ contested: [ContestedSpend],
                                since: Date,
                                projectsDirectory: URL = ClaudeSessions.projectsDirectory) -> [ContestedSpend] {
@@ -302,13 +226,8 @@ enum UsageIndex {
         // Same guard as `DataSource.worktrees`, for the same reason: a session
         // with no subagents has no such directory, and without this every stale
         // life would run a `contentsOfDirectory` that could only fail and build an
-        // `NSError` for it. Cheap today — only stale copies reach here, and 5 of
-        // the 47 contested copies have no `subagents/` (2026-08-28, the same live
-        // table as the ceiling above) — but this is the pattern the
-        // module already documents as required. Deleting it takes down 0 of 639
-        // tests, and that is what it should do: a missing directory already left
-        // `names` empty and fell through to `false`, so this is a cost guard and
-        // not a rule — the rule below it is the one held by a test.
+        // `NSError` for it. A cost guard, not a rule: a missing directory already
+        // leaves `names` empty and falls through to `false`.
         let subagents = base + "/subagents"
         guard fileStamp(atPath: subagents) != nil else { return false }
 

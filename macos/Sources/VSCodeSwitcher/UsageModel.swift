@@ -11,12 +11,11 @@ import Foundation
 
 /// Weights that fold the four token kinds into one *input-equivalent* number.
 ///
-/// Source: Anthropic's public price list, checked 2026-08-16. The ratios are
-/// model-independent, which is what makes a single set of weights honest rather
-/// than a guess about which model spent the tokens: output costs exactly 5x
-/// input on every current model (Opus $5/$25 per Mtok, Sonnet $3/$15, Haiku
-/// $1/$5), a cache write with the 5-minute TTL costs 1.25x input and a cache
-/// read costs 0.1x input.
+/// Source: Anthropic's public price list. The ratios are model-independent,
+/// which is what makes a single set of weights honest rather than a guess about
+/// which model spent the tokens: output costs exactly 5x input on every current
+/// model (Opus $5/$25 per Mtok, Sonnet $3/$15, Haiku $1/$5), a cache write with
+/// the 5-minute TTL costs 1.25x input and a cache read costs 0.1x input.
 ///
 /// One approximation is knowingly made: a cache write with the 1-hour TTL costs
 /// 2x input, not 1.25x. The gateway does not record the TTL, so every write is
@@ -158,9 +157,7 @@ struct GatewaySession: Sendable, Decodable, Equatable {
 struct SessionsReport: Sendable, Decodable {
     /// The window the gateway *applied*, which need not be the one that was
     /// asked for. This is the number to show, because the answer is the
-    /// authority on what it covers — not because of any clamping: "it clamps
-    /// `since` to the retention boundary (30 days)" stood here as fact and has
-    /// **never been observed**. Re-probed 2026-09-05 20:27Z, this endpoint
+    /// authority on what it covers. No clamping has been observed: the endpoint
     /// returns the `since` it was sent at 30 and at 90 days, and the history
     /// endpoint does the same at 30, 60 and 90 (§2.7).
     let since: Date
@@ -189,15 +186,12 @@ struct SessionsReport: Sendable, Decodable {
 ///
 /// Units are per cent, 0…100, and this window is spelled `five_hour` /
 /// `seven_day` with a `utilization` inside. `/gw/status` reports the same
-/// quantity as a **fraction**, and this app does call that endpoint now — for
-/// the operator switch and for nothing else. The two cannot be mixed up because
-/// no type on that path decodes a utilisation at all: `AccountSwitch` reads four
-/// fields and none of them is a reading (the warning is written out over
-/// `GatewayStatus`, where somebody minded to widen the type will meet it). The
-/// collision worth fearing is not here anyway but between `/gw/status` and the
-/// account history, which spell that quantity under one and the same key name in
-/// two different units (SPEC §2.7); this endpoint at least calls it something
-/// else.
+/// quantity as a **fraction**; this app calls that endpoint only for the
+/// operator switch, and no type on that path decodes a utilisation at all (the
+/// warning is written out over `GatewayStatus`). The collision worth fearing is
+/// between `/gw/status` and the account history, which spell that quantity under
+/// one and the same key name in two different units (SPEC §2.7); this endpoint
+/// at least calls it something else.
 ///
 /// `known: false` means the gateway has no reading, which is not the same as an
 /// untouched quota — so it becomes `nil` here rather than 0, and the flag itself
@@ -246,17 +240,15 @@ struct FleetWindow: Sendable, Decodable, Equatable {
 /// How fast tokens are being spent right now, as `GET /gw/usage` reports it.
 ///
 /// The gateway publishes this block per account and once for the whole set, and
-/// the two agree: measured 2026-08-24 on one body, the fleet's four rates are
-/// the sum of the accounts' to the last digit the body prints (input
-/// 120.483 + 0 + 98.047 = 218.530 against a fleet 218.53, and the same for the
-/// other three). Only the fleet's is decoded, because only the fleet's has a
-/// reader — a field nobody reads is a field that can only rot (§2.7).
+/// the two agree: the fleet's four rates are the sum of the accounts' to the last
+/// digit the body prints. Only the fleet's is decoded, because only the fleet's
+/// has a reader — a field nobody reads is a field that can only rot (§2.7).
 ///
 /// The four counters are already divided by the window, so nothing here
 /// multiplies by it. `windowSeconds` is decoded all the same and it is the one
 /// field that can refuse the reading: a rate averaged over no time at all is not
-/// a rate. It is never assumed either — the body says 300 today (2026-08-24) and
-/// this file holds no constant to disagree with it.
+/// a rate. It is never assumed either — the body says 300 and this file holds no
+/// constant to disagree with it.
 struct TokenRate: Sendable, Decodable, Equatable {
     /// The window the gateway averaged over, in seconds.
     let windowSeconds: Double?
@@ -316,13 +308,11 @@ struct TokenRate: Sendable, Decodable, Equatable {
         // one: both are a body this app cannot state.
         //
         // **Asked of the figure that leaves, not of the sum behind it.** The
-        // check stood on the per-second sum while the value returned was that
-        // sum times 3600, and the multiplication carries a body over the edge
-        // the check had just cleared: `"input_tokens": 1e306` is valid JSON and
-        // a finite rate, and 3600 times it is `+inf` — which the lead figure
-        // prints as `infB/h` and the ramp pins red. One statement over the
-        // product refuses everything the two statements over the sum refused,
-        // because 3600 moves neither the sign nor the finiteness the other way.
+        // multiplication can carry a body over the edge: `"input_tokens": 1e306`
+        // is valid JSON and a finite rate, and 3600 times it is `+inf` — which
+        // the lead figure would print as `infB/h` and the ramp pin red. 3600
+        // moves neither the sign nor the finiteness the other way, so checking
+        // the product refuses everything a check of the sum would.
         guard perHour.isFinite, perHour >= 0 else { return nil }
         return perHour
     }
@@ -422,7 +412,7 @@ struct HistoryPoint: Sendable, Decodable, Equatable {
 /// The body of `GET /gw/usage/{label}/history`.
 struct HistorySeries: Sendable, Decodable {
     let label: String
-    /// Applied window, clamped by the gateway exactly as in `SessionsReport`.
+    /// Applied window, as in `SessionsReport`.
     let since: Date
     /// The series was cut to `max_points`.
     let truncated: Bool
@@ -451,29 +441,19 @@ struct HistorySeries: Sendable, Decodable {
 ///
 /// The two halves are blamed separately, because they arrive separately:
 /// `/gw/usage` can answer while `/gw/sessions` times out. The half that is drawn
-/// with its own age beside it is timed separately too — a snapshot that carried
-/// one stamp for both said "updated just now" over figures an hour old.
+/// with its own age beside it is timed separately too, so one half's fresh stamp
+/// never dates the other's hour-old figures.
 ///
 /// Only that half. `/gw/sessions` has no stamp of its own here because nothing
 /// draws one: its figures are the spend on the panel's rows, and a row carries
-/// an indicator and a number with no age beside either. A stamp nobody reads is
-/// a field to keep in step with every future change of the merge rule, in
-/// exchange for nothing.
+/// an indicator and a number with no age beside either.
 ///
-/// Which is why no stamp of the *attempt* is ever drawn. One was, and the footer
-/// line that read it — "checked N ago", beside the age of the figures — is the
-/// line §4 removed: with both halves polled once a minute the two sentences moved
-/// together and said the same thing twice.
-///
-/// There is one attempt stamp left, `historiesCheckedAt`, and it is the exception
-/// that proves the rule: nothing draws it, its single reader is the schedule that
-/// decides whether this pass fetches the histories, and it exists precisely so
-/// that `historiesFetchedAt` may go on meaning "when the figure arrived" while
-/// the retry moves without it. That is the same shape as the popover's own
-/// `UsageHistoryModel.checkedAt` — a live reader, no line on screen — and the
-/// same distinction: a stamp that moves on a failed attempt must never be the one
-/// an age is written from, which is exactly how the footer came to call hour-old
-/// figures fresh.
+/// No stamp of the *attempt* is ever drawn (§4). The one attempt stamp,
+/// `historiesCheckedAt`, has a single reader — the schedule that decides whether
+/// this pass fetches the histories — and exists so that `historiesFetchedAt` may
+/// go on meaning "when the figure arrived" while the retry moves without it. That
+/// is the same shape as the popover's own `UsageHistoryModel.checkedAt`: a stamp
+/// that moves on a failed attempt must never be the one an age is written from.
 struct UsageSnapshot: Sendable {
     /// When `/gw/usage` last answered, or `nil` if it never has. The account
     /// figures, the fleet mean and the accounts list are all as of this moment.
@@ -524,12 +504,11 @@ struct UsageSnapshot: Sendable {
     /// it is one takes a sentence.
     ///
     /// The gateway's per-session aggregates are windowed: a session's block covers
-    /// what it spent inside the window asked for and nothing earlier. That was not
-    /// assumed, it was measured — a live session reads 5.3M over 15 minutes, 25.5M
-    /// over an hour and 177.3M over eight hours, and 115 of 115 sessions grow
-    /// monotonically as the window widens (2026-08-27; §2.9). So the tokens
-    /// reported for a window one hour long *are* tokens per hour, and nothing
-    /// here or downstream divides by anything.
+    /// what it spent inside the window asked for and nothing earlier — a live
+    /// session reads 5.3M over 15 minutes, 25.5M over an hour and 177.3M over
+    /// eight hours, and every session grows monotonically as the window widens
+    /// (§2.9). So the tokens reported for a window one hour long *are* tokens per
+    /// hour, and nothing here or downstream divides by anything.
     ///
     /// Same shape and same key as `tokensBySlug`, folded by the same `fold`
     /// against the same slug map, so it makes exactly the same claim: the spend of
@@ -553,15 +532,11 @@ struct UsageSnapshot: Sendable {
     /// The same bucket for the hour, and it is here for the reason
     /// `hourlyContested` is: the hour has to be able to say what it lost.
     ///
-    /// The week's has always been kept and printed; the hour's was folded and
-    /// thrown away, so spend by a session with no local transcript disappeared
-    /// from the hour with no line anywhere to notice it by — and it had a live
-    /// figure to discard. `--dump` on this machine printed `no local session 1h:
-    /// 1 sessions, 179k ie` on 2026-08-27 and `0 sessions, -` at 02:37 the next
-    /// night, the week's line holding the same agent node (`71fbe714-…`, 7.52M then
-    /// 7.50M ie) throughout. A bucket that fills and empties with the sliding hour
-    /// is exactly the one that must not be conjured into existence only once it is
-    /// non-empty: that is the state in which nobody can see it.
+    /// Spend by a session with no local transcript would otherwise disappear from
+    /// the hour with no line anywhere to notice it by. A bucket that fills and
+    /// empties with the sliding hour is exactly the one that must not be conjured
+    /// into existence only once it is non-empty: that is the state in which
+    /// nobody can see it.
     var hourlyUnmatched: TokenCounts = .zero
     var hourlyUnmatchedSessions: Int = 0
     /// How fast the fleet is burning its quota against how fast it refills
@@ -572,11 +547,7 @@ struct UsageSnapshot: Sendable {
     /// asked and found no figure: not one account had a long enough history that
     /// left its ceiling and whose falls the schedule could explain (see the
     /// popover's headline, which has to draw all of those the same).
-    ///
-    /// It replaced an allowance in tokens an hour, which replaced a week's
-    /// estimated load. Both of those needed the same two requests this one needs
-    /// one of, and it kept their stamps and their blame — the half of the pass is
-    /// the same half.
+    /// popover's headline, which has to draw all of those the same).
     var fleetBurn: FleetCapacity.FleetBurn?
     /// When `fleetBurn` last *arrived*, which is not when it was last asked for.
     /// Its own stamp because it is on its own schedule: the histories are fetched
@@ -594,13 +565,12 @@ struct UsageSnapshot: Sendable {
     ///
     /// Two stamps rather than one, because the two questions have opposite
     /// answers on a failure. "When may we ask again" has to move — a half that
-    /// did not stamp its failed attempt fell back to the once-a-minute poll, and
-    /// one persistently failing account takes the histories from 2.9 MB/h to
-    /// some 19 MB/h, which is the cost the ten-minute cadence exists to avoid
-    /// (`UsageStore.poll` carries the measurement). "How old is the figure" must
-    /// not move, or a frozen number passes for a fresh one — which is the defect
-    /// that took the app's last attempt stamp away, and here it would keep a
-    /// figure past the ceiling that is supposed to drop it.
+    /// did not stamp its failed attempt would fall back to the once-a-minute
+    /// poll, and one persistently failing account would take the histories from
+    /// 2.9 MB/h to some 19 MB/h, which is the cost the ten-minute cadence exists
+    /// to avoid (`UsageStore.poll` carries the measurement). "How old is the
+    /// figure" must not move, or a frozen number passes for a fresh one and is
+    /// kept past the ceiling that is supposed to drop it.
     var historiesCheckedAt: Date?
     /// Why `/gw/usage/<label>/history` did not answer on the last pass that
     /// tried. Same rule as the other two halves: the previous `fleetBurn` stays
@@ -651,10 +621,6 @@ struct UsageSnapshot: Sendable {
     /// The fleet's weekly quota as a whole per cent, rounded in one place so that
     /// two readers cannot disagree about it.
     ///
-    /// Rounded here rather than at each drawing, so that two readers cannot round
-    /// it two ways. There is one reader now: the menu bar drew this figure until
-    /// 2026-08-24 and draws the spend ratio instead (§4).
-    ///
     /// Freshness is deliberately not part of it: whether an old reading may
     /// still be shown is the surface's question, and the popover's headline
     /// answers it by keeping the figure and dating it in the footer.
@@ -665,8 +631,7 @@ struct UsageSnapshot: Sendable {
     /// Every reason as one line, for the places that print a reason rather than
     /// act on one. Deliberately not called `failure`: the readers that *decide*
     /// something — the menu bar picture above all — must name the half they mean,
-    /// and the old single field let a failure of `/gw/sessions` blank out a
-    /// perfectly fresh quota figure.
+    /// so that a failure of `/gw/sessions` cannot blank out a fresh quota figure.
     ///
     /// All four requests, because its one reader is `--dump`, and a half that
     /// fails without saying so there is a half nobody can debug: the histories'
@@ -704,9 +669,8 @@ struct UsageSnapshot: Sendable {
 /// reaches the flag through `is_disabled` in there), the authorisation state, the
 /// quota cool-down, the token-refresh backoff and the weekly window. So an
 /// account that merely filled a window reads `eligible: false` exactly as a
-/// switched-off one does. Measured rather than reasoned: `main` at `util_5h: 1.0`
-/// in the `status` fixture (`GET /gw/status`, 2026-09-06 00:08:15Z) against the
-/// `max_util_5h = 0.99` of that same body's own `config` block, giving
+/// switched-off one does: `main` at `util_5h: 1.0` in the `status` fixture
+/// against the `max_util_5h = 0.99` of that same body's own `config` block gives
 /// `eligible: false` beside `disabled: false`. Both are fractions and both are
 /// that endpoint's — the account history spells the same quantity as a percentage
 /// (`util_5h: 26.0` in the `history` fixture), and comparing across the two is how
@@ -743,14 +707,14 @@ struct AccountSwitch: Sendable, Decodable, Equatable {
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         label = try container.decode(String.self, forKey: .label)
-        // Required, exactly as `label` is, and the asymmetry used to run the other
-        // way: `disabled` is the one field on this path that draws a *control*,
-        // and the lenient reading of a missing one — "nobody switched it off" —
-        // ticks and arms every checkbox in the fleet on the strength of a key that
-        // was not there. That is §2.4's confidently-wrong reading with a click
-        // attached. The day the gateway renames the field, refusing the body takes
-        // the whole rotation to "nobody said", which is a state this app knows how
-        // to draw and a state nobody can act on by mistake.
+        // Required, exactly as `label` is: `disabled` is the one field on this
+        // path that draws a *control*, and the lenient reading of a missing one —
+        // "nobody switched it off" — would tick and arm every checkbox in the
+        // fleet on the strength of a key that was not there (§2.4's
+        // confidently-wrong reading with a click attached). If the gateway renames
+        // the field, refusing the body takes the whole rotation to "nobody said",
+        // which is a state this app knows how to draw and a state nobody can act
+        // on by mistake.
         disabled = try container.decode(Bool.self, forKey: .disabled)
         disabledUntil = try container.decodeIfPresent(Double.self, forKey: .disabledUntil)
             .map { Date(timeIntervalSince1970: $0) }
@@ -768,11 +732,10 @@ struct AccountSwitch: Sendable, Decodable, Equatable {
 /// and their `reset_*` stamps are all there, written 0…1 — while the account
 /// history, `GET /gw/usage/<label>/history`, writes the same quantity under
 /// **those same two key names** as 0…100 and says so in a `units` field
-/// (SPEC §2.7): one probe on 2026-09-06 at 05:34:17Z had `main` at `util_5h:
-/// 0.43` here and `util_5h: 43.0` in the last point of its history. One name, two
-/// units, and nothing about either body to make the mix-up visible. (`/gw/usage`
-/// is not the trap: it has no `util_5h` key at all, spelling the reading
-/// `five_hour.utilization`, per cent.) This type reads none of them,
+/// (SPEC §2.7): `util_5h: 0.43` here is `util_5h: 43.0` in the history. One
+/// name, two units, and nothing about either body to make the mix-up visible.
+/// (`/gw/usage` is not the trap: it has no `util_5h` key at all, spelling the
+/// reading `five_hour.utilization`, per cent.) This type reads none of them,
 /// deliberately: everything downstream of here is in per cent, so a fraction
 /// decoded "while we are reading the body anyway" would understate by a hundred
 /// times with nothing on screen to look wrong. Quota readings come from
@@ -820,34 +783,25 @@ struct GatewayStatus: Sendable, Decodable {
         init(from decoder: any Decoder) throws {
             account = try AccountSwitch(from: decoder)
             let container = try decoder.container(keyedBy: CodingKeys.self)
-            // Strict, exactly as `disabled` is, and the leniency it replaces was
-            // written when this flag could only ever take the fleet line *down*:
-            // "an account the gateway said nothing about is not one this app may
-            // count as somewhere to route" left an error that was a warning
-            // standing, not a switch lighting up. That reading died in the round
-            // that made the count the verdict — `applyRoutable` raises the line on
-            // a zero count as well now — so a missing key paints the loudest thing
-            // on this surface out of a hole in the body.
-            //
+            // Strict, exactly as `disabled` is: `applyRoutable` raises the fleet
+            // line on a zero count, so reading a missing key as `false` would
+            // paint the loudest thing on this surface out of a hole in the body.
             // Refusing it buys the honest state this app already has: a pass that
             // will not decode sets `rotationFailure` and leaves every switch inert,
-            // which says "this app cannot say" where `?? false` said "there is
-            // nowhere left to route".
+            // which says "this app cannot say" where `?? false` would say "there
+            // is nowhere left to route".
             eligible = try container.decode(Bool.self, forKey: .eligible)
         }
     }
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Strict, and the leniency it replaces was the same confidently-wrong
-        // reading `disabled` was cured of one round earlier — one level up. A
-        // missing `accounts` is not a gateway with no accounts: `?? []` wrote the
-        // absence of an answer as an answer, which left every checkbox drawn from
-        // an empty dictionary rather than from `nil` (inert either way, but with
-        // not one word anywhere saying why), and left `routableAccounts` at zero —
-        // a count that now raises the warning about a fleet with nowhere to route.
-        // An empty array is still an answer and still decodes; it is the hole that
-        // is refused.
+        // Strict: a missing `accounts` is not a gateway with no accounts. `?? []`
+        // would write the absence of an answer as an answer — every checkbox
+        // drawn from an empty dictionary rather than from `nil`, with not one word
+        // anywhere saying why, and `routableAccounts` at zero, a count that raises
+        // the warning about a fleet with nowhere to route. An empty array is still
+        // an answer and still decodes; it is the hole that is refused.
         let entries = try container.decode([Entry].self, forKey: .accounts)
         accounts = entries.map(\.account)
         routableAccounts = entries.filter(\.eligible).count
@@ -916,8 +870,7 @@ struct SwitchResult: Sendable, Decodable, Equatable {
     /// `testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent` holds
     /// the **pairing** over every switch answer in the suite: those bodies are
     /// hand-built (no live `disable` was ever captured), and the check is what
-    /// catches a fixture the gateway could not have sent — an `eligible_accounts`
-    /// this branch has already had to correct twice.
+    /// catches a fixture the gateway could not have sent.
     /// `testASwitchAnswersWithTheNewStateAndWhatItCostTheFleet` holds the
     /// **wording**, character for character, and is what reddens if
     /// `_switch_payload`'s constant is ever rewritten — a change this app has to

@@ -30,12 +30,10 @@ enum UsageError: Error, Equatable, Sendable, CustomStringConvertible {
 /// carries a credential, and the two POSTs are as bare as the GETs: no body at
 /// all, the whole of the request being its path.
 ///
-/// **It was read-only until the account switches arrived**, and they live here
-/// rather than in a writing client of their own for the plain reason that there
-/// is one gateway: a second type would duplicate the transport seam, the status
-/// check, `UsageError` and `describe` in order to send two requests that differ
-/// from the four beside them by a verb. What that would buy is a type name
-/// saying "this one writes", and this file says it in one line instead.
+/// The writes live here rather than in a client of their own because there is
+/// one gateway: a second type would duplicate the transport seam, the status
+/// check, `UsageError` and `describe` to send two requests that differ from the
+/// four beside them by a verb.
 ///
 /// The transport is injected with a default argument, the same seam
 /// `DataSource` uses for its assembly: the tests drive real bodies and real
@@ -80,10 +78,10 @@ struct UsageClient: Sendable {
     /// points — that filter deletes exactly the lone below-ceiling reading that
     /// keeps a pinned account inside the measurement.
     ///
-    /// So this endpoint is on the poll after all, but deliberately not on the
-    /// poll's own minute: one round over the live fleet is 481 KB (measured
-    /// 2026-08-18, three accounts over a 48 h window), which is 2.9 MB/h at ten
-    /// minutes and ten times that at one, against about 3 KB for `/gw/usage`.
+    /// So this endpoint is on the poll, but deliberately not on the poll's own
+    /// minute: one round over the live fleet is about 481 KB (three accounts over
+    /// a 48 h window), which is 2.9 MB/h at ten minutes and ten times that at
+    /// one, against about 3 KB for `/gw/usage`.
     func history(label: String, since: Date) async throws -> HistorySeries {
         try await fetch(pathSegments: ["gw", "usage", label, "history"], since: since)
     }
@@ -91,23 +89,20 @@ struct UsageClient: Sendable {
     /// Which accounts an operator has switched out of the rotation.
     ///
     /// Two callers, and neither of them is on the poll's own minute. The answer
-    /// is 6.2 to 6.4 KB (measured 2026-09-06 and 2026-09-09), which once a minute
-    /// is some 370 KB an hour; and what each caller wants out of it is a state an
-    /// operator sets by hand, so the minute buys neither of them anything. The
-    /// one moment freshness does matter — just after a click — is served by a
-    /// pass asked for on the spot rather than by the cadence.
+    /// is 6.2 to 6.4 KB, which once a minute is some 370 KB an hour; and what
+    /// each caller wants out of it is a state an operator sets by hand, so the
+    /// minute buys neither of them anything. The one moment freshness does
+    /// matter — just after a click — is served by a pass asked for on the spot
+    /// rather than by the cadence.
     ///
     /// `UsageHistoryModel.fetchRotation` asks it once per pass while the popover
     /// is open — on `open`, on a change of period or of the account list, on the
     /// popover's own `UsageHistoryModel.refreshSeconds` timer, and on the passes
-    /// `setAccount` asks for. `UsageStore.poll` asks it too, since 2026-09-09,
-    /// for who is out of the rotation: **on the histories' schedule and not on the
-    /// poll's own minute**, which is exactly `history`'s arrangement — the same
+    /// `setAccount` asks for. `UsageStore.poll` asks it for who is out of the
+    /// rotation **on the histories' schedule and not on the poll's own minute**,
+    /// which is exactly `history`'s arrangement — the same
     /// `UsageStore.historyIntervalSeconds`, in the same half, 6.4 KB against the
-    /// 130 to 187 KB of the histories beside it. ("Never by `UsageStore.poll` …
-    /// on no poll at all … its only caller is `UsageHistoryModel.fetchRotation`"
-    /// stood here through that change and is withdrawn; this file was not touched
-    /// by the round that added the second caller.)
+    /// 130 to 187 KB of the histories beside it.
     func status() async throws -> GatewayStatus {
         try await fetch(pathSegments: ["gw", "status"], since: nil)
     }

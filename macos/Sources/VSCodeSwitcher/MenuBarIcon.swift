@@ -6,69 +6,33 @@ import SwiftUI
 /// `FleetCapacity.burnWindowHours` against the points the week refills over the
 /// same hours — and that ratio as a number under it.
 ///
-/// Stacked rather than side by side, and that is the user's call: side by side
-/// the item was 57 points wide and took a visible slice of a menu bar it shares
-/// with a dozen others. The number stays — it is the reading; only its place
-/// changed, which costs two points of the font size and buys thirty points of
-/// menu bar.
-///
-/// No app glyph in front of it. There was one, and the user threw it out on
-/// sight: an icon identifying the app says nothing a menu bar full of icons
-/// does not already say, while the bar and the number are the whole reason
-/// this item exists. Its 15 points went back to the menu bar.
+/// Stacked rather than side by side, at the user's request: side by side the
+/// item was 57 points wide. No app glyph in front of it — the bar and the
+/// number are the whole reason this item exists. One bar, not two: the weekly
+/// quota, the five-hour windows and the per-account figures are one click away.
 ///
 /// Drawn rather than composed out of views, because a status item takes an
 /// `NSImage` and nothing else.
 ///
-/// **The picture is not a template, and owning the colour is the point.** A
-/// template picture is tinted by the system for whatever the menu bar currently
-/// is (light, dark, "reduce transparency", a coloured desktop showing through),
-/// and a colour of our own would be fighting that every time — which is why the
-/// colour used to live in the popover alone, where there is room to read it.
-/// The owner gave that up deliberately: the bar's fill says how hard the week is
-/// being pushed, and a glance at the menu bar without opening anything is the
-/// whole reason for having the figure at all.
+/// **The picture is not a template, and owning the colour is the point**: the
+/// bar's fill says how hard the week is being pushed, readable at a glance
+/// without opening anything. The colour is one continuous ramp — cold blue,
+/// cyan, green where the fleet is burning exactly what its week refills, then
+/// yellow, orange, red — written once in `UsagePopoverView.ratioColor` and used
+/// by this picture and the popover both.
 ///
-/// **What it says is a ramp and not two states.** Green while the week holds and
-/// red once it does not was the first rule here, and it made a fleet at 40% look
-/// like a fleet at 95%; the colour is now one continuous scale — cold blue, cyan,
-/// green where the fleet is burning exactly what its week refills, then yellow,
-/// orange, red — written once in `UsagePopoverView.ratioColor` and used by this
-/// picture and the popover both.
+/// **The number, the fill and the colour are one quantity** — the burn ratio.
+/// A reader takes the shade for a reading of the number it is painted on, so
+/// they may not carry different figures (the weekly quota and the ratio pull
+/// apart on any working afternoon). It is the same rule the popover's lead
+/// follows (`UsagePopoverView.headlineFigureColor`); the quota is the supporting
+/// reading in the popover.
 ///
-/// **The number, the fill and the colour are one quantity, and that is this
-/// round.** They were two: the number and the fill's length were the weekly
-/// quota — the mean already spent, 0…100 — while the colour came off the spend
-/// ratio, which crosses 100 in ordinary use. Two readings in a picture 27 points
-/// wide, and a reader takes the shade for a reading of the number it is painted
-/// on: the owner saw 54% of the week spent wearing the colour of a rate running
-/// at 197% of what the week sustains, and asked for the ratio instead. The pair
-/// pulls apart on any working afternoon — `--dump` on this machine two hours
-/// apart, 2026-08-24: 55% of the week against a ratio of 54%, then 56% against
-/// 145%. The quota barely moved and the verdict changed sides. It is the same correction the popover's lead took one
-/// level up (`UsagePopoverView.headlineFigureColor`), and the quota did not
-/// vanish with it — it is the supporting reading in the popover, one click away.
-///
-/// Before that the colour was a third quantity again — a week's demand,
-/// estimated here rather than measured — and it could disagree with the
-/// popover's own reading about the verdict and not only the shade: measured
-/// 2026-08-24 the estimate answered 92.3% while the figures in the popover
-/// answered 174.9%, so this picture would have been calm over a fleet the
-/// popover called red. One reading is now painted in one place, and printed
-/// there too.
-///
-/// **Past the refill rate the frame and the number are coloured as well**, which
-/// survives the change but not the argument it used to stand on. That argument
-/// was about a fill that might not be there to colour: the length was the mean,
-/// and a mean near zero is what the fleet looks like just after its windows turn
-/// over — exactly when a 300% burn is worth knowing — so the colour had to go on
-/// what is always drawn. With the length now the ratio itself that case is gone
-/// by construction: the fill is clamped at the refill rate, so anything the
-/// boundary calls a warning has a *full* bar under it.
-///
-/// **What they buy instead is the crossing, and only a rendering can say so.**
-/// The mean colour of each part, measured 2026-08-24 at scale 4 on the light
-/// plate (the dark one is the same shape, in its own colours):
+/// **Past the refill rate the frame and the number are coloured as well.** The
+/// fill is clamped at the refill rate, so past it the length is constant but
+/// the fill goes on carrying the whole ramp, and the frame and the number take
+/// the fill's own colour. Measured mean colour of each part at scale 4 on the
+/// light plate:
 ///
 ///                 fill                 frame                number
 ///      99.999%    0.091 0.455 0.145    ink                  ink
@@ -76,44 +40,23 @@ import SwiftUI
 ///     105.000%    0.161 0.451 0.087    0.161 0.451 0.087    0.161 0.451 0.087
 ///     900.000%    0.745 0.173 0.141    0.745 0.173 0.142    0.745 0.173 0.141
 ///
-/// The sentence that used to stand here — "105% and 900% are the same full
-/// capsule, and the figure printed under it is the whole of what separates
-/// them" — is refuted by both halves of that table. They are the same *length*
-/// and not the same capsule: past the clamp the fill goes on carrying the whole
-/// ramp, so one of the two is olive-green and the other is red, and the colour
-/// separates them before any figure is read. And past the anchor the frame and
-/// the number take the fill's own colour to within a thousandth in every
-/// channel — the three means are over different pixel counts, so the last digit
-/// need not agree — which is to say they repeat what the fill has already said.
+/// What only the frame and number can say is the first row: at 99.999% they
+/// are ink, at 100.000% they are the ramp. The fill cannot mark that step — a
+/// thousandth below the anchor it is already full and already that green. That
+/// is why the boundary is a step about whether to paint and not about what to
+/// paint with (`warningColor`). Inside the refill rate the frame and the number
+/// stay `labelColor` — the loud state has to be the one that means something.
 ///
-/// What only they can say is the first row: at 99.999% they are ink, at
-/// 100.000% they are the ramp. The fill cannot mark that step, because a
-/// thousandth below the anchor it is already full *and* already that same
-/// green — the crossing has no width in the length and none in the colour
-/// either, and the frame and the number are the only parts of the picture that
-/// change across it. Which is also why the boundary is a step about whether to
-/// paint and not about what to paint with (`warningColor`).
-/// Inside the refill rate the frame and the number stay `labelColor` — the loud
-/// state has to be the one that means something, and a picture that changed
-/// colour on every reading would be saying nothing with all of them.
-///
-/// The price of leaving `isTemplate` behind is the work the system used to do:
-/// nothing that stands for *ink* may be drawn in a fixed colour, because black
-/// ink vanishes on a dark menu bar. `labelColor` is dynamic and everything is
-/// drawn inside `performAsCurrentDrawingAppearance`, and since the appearance is
-/// now an input the picture has to be redrawn when *it* changes and not only when
-/// the figure does — which is `AppDelegate.observeAppearance`. The ramp's own
-/// colours are fixed rather than dynamic, and that is not the same hazard: they
-/// are a reading and not ink, and they are the figures this project's system
-/// greens and reds already resolve to on both menu bar appearances. What the
-/// appearance does decide about them is how light or dark they have to be
-/// drawn: each is held to a contrast floor against the plate it will sit on
-/// (`UsagePopoverView.contrastFloor(on:)`, and the plate is `background(for:)`),
-/// which is a second reason the picture is redrawn when the appearance moves.
-///
-/// One bar, not two: the user asked for one reading in the menu bar and nothing
-/// else. The weekly quota, the five-hour windows and the per-account figures are
-/// one click away.
+/// Leaving `isTemplate` means doing the system's work: nothing that stands for
+/// *ink* may be drawn in a fixed colour, because black ink vanishes on a dark
+/// menu bar. `labelColor` is dynamic and everything is drawn inside
+/// `performAsCurrentDrawingAppearance`, so the picture has to be redrawn when
+/// the appearance changes and not only when the figure does
+/// (`AppDelegate.observeAppearance`). The ramp's own colours are fixed — they
+/// are a reading, not ink — but each is held to a contrast floor against the
+/// plate it will sit on (`UsagePopoverView.contrastFloor(on:)`, and the plate
+/// is `background(for:)`), which is a second reason to redraw when the
+/// appearance moves.
 @MainActor
 enum MenuBarIcon {
 
@@ -139,23 +82,11 @@ enum MenuBarIcon {
     /// number is set flush with its right edge, which keeps the `%` in one place
     /// as the digits in front of it come and go.
     ///
-    /// **What "the widest string" is came out of a measurement and not out of the
-    /// old constant.** It used to be `100%`, and that was a fact about the quota:
-    /// the figure had a top and the top was three digits. A ratio has none — the
-    /// burn is a difference of percentage points over a span the gateway's own
-    /// stamps set, so a short enough span makes it arbitrarily large — and a fixed
-    /// column with an unbounded figure in it is not a layout question but a
-    /// correctness one. Measured 2026-08-24 in this font: a digit advances 5.9729 pt and `%`
-    /// 8.8588, so `999%` is 26.7776 pt and `1000%` is 32.7505. Drawn flush right
-    /// in a 27 pt picture the four-digit string starts at −5.75 and the leading
-    /// digit is clipped off by the image bounds — and what lands is, pixel for
-    /// pixel, the drawing of `000%` (1947 inked pixels either way against 2085
-    /// for `999%`, measured at scale 4), which is the loudest reading this item
-    /// has turning into the calmest one it can draw.
-    /// So the figure is capped instead (`ceilingPercent`), and this column is
-    /// measured on the string that cap produces — `999%`, the same 27 pt the
-    /// picture has always been, because three digits and a `%` are what it always
-    /// held. The item does not grow, and nothing to its left moves.
+    /// The ratio has no top of its own, and in this font `1000%` is 32.75 pt:
+    /// drawn flush right in a 27 pt picture its leading digit is clipped and it
+    /// reads as `000%`, the loudest reading turned into the calmest. So the
+    /// figure is capped (`ceilingPercent`), and this column is measured on the
+    /// string that cap produces — `999%`, 27 pt.
     static let numberColumnWidth: CGFloat = ceil(ceilingLabel.size().width)
 
     /// The whole picture, always this wide: the number's column, with the bar
@@ -176,15 +107,12 @@ enum MenuBarIcon {
 
     /// Where the bar sits: on top, across the whole width.
     ///
-    /// Measured down from the top edge rather than up from the number, and the
-    /// difference is what happens the day the system font lays the number's
-    /// widest string out one point taller. Stacked from the bottom (`numberHeight + gap`) the bar's top
-    /// would be at 19 in a picture 18 points tall, and the row clipped off is
-    /// bar *fill* — the reading itself, of which `insetBy(dy: 1.5)` leaves only
-    /// 3 points. From the top edge the extra point comes out of the gap instead,
-    /// which is the one part of the stack that is there to be spent. At today's
-    /// figures the two are the same rect (`18 - 6 == 11 + 1`), and
-    /// `contentHeight == height` is the test that notices when they stop being.
+    /// Measured down from the top edge rather than up from the number: if the
+    /// system font ever lays the number out a point taller, the extra point
+    /// comes out of the gap instead of clipping bar *fill*, of which
+    /// `insetBy(dy: 1.5)` leaves only 3 points. At today's figures the two are
+    /// the same rect (`18 - 6 == 11 + 1`), and `contentHeight == height` is the
+    /// test that notices when they stop being.
     static var barRect: NSRect {
         NSRect(x: 0, y: height - barHeight, width: width, height: barHeight)
     }
@@ -219,26 +147,14 @@ enum MenuBarIcon {
     /// pixel on a 2x display — narrower than that the shape cannot cover a device
     /// pixel and what lands on screen is its own antialiasing.
     ///
-    /// Where the line goes is measured and not reasoned, off the bitmap at
-    /// scale 4 with the threshold taken off (re-measured 2026-08-24, the fill's
-    /// own coloured ink inside the bar): 0.00 pt² at a reading of 0, **0.19 pt²
-    /// at 1%** — a shape 0.24 pt across — and **1.69 pt² at 2%**, at 0.48 pt.
-    /// Ninefold between two neighbouring figures is where a smudge becomes a
-    /// mark, and the threshold goes in that gap; for scale, 3% is 1.94 pt² and
-    /// 50% is 34.50. One figure is refused by it and no more, which is the point
-    /// — a wider threshold would be throwing away readings that can be seen.
-    ///
-    /// **The small figures moved at that re-measurement and the change of what
-    /// fills the bar is not why.** The 2026-08-18 table read 0.25, 1.88 and 2.12
-    /// where this one reads 0.19, 1.69 and 1.94; the widths are identical (0.24,
-    /// 0.48, 0.72, 12.00 pt) and 50% reproduces exactly. What differs is the
-    /// colour the ink was counted in: the old small readings were taken with the
-    /// bar red, which is what a 300% *load* painted over a 1% mean, and a 1%
-    /// ratio is at the cold end of the ramp — how much of a blue edge survives a
-    /// chroma filter is not how much of a red one does. Numbers belong to their
-    /// measurement whole, fixture and filter included; carrying them across a
-    /// change in any of it is how "re-measured, same figures" gets written down
-    /// without being true.
+    /// Measured off the bitmap at scale 4, the fill's coloured ink inside the
+    /// bar: 0.00 pt² at a reading of 0, **0.19 pt² at 1%** — a shape 0.24 pt
+    /// across — and **1.69 pt² at 2%**, at 0.48 pt. Ninefold between two
+    /// neighbouring figures is where a smudge becomes a mark, and the threshold
+    /// goes in that gap; for scale, 3% is 1.94 pt² and 50% is 34.50. One figure
+    /// is refused by it and no more. The ink figures depend on the colour (a 1%
+    /// ratio is at the blue end of the ramp), so they are only valid with the
+    /// fixture and filter they were taken with.
     ///
     /// On the width and not on the figure, because the width is what is seen: the
     /// bar is 24 pt wide inside its frame today, so a percentage point is 0.24 pt
@@ -248,10 +164,9 @@ enum MenuBarIcon {
 
     // MARK: - Labels
 
-    /// Two points smaller than the row beside it used to be, and that is what
-    /// makes the stack fit: three digits and a `%` at 11 pt are 33 points wide,
-    /// at 9 pt they are 27, and the width of the picture is the width of that
-    /// string.
+    /// 9 pt is what makes the stack fit: three digits and a `%` at 11 pt are
+    /// 33 points wide, at 9 pt they are 27, and the width of the picture is the
+    /// width of that string.
     static let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
 
     /// `labelColor` and not `black`: it is a dynamic colour, so the very same
@@ -273,11 +188,9 @@ enum MenuBarIcon {
     /// `numberColumnWidth`), and the alternative to capping it is the leading
     /// digit falling off the left edge, which turns 1000% into `000%`.
     ///
-    /// Three digits, because that is what the column already held: `999%` is
-    /// 26.7776 pt against the 26.7776 of the `100%` it replaces (2026-08-24), so
-    /// the cap is free and a fourth digit would cost 5.9729 pt of menu bar — 22%
-    /// of this item — permanently, for the sake of a state whose reading is
-    /// "further over than this picture can say" either way.
+    /// Three digits: a fourth would cost 5.97 pt of menu bar — 22% of this item —
+    /// permanently, for a state whose reading is "further over than this picture
+    /// can say" either way.
     ///
     /// **What is lost at the cap is stated rather than hidden**: at 1000% and at
     /// any figure above it the picture prints `999%`, which is a floor and not
@@ -303,29 +216,10 @@ enum MenuBarIcon {
     /// The label for a ratio: the figure rounded, clamped into the drawn scale,
     /// and laid out on demand.
     ///
-    /// **Laid out rather than looked up, and that is what the ratio costs.** A
-    /// table of 101 strings stood here while the number was the quota, which has
-    /// exactly 101 values; a ratio picks one out of a continuum and a table of a
-    /// thousand strings per colour is not a table.
-    ///
-    /// What the swap costs is the difference between two *drawing* paths, and
-    /// both of them size the string: the old one indexed the table and then
-    /// called `size()` on what came back, exactly as `draw` still does.
-    /// Re-measured 2026-08-24 on this machine (Apple M4, `-O`, 200 000
-    /// iterations, this font and these attributes, three runs):
-    ///
-    ///     table lookup, no size()            0.006 µs
-    ///     table lookup + size()  (old path)  1.97 µs
-    ///     build + size           (new path)  3.16 µs
-    ///     build only                         0.84 µs
-    ///     building the 101-string table     84 µs
-    ///
-    /// So the ratio costs about 1.2 µs a redraw and not the thirtyfold the first
-    /// row suggests — 0.006 µs is the price of indexing an array and nothing
-    /// else, and setting it against the new path compares a lookup with a
-    /// layout. The conclusion is unchanged either way: the picture is redrawn
-    /// when its reading changes and the poll lands once a minute. It is the
-    /// comparison that had to be between the two paths that existed.
+    /// Laid out rather than looked up: a ratio picks one value out of a
+    /// continuum, so there is no table to index. Building and sizing the string
+    /// costs about 3 µs (Apple M4, `-O`), and the picture is redrawn only when
+    /// its reading changes.
     ///
     /// The clamp is done in `Double` and before the conversion, which is not
     /// tidiness: `Int(1e300)` traps. Where such a number comes from is a span the
@@ -355,35 +249,20 @@ enum MenuBarIcon {
     /// is, and why it has an age in it, is spelled out over
     /// `UsagePopoverView.headlineRatio`.
     ///
-    /// **This is now the whole of the picture and not only its colour, and the
-    /// state where it answers `nil` is where the two surfaces part.** The popover
-    /// falls back to the weekly quota as its lead; this one draws the empty
-    /// dashed bar and no number. It is the rule this file has always applied to
-    /// a figure it cannot qualify, one qualification along: the popover can put a
-    /// caption under a figure saying which quantity it is, and there is no room
-    /// for one in 27 points. A `54%` that is sometimes the ratio and sometimes
-    /// the quota, with nothing on screen to say which, is read as whatever the
-    /// item usually shows — and the wrong reading of the two is the calm one,
-    /// since a week 92% spent would be wearing the colour of a fleet burning 92%
-    /// of what its week refills. The quota is one click away, captioned, in the
-    /// popover.
+    /// **Where it answers `nil` the two surfaces part.** The popover falls back
+    /// to the weekly quota as its lead, with a caption saying which quantity it
+    /// is; this one draws the empty dashed bar and no number, because there is no
+    /// room for a caption in 27 points. A `54%` that is sometimes the ratio and
+    /// sometimes the quota would be read as whatever the item usually shows —
+    /// and the wrong reading of the two is the calm one.
     ///
-    /// The age half is not ceremony up here, and the argument that used to stand
-    /// in this comment — "the figure is an average over two days, refreshed
-    /// every ten minutes on purpose, and ten minutes cannot move it enough to
-    /// matter" — assumed the refreshing. (Both its premises are dead now: since
-    /// 2026-09-09 the figure is a mean over eight hours, not two days, and it
-    /// changes across 45 of a day's 144 ten-minute intervals, by 11 points at the
-    /// median of those — `UsageStore.historyIntervalSeconds` carries the sweep.
-    /// Neither death
-    /// weakens what follows, which is about the case where nothing refreshes at
-    /// all.) A `/gw/usage` outage skips the whole
-    /// histories block (`UsageStore.poll`), so nothing is refreshed at all, no
-    /// `historiesFailure` is set, and a guard on the failure alone left this
-    /// picture with a red frame nothing could clear over a figure last confirmed
-    /// hours ago. Up here there is no room to write "as of a while ago", so the
-    /// reading has to go rather than get a caveat — and since the reading is now
-    /// the whole picture, what goes is the whole picture.
+    /// The age half matters up here: a `/gw/usage` outage skips the whole
+    /// histories block (`UsageStore.poll`), so nothing is refreshed and no
+    /// `historiesFailure` is set, and a guard on the failure alone would leave
+    /// a red frame nothing could clear over a figure last confirmed hours ago.
+    /// Up here there is no room to write "as of a while ago", so the reading has
+    /// to go rather than get a caveat — and since the reading is the whole
+    /// picture, what goes is the whole picture.
     static func ratio(for snapshot: UsageSnapshot,
                       now: Date = Date()) -> UsagePopoverView.HeadlineRatio? {
         UsagePopoverView.headlineRatio(for: snapshot, now: now)
@@ -417,34 +296,25 @@ enum MenuBarIcon {
     /// that changed colour on every reading would be saying nothing with all of
     /// them. So the boundary stays where `HeadlineRatio.isOverRefill` puts it,
     /// which is the ramp's own green anchor, and the colour on the far side of it
-    /// comes out of the ramp, where before it was one red the moment it was
-    /// anything.
+    /// comes out of the ramp.
     ///
-    /// What the far side actually looks like is a rendering and not a name.
-    /// Measured off the drawn picture 2026-08-18
+    /// What the far side looks like, measured off the drawn picture
     /// (`testTheWarningIsNeverQuieterThanTheCalmStateItReplaces` prints the whole
     /// table), on a **light** menu bar: green at capacity,
     /// `rgb(0.091, 0.455, 0.146)`; a darkened yellow with a green cast at 115%,
-    /// `rgb(0.381, 0.416, 0.079)` at hue 66.2 degrees — "yellow" was the word here
-    /// and nobody had rendered it; a darkened amber at 120%,
+    /// `rgb(0.381, 0.416, 0.079)` at hue 66.2 degrees; a darkened amber at 120%,
     /// `rgb(0.479, 0.384, 0.091)` at 45.2 degrees; red at 130%,
     /// `rgb(0.745, 0.173, 0.142)`. On a **dark** menu bar the middle of the band
     /// is the ramp as written — 115% is its own yellow, `rgb(0.827, 0.902, 0.173)`
     /// — and only the hot end is moved, the floor lifting the red at 130% to
     /// `rgb(1.000, 0.506, 0.478)`, which is red with white in it rather than a
     /// darker red. Which way a plate moves a colour is the plate's own answer
-    /// (`UsagePopoverView.legible(_:on:)`).
-    ///
-    /// Orange itself — hue 30 degrees — arrives at 123.61% on both plates, because
-    /// that is where the line interpolated between green and red crosses it. No
-    /// plate moves that and the old ceiling never moved it either: what the
-    /// ceiling moved was how dark 115% was drawn, turning a yellow into an olive.
+    /// (`UsagePopoverView.legible(_:on:)`). Orange itself — hue 30 degrees —
+    /// arrives at 123.61% on both plates, where the line interpolated between
+    /// green and red crosses it.
     ///
     /// Named once because the frame and the number read the same boundary and
-    /// may not come apart. It used to be three: the description read it too,
-    /// through `showsRatio`, back when the ratio reached the picture as colour
-    /// and nothing else. The description no longer has to ask — the number it
-    /// names is the number on screen, whatever colour that number is drawn in.
+    /// may not come apart.
     private static func warningColor(for ratio: UsagePopoverView.HeadlineRatio?,
                                      on background: UsagePopoverView.RampBackground) -> NSColor? {
         guard let ratio, ratio.isOverRefill else { return nil }
@@ -457,8 +327,7 @@ enum MenuBarIcon {
     /// button's own, and the application's only while there is no button to ask.
     ///
     /// They are two different appearances, and the menu bar follows the button's
-    /// one. Measured 2026-08-18 on this machine, a status item made in a scratch
-    /// process:
+    /// one. Measured on a status item made in a scratch process:
     ///
     ///     system NSApp.effectiveAppearance : NSAppearanceNameDarkAqua
     ///     status button effectiveAppearance: NSAppearanceNameVibrantDark
@@ -467,15 +336,13 @@ enum MenuBarIcon {
     ///     status button effectiveAppearance: NSAppearanceNameVibrantDark
     ///
     /// The second half is the failure in miniature: `labelColor` resolves to
-    /// black in `aqua` (measured `r=0 g=0 b=0`), the picture is rasterised
-    /// through `lockFocus` and holds it, and black ink lands on a dark menu bar
-    /// — the very thing the note at the top of this file promises to prevent.
-    /// In life the two come apart because the menu bar follows the *wallpaper*:
-    /// a light system theme over a dark desktop picture gives a dark menu bar
-    /// while `NSApp.effectiveAppearance` says `aqua`. And they differ in their
-    /// colours even when they agree in kind — `labelColor` is alpha 0.898 in
-    /// `NSAppearanceNameVibrantDark` against 0.847 in `NSAppearanceNameDarkAqua`
-    /// (same measurement).
+    /// black in `aqua`, the picture is rasterised through `lockFocus` and holds
+    /// it, and black ink lands on a dark menu bar. In life the two come apart
+    /// because the menu bar follows the *wallpaper*: a light system theme over a
+    /// dark desktop picture gives a dark menu bar while
+    /// `NSApp.effectiveAppearance` says `aqua`. And they differ in their colours
+    /// even when they agree in kind — `labelColor` is alpha 0.898 in
+    /// `NSAppearanceNameVibrantDark` against 0.847 in `NSAppearanceNameDarkAqua`.
     ///
     /// `NSView?` rather than the button's own type, because the rule is about
     /// having an appearance of one's own and a test can then hold it with any
@@ -533,22 +400,16 @@ enum MenuBarIcon {
             draw(ratio, on: background(for: appearance))
         }
         image.unlockFocus()
-        // Not a template any more: the fill's colour is the reading (see the
+        // Not a template: the fill's colour is the reading (see the
         // note at the top of this file), and the system would tint it away.
         image.isTemplate = false
         image.accessibilityDescription = describe(ratio)
         return image
     }
 
-    /// What the picture says, for a reader who cannot see it.
-    ///
-    /// **It names the ratio, and it no longer has to ask whether the picture is
-    /// carrying it.** While the ratio reached the drawing as colour and nothing
-    /// else, this had to agree with the drawing about a fill too narrow to see
-    /// and about a mean of nought — `showsRatio` was that agreement, and it is
-    /// gone with the quota: the ratio is now the number, and the number is drawn
-    /// whenever there is a ratio at all. One `nil` check answers for the whole
-    /// picture.
+    /// What the picture says, for a reader who cannot see it. It names the
+    /// ratio — the same number the picture draws — so one `nil` check answers
+    /// for the whole picture.
     ///
     /// Two things are said here that the drawing cannot say, and both are the
     /// same fact about a description having no width. `≥` — the ratio is a floor
@@ -592,14 +453,12 @@ enum MenuBarIcon {
         //
         // **And the warning is drawn at full strength while the calm frame keeps
         // its softening.** The 0.55 belongs to a shape that stands for a reading;
-        // a colour that *is* the warning cannot afford it. Measured 2026-08-18 on
-        // the light plate, the same colours at 0.55 come out at 2.11 to 2.34 to 1
-        // against 4.49 opaque — under the 3 to 1 that graphics need at every point
-        // on the ramp — and darkening cannot rescue them: composited at 0.55 over
-        // a plate of 0.883, even black reaches only 4.44, which is under the floor
-        // the number holds this colour to. Softened, the frame would have to be a
-        // second, darker colour, and one reading may not be two colours in a
-        // picture 27 points wide.
+        // a colour that *is* the warning cannot afford it. On the light plate the
+        // same colours at 0.55 come out at 2.11 to 2.34 to 1 against 4.49 opaque —
+        // under the 3 to 1 that graphics need at every point on the ramp — and
+        // darkening cannot rescue them: composited at 0.55 over a plate of 0.883,
+        // even black reaches only 4.44, which is under the floor the number holds
+        // this colour to.
         //
         // The opacity is read from the ramp's own file rather than written here,
         // because what this line draws *is* the calm state the floor is derived

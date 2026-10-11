@@ -4,8 +4,8 @@
 #   scripts/install-hooks.sh              install / refresh
 #   scripts/install-hooks.sh --uninstall  remove only our entries
 #
-# The user's ~/.claude/settings.json is shared with other tools (it already
-# carries two SessionStart blocks), so the script never rewrites it wholesale:
+# The user's ~/.claude/settings.json is shared with other tools, so the script
+# never rewrites it wholesale:
 # it removes exactly the entries whose command points at this repository's
 # hooks directory, adds the current ones back, validates the result and only
 # then replaces the file. A timestamped backup is taken first.
@@ -122,14 +122,11 @@ jq \
 	--argjson additions "$ADDITIONS" \
 	'
 	# Drop every hook entry whose command points at our hooks directory, then
-	# drop groups and event keys that became empty. Foreign entries (such as
-	# the two existing SessionStart blocks) are left untouched.
-	#
+	# drop groups and event keys that became empty. Foreign entries are left
+	# untouched.
 	#
 	# A group whose "hooks" is missing or is not an array is foreign data we do
 	# not understand: it is passed through untouched and never dropped.
-	# Iterating that null used to abort the whole run with a jq message that
-	# pointed nowhere near the real problem.
 	def clean_group:
 		if (.hooks | type) == "array"
 		then .hooks |= map(select(((.command // "") | contains($marker)) | not))

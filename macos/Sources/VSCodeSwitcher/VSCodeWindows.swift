@@ -40,9 +40,8 @@ enum VSCodeWindows {
     /// It has to go on the *system-wide* element: "Pass the system-wide
     /// accessibility object if you want to set the timeout globally for this
     /// process. Setting the timeout on another accessibility object sets it
-    /// only for that object." Setting it on the application element — which is
-    /// what this used to do — left every window element, where all the
-    /// expensive reads actually happen, on the system default.
+    /// only for that object." On the application element it would leave every
+    /// window element, where the expensive reads happen, on the system default.
     private static let timeoutInstalled: Bool =
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), messagingTimeout) == .success
 
@@ -108,10 +107,9 @@ enum VSCodeWindows {
     /// `_AXUIElementGetWindow` — private SPI of HIServices that maps an AX
     /// window element to its `CGWindowID`.
     ///
-    /// That number is the only identifier of a window that survives a raise: the
-    /// index into `kAXWindowsAttribute` is the z-order, so clicking one row
-    /// renumbered every row. Resolved with `dlsym` rather than declared with
-    /// `@_silgen_name` on purpose — a macOS that drops the symbol then makes
+    /// That number is the only identifier of a window that survives a raise (the
+    /// index into `kAXWindowsAttribute` is the z-order). Resolved with `dlsym`
+    /// rather than `@_silgen_name` so a macOS that drops the symbol makes
     /// `windowNumber(of:)` return `nil` instead of failing to launch the app.
     private static let getWindowFunction: GetWindowFunction? = {
         guard let symbol = dlsym(dlopen(nil, RTLD_LAZY), "_AXUIElementGetWindow") else { return nil }
@@ -183,10 +181,9 @@ enum VSCodeWindows {
     /// long as `messagingTimeout`. macOS switches Spaces on its own when the
     /// window lives on another desktop.
     ///
-    /// The window is found by its `windowNumber`, which nothing reshuffles.
-    /// Matching on the title used to pick a stranger whenever the title had
-    /// changed under us — it carries the active chat topic — and the z-order
-    /// index it fell back to had been renumbered by the previous click.
+    /// The window is found by its `windowNumber`, which nothing reshuffles; the
+    /// title changes (it carries the active chat topic) and the z-order index is
+    /// renumbered by every raise.
     @discardableResult
     static func raise(_ window: VSCodeWindowInfo) -> Bool {
         guard let windows = windowElements(pid: window.pid),

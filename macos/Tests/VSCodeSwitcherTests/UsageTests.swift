@@ -1,9 +1,8 @@
 import XCTest
 @testable import VSCodeSwitcher
 
-/// Bodies copied verbatim out of live answers from the gateway on 2026-08-16.
-/// Nothing here is tidied up: the point of a fixture is to be the thing that
-/// actually arrives, keys nobody decodes and all.
+/// Bodies copied verbatim from live gateway answers, unknown keys included:
+/// a fixture is the thing that actually arrives.
 enum UsageFixtures {
     static let sessions = """
     {
@@ -57,10 +56,9 @@ enum UsageFixtures {
                   "acc3": {"seven_day": {"utilization": 40.0, "known": true}}}}
     """
 
-    /// The same endpoint on 2026-08-24, when it had grown the `tokens` block the
-    /// headline's lead figure is read from. Copied verbatim, one account and the
-    /// fleet, so the two can be checked against each other: the fleet's four
-    /// rates are the sum of the accounts'.
+    /// The same endpoint with the `tokens` block the headline's lead figure is read
+    /// from, verbatim: one account and the fleet, so the fleet's four rates can be
+    /// checked as the sum of the accounts'.
     static let usageWithTokens = """
     {"fleet": {"accounts": 3, "eligible": 2,
       "tokens": {"window_seconds": 300,
@@ -103,75 +101,23 @@ enum UsageFixtures {
      "points": [{"ts": 1786700123, "util_5h": null, "util_7d": 99.0}]}
     """
 
-    /// `GET /gw/status` at 2026-09-06 03:08:15 local (`now: 1788653295`, which is
-    /// 00:08:15Z), cut down and not otherwise touched.
+    /// `GET /gw/status` (`now: 1788653295`), cut down: of the eight top-level blocks
+    /// only `accounts`, `now` and `uptime_seconds` are kept, and each row carries only
+    /// fields recorded at that moment (hence rows of different widths). The proxy host
+    /// name is removed from `acc2`'s row.
     ///
-    /// Cut down means two things and nothing else: five of the body's eight
-    /// top-level blocks are gone, and a row carries only fields that were written
-    /// down for it **at that moment** — the four this app reads, plus whichever
-    /// neighbours were recorded. Nothing here is invented, and where a value for
-    /// that moment is not known the field is absent rather than filled in. Hence
-    /// the rows being of three different widths: `acc2` was taken whole, `acc3`
-    /// kept its switch and lost its quota block, and `main` was written down as
-    /// the four fields plus `util_5h`.
+    /// The utilisations are fractions (`acc2` 0.72, `main` 1.0), while
+    /// `/gw/usage/<label>/history` writes the same key `util_5h` as per cent (72.0,
+    /// 100.0): one name, two units (§2.7). Nothing decodes them, and a test below says so.
     ///
-    /// The five are named rather than counted, so the next reader can check the
-    /// claim without a live gateway: `config`, `counters`, `counters_total`,
-    /// `session_bindings` and `statistics` are cut, and `accounts`, `now` and
-    /// `uptime_seconds` are kept. (Live `GET /gw/status`, re-read 2026-09-06.)
-    /// The proxy's host name went too — internal host names do not go in this
-    /// repository — and it is not one of the five: `proxy` is a field of the
-    /// **account row**, alongside `proxy_auth`, and it was dropped out of `acc2`,
-    /// the one row taken whole.
+    /// `main` is the reason this fixture exists: switched on (`disabled: false`) yet not
+    /// routable (`eligible: false`), because the gateway folds a quota cool-down
+    /// (`util_5h: 1.0` against `max_util_5h = 0.99`) into `eligible` only. It is the one
+    /// row where the two flags disagree, which is what tells a reader of one from a
+    /// reader of the other. A live gateway may not reproduce this row; anyone re-taking
+    /// the body has to keep a row of this shape.
     ///
-    /// The utilisations that are here are here deliberately, at their live values,
-    /// as the trap of §2.7 written into the fixture: `acc2` is at 0.72 of its
-    /// five-hour quota and `main` at 1.0 of its own, and `GET
-    /// /gw/usage/<label>/history` writes that same quantity, under that same key
-    /// name `util_5h`, as `72.0` and `100.0`. One name, two units — that is the
-    /// dangerous half of §2.7, and it is why these values sit in the fixture rather
-    /// than being rounded off. Nothing decodes them, and a test below is what says
-    /// so. `acc2`'s pair is **bracketed by** the gateway's own
-    /// history, not measured in it: the series carries no point at `1788653295`
-    /// at all, and the readings 41 s before and 19 s after (`1788653254` and
-    /// `1788653314`) both say 72.0 and 3.0. What makes that bracket worth trusting
-    /// rather than a coincidence of two neighbours is that the series had moved 70 s
-    /// earlier — the poll at `1788653225` reads 71.0 and **4.0** — so a pair that
-    /// holds on both sides of the moment is the series standing still across it and
-    /// not a series that never moves. (Re-read from
-    /// `/gw/usage/acc2/history?since=1788600000` on 2026-09-06.)
-    ///
-    /// `acc3`'s deadline and reason belong to this moment as much as the rest: the
-    /// switch was thrown at 2026-09-05 19:58:55 local for 22 h, seven hours before
-    /// this probe, so `1788706735` (2026-09-06 17:58:55 local) was already what the
-    /// gateway was sending, and both fields were read back unchanged from a live
-    /// `GET /gw/status` at 05:39:36 the same morning. Its `util_*`, `reset_*` and
-    /// `unified_status` were not recorded at 03:08:15 and so are not written here.
-    ///
-    /// Three accounts, and **`main` is the reason this fixture exists**: switched
-    /// on (`disabled: false`) and still not routable (`eligible: false`), because
-    /// the gateway folds a quota cool-down into the second flag and not the first —
-    /// `util_5h: 1.0` against its `max_util_5h = 0.99` is that cool-down, sitting
-    /// in the row. Both of those are fractions and both are this endpoint's: the
-    /// ceiling comes from the same body's `config` block, one of the five cut away
-    /// above, and it read 0.99 again live on 2026-09-06. Nothing here may be read
-    /// against a percentage — the account history spells the same quantity that way
-    /// (`util_5h: 26.0` in the `history` fixture), and mixing the two is a
-    /// hundredfold slip written down as a measurement. It is the only shape in
-    /// which the two flags disagree, and a
-    /// fixture where they never disagree cannot tell a reader of one from a reader
-    /// of the other — which is the whole of what the checkbox on this path gets
-    /// right.
-    ///
-    /// **It may not reproduce against a live gateway.** A five-hour window empties
-    /// by itself, and later the same day `main` was the one account the gateway
-    /// was routing to; a fleet reading `disabled == !eligible` in every row is the
-    /// ordinary case and this one is the occasional one. Anybody re-taking this
-    /// body has to keep a row of this shape whether the gateway is offering one
-    /// that day or not.
-    ///
-    /// The fourth state — switched off with no deadline, the only kind this app's
-    /// own switch can produce — is in `switchAnswer` below.
+    /// The fourth state, switched off with no deadline, is in `switchAnswer` below.
     static let status = """
     {"uptime_seconds": 176312.4, "now": 1788653295,
      "accounts": [
@@ -194,16 +140,9 @@ enum UsageFixtures {
     {"accounts": [{"label": "acc2", "eligible": true, "disabled_until": null}]}
     """
 
-    /// And the mirror of it: every switch reported, and nothing said about routing.
-    ///
-    /// The hole this one has is the other field of the same row, and the reading
-    /// that used to be given it — a missing `eligible` is an account there is no
-    /// route to — was safe only while the count could take the fleet line *down*
-    /// and never put it up. Since the count became the verdict it is the loudest
-    /// statement this surface makes, and `?? false` would have this body assert it
-    /// out of a hole: two accounts nobody switched off, both reported, and an
-    /// orange line saying every client request is now a 429. Refused whole instead
-    /// — see the tests, one here and one on the model.
+    /// The mirror of it: every switch reported, nothing said about routing. Refused
+    /// whole, because `?? false` would turn the hole into an orange "every request is
+    /// a 429" line over accounts nobody switched off.
     static let statusWithoutTheRoutingFlag = """
     {"accounts": [
        {"label": "acc2", "disabled": false, "disabled_until": null, "disabled_reason": ""},
@@ -211,19 +150,11 @@ enum UsageFixtures {
      ]}
     """
 
-    /// And the same endpoint for a fleet with nowhere left to route, in which
-    /// **nobody has switched anything off**.
+    /// A fleet with nowhere left to route in which nobody switched anything off.
     ///
-    /// Built rather than captured, and deliberately the shape that costs the
-    /// warning its precision: `eligible` is `is_eligible`, which folds the
-    /// five-hour window in beside the operator's switch, so a fleet whose windows
-    /// have all filled reads exactly like this — every `disabled: false`, every
-    /// `eligible: false`, and every client request answered 429 all the same. Not
-    /// a hypothetical shape: `main` was already half of it at 03:08:15 local on
-    /// 2026-09-06 (00:08:15Z), sitting at `util_5h: 1.0` in `status` above against
-    /// the `max_util_5h = 0.99` of that same body's `config` block — two fractions
-    /// of one endpoint, never a fraction against the history's percentage. This is
-    /// that row with the others joining it.
+    /// Built, not captured: `eligible` is `is_eligible`, which folds the five-hour
+    /// window in beside the switch, so a fleet whose windows have all filled reads
+    /// exactly like this. `main` in `status` above is one such row.
     static let statusWithNowhereToRoute = """
     {"now": 1788653295,
      "accounts": [
@@ -234,28 +165,13 @@ enum UsageFixtures {
      ]}
     """
 
-    /// The fleet `switchAnswer` and `switchAnswerWithWarning` were derived against,
-    /// as `/gw/status` would have reported it: `acc3` still parked from the evening
-    /// before, `acc2` and `main` both routable.
+    /// The fleet `switchAnswer` and `switchAnswerWithWarning` were derived against:
+    /// `acc3` parked, `acc2` and `main` both routable. Taking `acc2` out leaves 1 and
+    /// taking `main` out after it leaves 0, the pair the ordering tests rely on (in
+    /// `status` `main` is in cool-down, so that scene is unreachable there).
     ///
-    /// It is not `status`, and that difference is what makes the scene reachable at
-    /// all. There `main` is still inside its five-hour cool-down, so `acc2` is the
-    /// one account the gateway routes to and a `disable acc2` would answer
-    /// `eligible_accounts: 0` with the sentence rather than `switchAnswer`'s 1.
-    /// Taking `acc2` out of *this* fleet leaves 1, and taking `main` out after it
-    /// leaves 0 — which is the pair of answers the ordering tests are built on, and
-    /// a scene the gateway could not have produced proves nothing about the
-    /// gateway's answers.
-    ///
-    /// **Cut like `status` above**, and the cut is worth stating: the fields this
-    /// app reads, plus the utilisations that make a routing flag legible where the
-    /// switch alone does not explain it. `acc3` needs none — it is `eligible: false`
-    /// because somebody switched it off — while the other two are routable at
-    /// utilisations well under the `max_util_5h = 0.99` of that endpoint's own
-    /// `config` block. A live body is not cut this way: it writes `util_5h` and
-    /// `util_7d` on **every** row unconditionally, switched-off accounts included
-    /// (live `GET /gw/status`, 2026-09-06 — `acc2` sat at `disabled: true` with
-    /// `util_5h: 0.0` beside `util_7d: 0.13`).
+    /// Cut like `status`: the fields this app reads plus utilisations where a routing
+    /// flag needs explaining. A live body writes `util_5h` and `util_7d` on every row.
     static let statusWithTwoRoutableAccounts = """
     {"now": 1788653295,
      "accounts": [
@@ -268,35 +184,13 @@ enum UsageFixtures {
      ]}
     """
 
-    /// The same fleet once both of its routable accounts have been switched off:
-    /// what `/gw/status` answers a pass asked after `switchAnswer` and
-    /// `switchAnswerWithWarning` have both landed.
+    /// The same fleet once both routable accounts have been switched off: what a pass
+    /// asked after `switchAnswer` and `switchAnswerWithWarning` have landed gets back.
     ///
-    /// A pass reads the accounts table the two POSTs have just written to, so the
-    /// body it gets back carries their switches; `/gw/status` has no memory of what
-    /// the fleet looked like before them. Serving `statusWithTwoRoutableAccounts` to
-    /// a pass asked at that moment is a body the gateway could not have sent, and a
-    /// test reading a switch off such a pass is reading the fixture rather than the
-    /// gateway.
-    ///
-    /// **The two switched rows are exactly what this app's own click produces.**
-    /// `disableAccount` sends no body, `_parse_disable_body` reads a missing one as
-    /// `DISABLED_NO_DEADLINE` with an empty reason, and the account row publishes
-    /// `disabled_until` as the raw column only while it is positive — so `null`
-    /// beside `disabled: true` and nothing to say in `disabled_reason` (`claude_gw`
-    /// at `30dfb1b`, the symbols being `Gateway._parse_disable_body` and the account
-    /// row of `Gateway._status_payload`). That is `switchAnswer`'s own shape, and
-    /// deliberately: the two endpoints answer in one shape.
-    ///
-    /// **And the count agrees with the answers that got it here.** All three rows
-    /// are `eligible: false`, so this body counts 0 routable — which is what
-    /// `switchAnswerWithWarning` said when `main` went out, the gateway computing
-    /// both with the same `is_eligible`. `acc3` carries its parking over from
-    /// `statusWithTwoRoutableAccounts` untouched.
-    ///
-    /// Cut like the bodies above, and with no utilisation in it at all: every
-    /// `eligible: false` here is explained by that row's own switch, which is the
-    /// same reason `statusWithASwitchThrownElsewhere` below carries none.
+    /// The two switched rows are what this app's own click produces: no request body,
+    /// so `disabled_until: null` and an empty `disabled_reason`. All three rows are
+    /// `eligible: false`, so the count is 0, matching `switchAnswerWithWarning`. No
+    /// utilisation: every `eligible: false` is explained by its own switch.
     static let statusWithBothRoutableAccountsSwitchedOff = """
     {"now": 1788653295,
      "accounts": [
@@ -309,32 +203,12 @@ enum UsageFixtures {
      ]}
     """
 
-    /// `/gw/status` for the sitting after `status`'s 22-hour parking of `acc3` has
-    /// run out by itself — the gateway putting an account back with nobody
-    /// clicking anything, which is the state `disabled_until` exists to describe.
+    /// `/gw/status` after `acc3`'s 22-hour parking has run out by itself.
     ///
-    /// **So `acc3` keeps both fields it was parked with**, and blanking them was
-    /// this fixture claiming a body the gateway does not send. `/gw/status`
-    /// publishes `disabled_until` raw — `a.disabled_until if a.disabled_until > 0
-    /// else None` — and `disabled_reason` raw beside it, with its own comment saying
-    /// `null` is reserved for the two cases where there is no deadline to publish
-    /// (`claude_gw` at `30dfb1b`, `src/gateway.py:1702`–`:1703`, the symbol being
-    /// `Gateway._status_payload`'s account row and the numbers hints). Only
-    /// `disabled` is a verdict — `is_disabled()`, which an expired deadline makes
-    /// false — and the reason is cleared by nothing but an explicit
-    /// `handle_account_enable` (`:2145`). An expiry nobody clicked therefore reads
-    /// `disabled: false` with the past stamp and the operator's words still sitting
-    /// there, and those two are the only record that the parking ever happened.
-    /// Nothing on screen moves either way, `switchNote` drawing only under
-    /// `state.disabled`; what moves is what the fixture is allowed to prove.
-    ///
-    /// `main` carries its cool-down over from `status` (`util_5h: 1.0` against the
-    /// same endpoint's `max_util_5h = 0.99`), so this body keeps a row saying why a
-    /// `disabled: false` account can still be `eligible: false`. Cut the same way as
-    /// the bodies above and with the same caveat: a live body carries `util_5h` and
-    /// `util_7d` on every row, whatever its switch says. `now` is cut too — this
-    /// type reads no such key — but the sitting is any moment past `acc3`'s
-    /// `1788706735`, which is what makes the deadline a past one.
+    /// `acc3` keeps `disabled_until` (now in the past) and `disabled_reason`: the
+    /// gateway publishes both raw, and only an explicit enable clears the reason; only
+    /// `disabled` is a verdict. `main` keeps its cool-down from `status`. `now` is cut
+    /// (this type does not read it); the sitting is any moment past `1788706735`.
     static let statusWithTheParkingExpired = """
     {"accounts": [
       {"label": "acc2", "eligible": true, "disabled": false,
@@ -348,18 +222,11 @@ enum UsageFixtures {
     """
 
     /// `/gw/status` reporting switches this app did not throw: `acc2` taken out
-    /// from somewhere else, `acc3` put back.
+    /// elsewhere, `acc3` put back.
     ///
-    /// The answer a *second* pass gives where the first got `status`, so that a pass
-    /// which left a row alone and a pass which rewrote it with what was already
-    /// there draw two different pictures. Both rows moved, and in opposite
-    /// directions, because a test of "this label is held and that one is not" needs
-    /// each to be able to fail on its own.
-    ///
-    /// Two accounts rather than three: the third would say nothing here that these
-    /// two do not. Cut like the bodies above, with the same caveat about a live
-    /// one — and no utilisation in it at all, both flags here being explained by
-    /// their own switch.
+    /// The answer a second pass gives where the first got `status`. Both rows moved, in
+    /// opposite directions, so "this label is held and that one is not" can fail on
+    /// either side. No utilisation: both flags are explained by their own switch.
     static let statusWithASwitchThrownElsewhere = """
     {"accounts": [
       {"label": "acc2", "eligible": false, "disabled": true,
@@ -369,44 +236,22 @@ enum UsageFixtures {
     ]}
     """
 
-    /// `POST /gw/accounts/acc2/disable`. **Built to the contract, not captured
-    /// from the wire** — no live `disable` was ever recorded for this repository,
-    /// and the field list was checked against a live `enable`, which answers with
-    /// the same shape.
+    /// `POST /gw/accounts/acc2/disable`, built to the contract rather than captured
+    /// (the field list matches a live `enable`, which answers in the same shape).
     ///
-    /// So the numbers have to satisfy the contract rather than merely look
-    /// plausible, and this one did not: it said `eligible_accounts: 2` for a fleet
-    /// of three in which `acc3` was already switched off the evening before, so
-    /// taking `acc2` out could not leave two. One left, and `main` is the one —
-    /// **at a moment later in the same day than `status` above**, which is the half
-    /// of the derivation that has to be said out loud. At 00:08:15Z `main` was in
-    /// its five-hour cool-down (`eligible: false`, and
-    /// `testAnAccountTheGatewayWillNotRouteToIsStillTheOperatorsToSwitch` reads the
-    /// fleet's count as 1, that one being `acc2`), so this very switch would then
-    /// have answered `eligible_accounts: 0` **with** the sentence. The window
-    /// emptied by itself — `status`'s own note says `main` was later the one account
-    /// the gateway was routing to — and this body belongs to that later fleet: `acc3`
-    /// still off, `main` back, `acc2` being taken out here.
-    ///
-    /// The body is flat: the account's new state and the fleet's cost stand side
-    /// by side, with no object around either. And the pairing is the contract's,
-    /// not this fixture's taste — `Gateway._switch_payload` writes the warning as
+    /// The count must satisfy the contract: `acc3` is already off, so taking `acc2` out
+    /// leaves `main`, at a later moment than `status` when `main`'s window has emptied.
+    /// The body is flat, and `_switch_payload` writes `warning` as
     /// `None if eligible else "claude-gw: …"`, so a count above zero comes with
-    /// `warning: null` and never with a sentence.
+    /// `warning: null`.
     static let switchAnswer = """
     {"label":"acc2","disabled":true,"disabled_until":null,"disabled_reason":"",\
     "eligible":false,"eligible_accounts":1,"warning":null}
     """
 
-    /// And the same endpoint taking the last usable account out: the other half
-    /// of that pairing, `eligible_accounts: 0` with the sentence.
-    ///
-    /// Built the same way, with one part of it exact: the sentence is the
-    /// gateway's own, taken from `Gateway._switch_payload` (`src/gateway.py:1986`)
-    /// and compared character for character — 127 of them — with the two source
-    /// lines it is joined from. It is quoted in production code as
-    /// `UsageHistoryModel.noRouteWarning`'s reason for existing, so it is the one
-    /// string here nobody may tidy.
+    /// The same endpoint taking the last usable account out: `eligible_accounts: 0`
+    /// with the sentence. The sentence is the gateway's own, character for character,
+    /// from `Gateway._switch_payload`; do not tidy it.
     static let switchAnswerWithWarning = """
     {"label":"main","disabled":true,"disabled_until":null,"disabled_reason":"",\
     "eligible":false,"eligible_accounts":0,\
@@ -414,35 +259,20 @@ enum UsageFixtures {
     will be answered with 429 until one of them comes back"}
     """
 
-    /// And a switch answer with the fleet's cost missing from it, which is refused.
-    ///
-    /// `warning: null` is kept, because it is the half that is legitimate: the
-    /// gateway sends `null` there on purpose whenever it has somewhere left to
-    /// route, so a hole in the count sits beside a value that looks like the quiet
-    /// case. `?? 0` read exactly this body as "the fleet has nowhere left to go"
-    /// and raised the orange line in the second the operator is looking at the
-    /// checkbox they just pressed — a false alarm at the worst moment there is for
-    /// one. There is nothing to blame the fleet for here; there is a click to
-    /// blame, which is what the model does with it.
+    /// A switch answer with the count missing, which is refused. `warning: null` is
+    /// kept because the gateway sends it legitimately, so `?? 0` would raise a false
+    /// orange line right after the operator's click.
     static let switchAnswerWithoutTheCount = """
     {"label":"acc2","disabled":true,"disabled_until":null,"disabled_reason":"",\
     "eligible":false,"warning":null}
     """
 
-    /// A switch answer that **contradicts the request**: a `disable` answered with
-    /// `disabled: false`.
-    ///
-    /// Written for `testTheStateAfterASwitchIsTheOneTheGatewaySentBack`, which is
-    /// where the reason for a body of this shape is; it lives here with the other
-    /// switch answers so that
-    /// `testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent` can reach it.
-    ///
-    /// The contradiction is in `disabled` and nowhere else. The count is the one
-    /// the contract gives for the fleet that test's stub reports — it answers
-    /// `status`, in which `acc2` is the single routable account, and this body
-    /// leaves `acc2` routable — so it is 1, with `warning: null` beside it as the
-    /// pairing requires. A count of 3 stood here and was a second contradiction
-    /// nobody meant, of the fleet rather than of the click.
+    /// A switch answer that contradicts the request: a `disable` answered with
+    /// `disabled: false`. Used by `testTheStateAfterASwitchIsTheOneTheGatewaySentBack`
+    /// and kept here so
+    /// `testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent` reaches it.
+    /// The contradiction is only in `disabled`: the count of 1 matches the stub's
+    /// `status` fleet with `acc2` still routable.
     static let switchAnswerContradictingTheClick = """
     {"label":"acc2","disabled":false,"disabled_until":null,"disabled_reason":"pinned",\
     "eligible":true,"eligible_accounts":1,"warning":null}
@@ -459,18 +289,9 @@ enum UsageFixtures {
     "eligible":true,"eligible_accounts":1,"warning":null}
     """
 
-    /// `POST /gw/accounts/acc3/enable` against the fleet of `status` above: the
-    /// account switched off the evening before is put back.
-    ///
-    /// Built to that fleet rather than to taste, which is what fixes the count.
-    /// In `status` the gateway routes to `acc2` alone — `acc3` is switched off and
-    /// `main` is in its five-hour cool-down — so putting `acc3` back makes two,
-    /// and a count above zero comes with `warning: null`.
-    ///
-    /// Its own account, for the reason every one of these has one: the popover
-    /// keys the rotation by the label that was clicked, so a body answering for
-    /// somebody else would be invisible to the row and to every assertion on it,
-    /// while being a body the gateway could not have sent for that click.
+    /// `POST /gw/accounts/acc3/enable` against the fleet of `status`: in `status` only
+    /// `acc2` is routable, so putting `acc3` back makes two, with `warning: null`.
+    /// Its own label, because the popover keys the rotation by the clicked label.
     static let switchAnswerPuttingAcc3Back = """
     {"label":"acc3","disabled":false,"disabled_until":null,"disabled_reason":"",\
     "eligible":true,"eligible_accounts":2,"warning":null}
@@ -499,12 +320,8 @@ final class UsageDecodingTests: XCTestCase {
         XCTAssertTrue(session.tokens.isComplete)
     }
 
-    /// The `since` that comes back is the one the gateway *applied*, which is
-    /// the number to show — never the one that was asked for. "After clamping to
-    /// its retention" stood here and is withdrawn: no clamping has ever been
-    /// observed on any endpoint (re-probed 2026-09-05 20:27Z, §2.7). The rule
-    /// holds anyway, and on the better reason — the answer is the authority on
-    /// what it covers.
+    /// The `since` that comes back is the one the gateway applied, and it is the one
+    /// shown, never the one asked for: the answer is the authority on what it covers.
     func testTheAppliedWindowIsTheOneReported() throws {
         let report = try UsageFixtures.decode(UsageFixtures.sessionsWithNulls, as: SessionsReport.self)
         XCTAssertEqual(report.since, Date(timeIntervalSince1970: 1_786_761_516))
@@ -551,13 +368,10 @@ final class UsageDecodingTests: XCTestCase {
 
     // MARK: - The live token rate
 
-    /// The block the headline's lead figure is read straight out of, weighted
-    /// the one way four differently priced counters may be weighted.
-    ///
+    /// The block the headline's lead figure is read from, weighted the one way four
+    /// differently priced counters may be:
     /// `218.53 + 5 x 174.427 + 1.25 x 1091.747 + 0.1 x 55836.677 = 8039.0164`
-    /// input-equivalent tokens a second, which is 28,940,459 an hour. Every
-    /// number is the live body of 2026-08-24 and the arithmetic is redoable on
-    /// paper.
+    /// input-equivalent tokens a second, which is 28,940,459 an hour.
     func testTheFleetsTokenRateIsWeightedAndCarriedToTheHour() throws {
         let report = try UsageFixtures.decode(UsageFixtures.usageWithTokens, as: UsageReport.self)
         let tokens = try XCTUnwrap(report.fleet?.tokens)
@@ -577,18 +391,10 @@ final class UsageDecodingTests: XCTestCase {
         XCTAssertEqual(report.fleet?.sevenDay?.mean, 58.667, "and the half that was there still arrives")
     }
 
-    /// Every way the block can be there and still not carry a rate. Each answers
-    /// `nil`, and `nil` is what moves the headline back to the quota rather than
-    /// what puts a wrong number on it.
-    ///
-    /// **"Every" was a promise this made and did not keep**, and the two forms it
-    /// did not ask were the two that the arithmetic refuses rather than the
-    /// decoder: a counter that is negative, and a counter so large that the
-    /// figure overflows on its way to an hour. Both decode without complaint —
-    /// they are ordinary JSON numbers — and removing the guard they land on
-    /// killed 0 of 531 tests until they were added (2026-08-24). They also ask
-    /// the guard from its two sides: the negative one is refused before the
-    /// multiplication and the huge one only after it.
+    /// Every way the block can be there and still not carry a rate. Each answers `nil`,
+    /// which moves the headline back to the quota rather than showing a wrong number.
+    /// The negative and the overflowing counter decode fine and are refused by the
+    /// arithmetic, one before the multiplication and one after it.
     func testEveryUnusableTokenBlockIsNoRateRatherThanZero() throws {
         func rate(_ body: String) throws -> TokenRate? {
             try UsageFixtures.decode("{\"fleet\": {\(body)}}", as: UsageReport.self).fleet?.tokens
@@ -679,15 +485,11 @@ final class UsageDecodingTests: XCTestCase {
 
     // MARK: - The rotation
 
-    /// `accounts` in `/gw/status` is a **list**, and every entry carries the
-    /// label it is about — where the same key in `/gw/usage` is a dictionary the
-    /// label is the key of. Two endpoints, two shapes, one field name, so the
-    /// shape is asked for here rather than assumed.
+    /// `accounts` in `/gw/status` is a list whose entries name their label, while the
+    /// same key in `/gw/usage` is a dictionary keyed by label.
     ///
-    /// And what says an account is out of the rotation is `disabled` alone.
-    /// `disabled_until` is `null` for two states that are nothing alike — in the
-    /// rotation, and out of it with nobody's deadline on it — so a reader that
-    /// takes the deadline for the verdict gets `acc2` and `acc3` the same way up.
+    /// Only `disabled` says an account is out of the rotation: `disabled_until` is
+    /// `null` both in the rotation and out of it with no deadline.
     func testTheRotationIsAListOfAccountsEachNamingItself() throws {
         let status = try UsageFixtures.decode(UsageFixtures.status, as: GatewayStatus.self)
         XCTAssertEqual(status.accounts.map(\.label), ["acc2", "acc3", "main"])
@@ -705,22 +507,13 @@ final class UsageDecodingTests: XCTestCase {
                        "operator: 22h, switched over from the temporary quota cooldown")
     }
 
-    /// An account nobody switched off, that the gateway will still not route to,
-    /// is **in the rotation** and its box is ticked.
+    /// An account nobody switched off that the gateway will not route to is in the
+    /// rotation and its box is ticked.
     ///
-    /// The property, not the account: a body in which `disabled` and `eligible`
-    /// disagree has to come out on the side of `disabled`, because that is the one
-    /// the operator set and the one the checkbox offers to change. `eligible` is
-    /// written by `is_eligible` (`src/accounts.py:258`), which is
-    /// `is_eligible_apart_from_5h(...) AND util_5h < max_5h` — the five-hour window
-    /// folded in beside the operator's own switch, the quota cool-down and the
-    /// token backoff — so a box drawn from it clears itself when a window fills and
-    /// then sends an `enable` that changes nothing.
-    ///
-    /// The fixture's `main` is the live shape of that, and it is the only row in
-    /// which the two flags differ: with every row agreeing, a reader of `eligible`
-    /// and a reader of `disabled` are indistinguishable and this whole decision is
-    /// unguarded. See the fixture's own note on re-taking it.
+    /// `disabled` is what the operator set and what the checkbox changes. `eligible`
+    /// (`is_eligible`) also folds in the five-hour window, cool-down and token backoff,
+    /// so a box drawn from it would clear itself when a window fills. The fixture's
+    /// `main` is the only row where the two flags differ.
     func testAnAccountTheGatewayWillNotRouteToIsStillTheOperatorsToSwitch() throws {
         let status = try UsageFixtures.decode(UsageFixtures.status, as: GatewayStatus.self)
         let unroutable = try XCTUnwrap(status.byLabel["main"])
@@ -738,37 +531,19 @@ final class UsageDecodingTests: XCTestCase {
         XCTAssertEqual(status.routableAccounts, 1)
     }
 
-    /// A body that names an account and says nothing about its switch is refused
-    /// whole, and takes the rest of the rotation with it.
-    ///
-    /// The lenient reading — a missing `disabled` is an account nobody switched
-    /// off — is §2.4's confidently-wrong reading with a click attached: it ticks
-    /// and arms every checkbox in the fleet on the strength of a key that was not
-    /// in the body. `label` has always been strict, and the asymmetry was the
-    /// wrong way round; the day the gateway renames the field, a strict `disabled`
-    /// takes the whole rotation to "nobody said", which this app knows how to draw
-    /// and nobody can act on by mistake.
+    /// A body that names an account and says nothing about its switch is refused whole,
+    /// with the rest of the rotation. Reading a missing `disabled` as "on" would tick
+    /// and arm every checkbox on a key that was not in the body.
     func testABodyThatSaysNothingAboutASwitchIsRefusedWhole() {
         XCTAssertThrowsError(try UsageFixtures.decode(UsageFixtures.statusWithoutTheSwitch,
                                                       as: GatewayStatus.self),
                              "a hole where the checkbox's own field goes was read as a state")
     }
 
-    /// And a body that says nothing about **routing** is refused too, which it was
-    /// not until the count became the verdict.
-    ///
-    /// `?? false` there was safe for exactly as long as a zero count could only
-    /// take the fleet line down: "an account the gateway said nothing about is not
-    /// one this app may count as somewhere to route" left an error that was a
-    /// warning standing, never one lighting up. `applyRoutable` raises the line on
-    /// a zero count now, so silence about `eligible` manufactures the loudest
-    /// statement this surface makes — a fleet of accounts nobody switched off,
-    /// every one of them reported, and an orange line under them saying every
-    /// client request is a 429.
-    ///
-    /// Refusing it is not a worse answer, it is the honest one: the pass writes
-    /// `rotationFailure`, the boxes go inert, and the line says what happened. The
-    /// model's half of that is
+    /// A body that says nothing about routing is refused too. `applyRoutable` raises the
+    /// line on a zero count, so `?? false` would let silence about `eligible` claim
+    /// every client request is a 429. Refused, the pass writes `rotationFailure` and
+    /// the boxes go inert. The model's half is
     /// `testARotationWithNoRoutingFlagRaisesNoWarningAtAll`.
     func testABodyThatSaysNothingAboutRoutingIsRefusedWhole() {
         XCTAssertThrowsError(try UsageFixtures.decode(UsageFixtures.statusWithoutTheRoutingFlag,
@@ -778,17 +553,10 @@ final class UsageDecodingTests: XCTestCase {
                              """)
     }
 
-    /// A switch answer with no `eligible_accounts` in it is refused, for the same
-    /// reason and on the worse path.
-    ///
-    /// This decoder runs on the click: `?? 0` would take a body that lost the key
-    /// and raise the orange line in the very second the operator is looking at the
-    /// checkbox they just pressed. The `warning: null` beside the hole is no help
-    /// at all — it is what the gateway sends when there *is* somewhere to route —
-    /// so nothing in the body contradicts the invented zero.
-    ///
-    /// Both halves are asked, because "refuses everything" and "refuses the hole"
-    /// are different rules: the fixture with the count decodes.
+    /// A switch answer with no `eligible_accounts` is refused: this decoder runs on the
+    /// click, and `?? 0` would raise the orange line right then (`warning: null` is
+    /// what the gateway sends when there is somewhere to route).
+    /// Both halves are asked: the fixture with the count decodes.
     func testASwitchAnswerWithNoCountInItIsRefused() throws {
         XCTAssertThrowsError(try UsageFixtures.decode(UsageFixtures.switchAnswerWithoutTheCount,
                                                       as: SwitchResult.self), """
@@ -800,19 +568,10 @@ final class UsageDecodingTests: XCTestCase {
         XCTAssertEqual(whole.eligibleAccounts, 1, "the same body with its count decodes")
     }
 
-    /// And a body with no `accounts` in it at all is refused too — where a body
-    /// with an empty `accounts` is an answer and decodes.
-    ///
-    /// The same distinction one level up from `disabled`, and it was made the
-    /// other way here while `disabled` was being made strict: `?? []` wrote the
-    /// absence of an answer as an answer. What that costs is not one wrong field
-    /// but a whole surface with nothing on it — `switches` becomes `[:]` rather
-    /// than `nil`, so every checkbox is inert with no line anywhere saying why,
-    /// and `routableAccounts` comes out zero, which is the count that raises the
-    /// warning about a fleet with nowhere left to route.
-    ///
-    /// Both halves are asked, because "refuses everything" and "refuses the hole"
-    /// are different rules and only one of them is this one.
+    /// A body with no `accounts` at all is refused, while an empty `accounts` decodes.
+    /// `?? []` would make `switches` `[:]` rather than `nil` (inert boxes with no
+    /// reason shown) and `routableAccounts` zero, which raises the no-route warning.
+    /// Both halves are asked.
     func testABodyWithNoAccountsAtAllIsRefusedAndAnEmptyFleetIsNot() throws {
         XCTAssertThrowsError(try UsageFixtures.decode("""
             {"uptime_seconds": 176312.4, "now": 1788653295}
@@ -826,22 +585,13 @@ final class UsageDecodingTests: XCTestCase {
         XCTAssertEqual(empty.routableAccounts, 0)
     }
 
-    /// The four fields, and not one more — asked of the type rather than of a
-    /// body, because what this guards against is somebody widening it.
+    /// The four fields and not one more, asked of the type because the risk is
+    /// somebody widening it.
     ///
-    /// `/gw/status` carries `util_5h` and `util_7d` too, and it writes them as
-    /// **fractions**. The endpoint that spells the same quantity as **per cent**
-    /// under those very key names is `GET /gw/usage/<label>/history`, whose body
-    /// even says so in a `units` field (SPEC §2.7): one probe, 2026-09-06
-    /// 05:34:17Z, has `main` at `util_5h: 0.43` in `/gw/status` and `util_5h:
-    /// 43.0` in the last point of its history. That is the dangerous pair, and it
-    /// is dangerous because the name is the same on both sides — `/gw/usage`
-    /// itself has no `util_5h` key at all (it writes `five_hour.utilization`, also
-    /// per cent), so mixing *that* one up is a mismatch a reader can see.
-    /// Everything downstream of this file is in per cent, so a utilisation read
-    /// here "while we are reading the body anyway" would understate by a hundred
-    /// times with nothing on screen to look wrong. There is no reading on this
-    /// path at all, and that is the property held here.
+    /// `/gw/status` writes `util_5h`/`util_7d` as fractions; `GET
+    /// /gw/usage/<label>/history` writes the same keys as per cent (SPEC §2.7).
+    /// Everything downstream is per cent, so a utilisation read here would understate
+    /// a hundredfold with nothing looking wrong.
     func testNoUtilisationIsReadOffTheRotationBodyAtAll() throws {
         let status = try UsageFixtures.decode(UsageFixtures.status, as: GatewayStatus.self)
         let account = try XCTUnwrap(status.accounts.first)
@@ -852,15 +602,10 @@ final class UsageDecodingTests: XCTestCase {
                        """)
     }
 
-    /// What either switch endpoint answers with. The body is flat — the
-    /// account's new state and the fleet's cost side by side — so the state is
-    /// read off the same decoder the four fields of `/gw/status` are, and the two
-    /// cannot come to disagree about what a missing `disabled` means.
-    ///
-    /// `warning` is a string or `null`, and it is the fleet's answer rather than
-    /// this account's: the gateway writes it as `None if eligible else "…"`, so a
-    /// sentence and a zero count are one fact spelled twice and the two never
-    /// arrive apart. Both halves of that pairing are read here.
+    /// What either switch endpoint answers with. The body is flat, so the state is read
+    /// by the same decoder as the four fields of `/gw/status`.
+    /// `warning` is a string or `null`, written as `None if eligible else "…"`: a
+    /// sentence and a zero count always arrive together. Both halves are read here.
     func testASwitchAnswersWithTheNewStateAndWhatItCostTheFleet() throws {
         let quiet = try UsageFixtures.decode(UsageFixtures.switchAnswer, as: SwitchResult.self)
         XCTAssertEqual(quiet.account.label, "acc2")
@@ -881,74 +626,19 @@ final class UsageDecodingTests: XCTestCase {
             """)
     }
 
-    /// Every switch answer this suite holds is a body `_switch_payload` could
-    /// actually have written: the sentence is there exactly when the count is zero.
+    /// Every switch answer this suite holds is a body `_switch_payload` could have
+    /// written: the sentence is there exactly when the count is zero.
     ///
-    /// **Nothing in production reads `SwitchResult.warning` at all**, which is what
-    /// the field is decoded for: §4 keeps `fleet` off every string a person reads,
-    /// and the `else` branch of `_switch_payload` (`src/gateway.py:1986`) is one
-    /// fixed constant rather than a message, so the count says everything it says.
-    /// Two tests read it, and they hold different things — this one holds the
-    /// **pairing** (a sentence exactly when the count is zero) over every switch
-    /// answer in the suite, while `testASwitchAnswersWithTheNewStateAndWhatItCostTheFleet`
-    /// twenty lines above pins the **wording** of the gateway's constant character
-    /// for character, and is what reddens if `_switch_payload` ever rewrites it.
-    /// What the field is still worth is this: it is
-    /// the body's own statement of the invariant the whole switch surface rests
-    /// on, one fact the gateway writes twice, and putting the verdict on the count
-    /// alone is only sound while the two agree.
+    /// Production never reads `SwitchResult.warning`; the count carries the verdict,
+    /// which is sound only while the two agree. This test holds the pairing over every
+    /// switch answer; `testASwitchAnswersWithTheNewStateAndWhatItCostTheFleet` pins the
+    /// wording. It tests our fixtures, not the gateway: none came off the wire.
     ///
-    /// **It is not a test of the gateway.** Not one of these bodies came off the
-    /// wire — no live `disable` was ever recorded here, and the field list was
-    /// checked against a live `enable` — so what is asked is whether our own
-    /// fixtures are bodies that could have arrived. It is exactly the check that
-    /// catches a count invented to look plausible: this branch has had to correct
-    /// one twice.
-    ///
-    /// **The list below is the whole of "every", and the name says so.** It is
-    /// written out by hand and nothing walks `UsageFixtures` to fill it, so a new
-    /// switch answer is covered only once somebody has typed it in here — adding
-    /// the fixture is half the work, and this test staying green over a body it
-    /// has never seen is not evidence about that body. Reflection could enumerate
-    /// the static properties of `UsageFixtures`, but not which of them are switch
-    /// answers: the ones that are not (`status`, `usage`, `history`, and the
-    /// fixtures written to be refused) would have to be named by hand instead, so
-    /// the hand-kept list would only move, not go away — and the list of what to
-    /// check is the safer of the two to forget nothing from, because forgetting an
-    /// entry there leaves a test that says less, while forgetting an exclusion
-    /// leaves one that fails on a body it was never about.
-    ///
-    /// That the fixtures all live on `UsageFixtures` rather than inside the tests
-    /// that use them is what makes the list keepable at all: one place to add to,
-    /// and one place to look. `switchAnswerWithoutTheCount` is not here because it
-    /// does not decode at all, which is
-    /// `testASwitchAnswerWithNoCountInItIsRefused`'s subject.
-    ///
-    /// Proved by mutation on the fixtures themselves, 2026-09-06, and it takes two
-    /// because the pairing has two halves. Writing a sentence into
-    /// `switchAnswerPuttingTheAccountBack`, whose count is 1, reddens this test and
-    /// nothing else in the suite — the sentence has no other reader, which is the
-    /// finding this test was written for. Taking `switchAnswerWithWarning`'s count
-    /// from 0 to 1 reddens this one and **five** others, six of 671, and they are
-    /// named because "four others" stood here and was one short:
-    /// `testASwitchAnswersWithTheNewStateAndWhatItCostTheFleet` twenty lines above,
-    /// which reads the count off the same body, and four on the surface —
-    /// `testAFleetWithNothingLeftInItSaysSoAndStopsSayingIt`,
-    /// `testAPassThatFoundSomewhereToRouteTakesTheWarningDown`,
-    /// `testAPassThatLeftBeforeTheClickDoesNotTakeTheWarningDown` and
-    /// `testTheCountThatStandsIsTheOneAskedForLast`, each of which needs this body
-    /// to raise the orange line and finds it raising nothing once the count is 1.
-    /// Two further users of it stay green and are the control on the list being
-    /// about the count rather than about the body:
-    /// `testTheCountIsSettledByAPassOnceTheLastClickHasLanded` and
-    /// `testABurstsOverlapIsNotChargedToTheNextLoneClick` count passes and never
-    /// ask what the fleet was left with.
-    ///
-    /// The entry added the same day, `switchAnswerPuttingAcc3Back`, was proved the
-    /// same way: writing a sentence into it beside its count of 2 reddens this test
-    /// and nothing else of the 668. That is what a list entry buys — the body's own
-    /// user (`testAClickStillInTheAirKeepsItsRowAcrossTheReopen`) stays green under
-    /// that mutation, because nothing on the switch path reads the sentence.
+    /// The list below is the whole of "every": it is kept by hand, so a new switch
+    /// answer is covered only once it is added here. Enumerating `UsageFixtures` by
+    /// reflection would still need a hand-kept list of exclusions, and a forgotten
+    /// entry is safer than a forgotten exclusion. `switchAnswerWithoutTheCount` is not
+    /// here because it does not decode (`testASwitchAnswerWithNoCountInItIsRefused`).
     func testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent() throws {
         let bodies = [
             "switchAnswer": UsageFixtures.switchAnswer,
@@ -1115,17 +805,10 @@ final class UsageClientTests: XCTestCase {
         XCTAssertEqual(series.points.count, 1)
     }
 
-    /// The three endpoints the switches added, each on its own verb.
-    ///
-    /// The verb is the whole of the difference between them — one `fetch` sends
-    /// all six requests this client makes — so it is asked for here rather than
-    /// left to the one function's default. A switch sent as a GET reads the
-    /// gateway's state and changes nothing, and the popover would then draw the
-    /// answer to a question it never asked.
-    ///
-    /// And a switch carries **no body at all**, which is what says "until
-    /// somebody puts it back": the gateway takes an expiry from a `seconds` or
-    /// `until` key, and a checkbox has nowhere to say a third thing.
+    /// The three switch endpoints, each on its own verb. One `fetch` sends all six
+    /// requests this client makes, so the verb is asked for here: a switch sent as a
+    /// GET changes nothing. A switch carries no body, meaning "until somebody puts it
+    /// back": the gateway takes an expiry only from a `seconds` or `until` key.
     func testTheRotationIsReadWithAGetAndMovedWithAPost() async throws {
         let log = RequestLog()
         let reading = makeClient(body: UsageFixtures.status, log: log)
@@ -1148,14 +831,9 @@ final class UsageClientTests: XCTestCase {
         XCTAssertNil(log.body)
     }
 
-    /// The label is somebody's name for an account and goes into the path whole,
-    /// so it is escaped on the way in.
-    ///
-    /// Live labels are `acc2` and `main` and would never show this: the point is
-    /// that nothing checks them. A space unescaped makes a request line no
-    /// gateway will parse, and a `#` unescaped makes the rest of the path a URL
-    /// fragment — that is, a POST to `/gw/accounts/acc` with the verb intact,
-    /// which is the one failure here that could plausibly hit another account.
+    /// The label goes into the path whole, so it is escaped. An unescaped `#` would make
+    /// the rest a URL fragment, i.e. a POST to `/gw/accounts/acc`, which could hit
+    /// another account.
     func testALabelThatNeedsEscapingIsEscaped() async throws {
         let log = RequestLog()
         let client = makeClient(body: UsageFixtures.switchAnswer, log: log)
@@ -1376,14 +1054,11 @@ final class UsageAttributionTests: XCTestCase {
         return slugName
     }
 
-    /// One subagent transcript of that session, in the place Claude Code puts it:
-    /// `<slug>/<sessionId>/subagents/`, a level below the session's own file.
-    /// `nested` puts it further down, where workflow agents write:
-    /// `subagents/workflows/wf_<id>/`.
-    ///
-    /// It exists here because the gateway reports one aggregate for the whole
-    /// `session_id` while a subagent's writing lands in a different file entirely,
-    /// so the session's own mtime is not the whole of "was this life written to".
+    /// One subagent transcript of that session, where Claude Code puts it:
+    /// `<slug>/<sessionId>/subagents/`. `nested` puts it where workflow agents write:
+    /// `subagents/workflows/wf_<id>/`. The gateway reports one aggregate per
+    /// `session_id` while subagents write to other files, so the session file's mtime
+    /// alone does not say whether the life was written to.
     @discardableResult
     private func subagentFile(_ name: String,
                               of sessionId: String,
@@ -1403,16 +1078,10 @@ final class UsageAttributionTests: XCTestCase {
         return slugName
     }
 
-    /// A subagent entry that the directory listing names and `stat(2)` then
-    /// refuses — the same race the parent transcript has, one level down.
-    ///
-    /// A dangling symlink is that state made deterministic. `contentsOfDirectory`
-    /// returns the name (it does not follow the link), and `fileStamp` calls
-    /// `stat`, which does follow it and fails — which is exactly what a file
-    /// removed between the listing and the stamp looks like from inside
-    /// `wasWrittenInWindow`. The alternative, removing the file after the listing,
-    /// cannot be written from out here: the listing happens inside the function
-    /// under test. `nested` puts it further down, as `subagentFile` does.
+    /// A subagent entry the directory listing names and `stat(2)` then refuses. A
+    /// dangling symlink makes that deterministic: `contentsOfDirectory` returns the
+    /// name, and `fileStamp`'s `stat` follows the link and fails, as for a file removed
+    /// between listing and stamp. `nested` places it as `subagentFile` does.
     @discardableResult
     private func unstatableSubagentFile(_ name: String,
                                         of sessionId: String,
@@ -1480,19 +1149,10 @@ final class UsageAttributionTests: XCTestCase {
         XCTAssertEqual(result.unmatchedSessions, 0)
     }
 
-    /// A session started in a worktree belongs to the project the worktree is
-    /// of. Nothing opens a window on `.claude/worktrees/<name>`, so keyed by its
-    /// own slug the number would sit on no row at all.
-    ///
-    /// This is also the one case that cannot be answered from the slug alone:
-    /// the slug of a worktree is not a prefix-match away from the slug of its
-    /// project — the separator is gone, so `-x-portainer-` prefixes the slug of
-    /// `portainer-agent` too. It is answered by having listed the worktree
-    /// directories, which is what `DataSource.worktrees(of:)` is for.
-    ///
-    /// Checked by deleting the worktree pass in `projectPathsBySlug`, and again
-    /// by having `attribute` pass `worktrees: [:]`: this test fails and the rest
-    /// of the file does not.
+    /// A session started in a worktree belongs to the worktree's project: nothing opens
+    /// a window on `.claude/worktrees/<name>`. The slug alone cannot answer this
+    /// (`-x-portainer-` also prefixes `portainer-agent`'s slug); it is answered from the
+    /// listed worktree directories, `DataSource.worktrees(of:)`.
     func testSpendUnderAWorktreeSlugLandsOnTheProjectsRow() throws {
         let project = try makeProject("switcher", worktrees: ["usage-ui"])
         try file("s1", startedIn: worktreePath(of: project.path, "usage-ui").path)
@@ -1545,15 +1205,9 @@ final class UsageAttributionTests: XCTestCase {
                        "two directories of one project are not a disagreement")
     }
 
-    /// Two copies in two different projects. The gateway reports one aggregate
-    /// for the whole session and there is nothing to divide it by, so neither
-    /// project gets it and the fact is reported instead of being resolved by
-    /// coin-flip.
-    ///
-    /// This is the defect the suite was written for. Checked by restoring "the
-    /// first directory found wins": the spend then lands on one of the two
-    /// projects — which one depends on the order the directories are listed in —
-    /// and this test fails.
+    /// Two copies in two different projects. The gateway reports one aggregate per
+    /// session with nothing to divide it by, so neither project gets it and the spend
+    /// is reported as ambiguous rather than resolved by directory order.
     func testTwoCopiesInTwoProjectsGoToTheAmbiguousBucket() throws {
         let first = try makeProject("switcher")
         let second = try makeProject("home-network")
@@ -1607,42 +1261,13 @@ final class UsageAttributionTests: XCTestCase {
                        + "when it is non-empty teaches nobody the bucket exists")
     }
 
-    /// **Every figure in the usage section starts in one column, and the widest
-    /// label is what that column is for.**
+    /// Every figure in the usage section starts in one column, sized for the widest
+    /// label; `column` pads but never truncates, so a longer label would shift its
+    /// figure silently.
     ///
-    /// The section was eight hand-counted runs of spaces plus one `column(…)` of
-    /// 18, and `no local session:` fitted that at 17 characters. Giving it a window
-    /// took it to 20, and `column` pads without ever truncating — so those two
-    /// lines, and only those two, would have started their figures two columns
-    /// right of every other line in the section, silently, with nothing anywhere to
-    /// fail.
-    ///
-    /// Asked of **the whole assembled section**, and that is the correction this
-    /// test needed. It used to compose four lines by hand out of `unmatchedLine`
-    /// and `ambiguousLine` — the only two of the section's twelve labels that
-    /// have a function of their own — while the other eight called `label` inline
-    /// inside `printUsage` and were reachable from no test at all. `unavailable:` growing
-    /// past the width would have pushed its own figure right, quietly, exactly the
-    /// way the four windowed labels once did. That is the `spendColumnWidth` defect
-    /// again: a constant pinned to its cell while the table it aligns is pinned to
-    /// nothing, and it is fixed the same way — by extracting the composition
-    /// (`ConsoleDump.usageLines`) and asking the rows.
-    ///
-    /// The fixture forces both optional lines out — `unavailable:`, and
-    /// `window:` — so all twelve are measured. The widest inline label is
-    /// `burn vs refill:` at 15 characters, which arrived with the lead metric and
-    /// is the reason the count moved from eleven to twelve: the spend rate kept
-    /// its own line when the burn ratio took the lead, and a line added past the
-    /// label column is exactly what the count below is for.
-    ///
-    /// Two mutations, and the second is the one that shows the gap was real.
-    /// Putting the width back to 18 takes down 3 test cases and 6 assertions of
-    /// 639 (this one, `testTheDumpNamesTheAmbiguousBucketAndCountsIt` and
-    /// `testTheHoursOwnerlessSpendIsKeptAndPrinted`). Writing the literal `12` at
-    /// an inline call site — `column("unavailable:", 12)` in `usageLines`, where
-    /// `column` then pads nothing, the label being 12 characters itself — takes
-    /// down 1: this one. Run against the **pre-fix body** of this test, that same
-    /// literal fails **0 of 639**, which is the finding in one number.
+    /// Asked of the whole assembled section (`ConsoleDump.usageLines`), with both
+    /// optional lines (`unavailable:`, `window:`) forced out so all twelve labels are
+    /// measured.
     func testTheUsageSectionsFiguresAllStartInOneColumn() throws {
         var usage = UsageSnapshot.empty
         usage.sessionsFailure = "/gw/sessions: timed out"
@@ -1666,28 +1291,14 @@ final class UsageAttributionTests: XCTestCase {
         }
     }
 
-    /// **The lead line of the section, asserted whole**, and until 2026-09-05
-    /// nothing asked it anything at all.
+    /// The lead line of the section, asserted whole.
     ///
-    /// The test above is the only other one that touches this line and it feeds
-    /// `UsageSnapshot.empty`, so `fleetBurn` is `nil` and the only branch ever
-    /// reached is the `-`. Measured by mutation on a copy of the source that day:
-    /// printing `refillRate` where the per cent belongs, dropping the `(>=)`, and
-    /// swapping the two rates in the format string each failed **0 of 622** tests.
-    /// The last of those is the one that matters — a fleet burning three times
-    /// faster than it refills would have been drawn as one burning three times
-    /// slower — and this line is the one the figure is checked against the gateway
-    /// by hand from, which is what makes hand-checkable numbers its whole purpose.
-    ///
-    /// The two rates in the fixture differ, deliberately: equal rates make the
-    /// swap invisible. So do the per cent and the refill rate, which is what makes
-    /// printing one for the other visible.
-    ///
-    /// The first half is the live line, run 2026-09-05 15:33:41Z, and the second
-    /// is the fleet of `testTheFigureIsBuiltFromRawPointsRatherThanSmoothedOnes` —
-    /// one account pinned at its ceiling for four samples of five beside one that
-    /// burns 50 pp over 48 h, which is 1.042 pp/h against 1.190 refilled and the
-    /// `≥` the suppressed burn owes the reader.
+    /// The two rates in the fixture differ, so swapping them is visible, and the per
+    /// cent differs from the refill rate, so printing one for the other is visible.
+    /// The first half is a live line; the second is the fleet of
+    /// `testTheFigureIsBuiltFromRawPointsRatherThanSmoothedOnes`: one account pinned at
+    /// its ceiling for four samples of five beside one burning 50 pp over 48 h, i.e.
+    /// 1.042 pp/h against 1.190 refilled, with the `≥` a suppressed burn requires.
     func testTheLeadLineNamesTheRatioItsDepthAndBothSidesOfTheDivision() throws {
         func burnLine(_ burn: FleetCapacity.FleetBurn) throws -> String {
             var usage = UsageSnapshot.empty
@@ -1722,17 +1333,10 @@ final class UsageAttributionTests: XCTestCase {
                 + "reading: `(>=)` is the panel's `≥` spelled for a terminal")
     }
 
-    /// The hour has a bucket of its own, and it is filled by the hour's own
-    /// contested sessions rather than by the week's.
-    ///
-    /// The fixture is the case the split exists for: one session contested over
-    /// the hour and **absent from the week's report altogether**. Today that state
-    /// is reached by failure — the two `/gw/sessions` calls fail apart, and a week
-    /// that timed out leaves no week's report at all (§2.9); the gateway's
-    /// 200-consumer cap would reach it too, but is not firing on this machine
-    /// (`SwitcherSnapshot.ambiguousHourlyUsage`). Sharing one bucket would report
-    /// this spend under `7d` — where nothing else about that session appears — or
-    /// not at all.
+    /// The hour has its own ambiguous bucket, filled by the hour's contested sessions.
+    /// The fixture has a session contested over the hour and absent from the week's
+    /// report, as when the two `/gw/sessions` calls fail apart (§2.9); a shared bucket
+    /// would report this spend under `7d` or not at all.
     func testTheHourHasItsOwnAmbiguousBucket() throws {
         let first = try makeProject("switcher")
         let second = try makeProject("home-network")
@@ -1797,19 +1401,11 @@ final class UsageAttributionTests: XCTestCase {
 
     // MARK: - A session resumed in another project, over two windows
 
-    /// The live pair of 2026-08-27, cut down to what decides it.
-    ///
-    /// Session `8fa4e946-…` had a copy under the slug of `hammerola` — 16.5 MB and
-    /// being written at 20:01 that day — and a copy under the slug of
-    /// `cad_snapshot_hub`, 6.1 MB and untouched since 2026-08-24 17:20. Both are
-    /// real projects inside the scan roots, so the contest is genuine: over the
-    /// week the gateway's single aggregate really does hold spend from both lives.
-    /// Over the sliding hour it cannot: the second life is days outside it.
-    ///
-    /// The second project is named with underscores on purpose. `cad_snapshot_hub`
-    /// and a directory literally called `cad-snapshot-hub` slug identically, which
-    /// is what makes reading a slug backwards a way to invent a directory that
-    /// never existed — and it cost a wrong diagnosis on this very session.
+    /// A resumed session cut down to what decides it: a copy under `hammerola` being
+    /// written now and a copy under `cad_snapshot_hub` silent for days. Over the week
+    /// both lives spent; over the hour only the first could have.
+    /// The underscores are deliberate: `cad_snapshot_hub` and `cad-snapshot-hub` slug
+    /// identically, so a slug cannot be read back into a directory name.
     private func resumedSession(now: Date, input: Int = 12, silentFor: TimeInterval = 3 * 86_400)
         throws -> (current: ProjectInfo, previous: ProjectInfo, contested: [ContestedSpend]) {
         let current = try makeProject("hammerola")
@@ -1834,25 +1430,10 @@ final class UsageAttributionTests: XCTestCase {
         UsageIndex.narrowToWindow(contested, since: since, projectsDirectory: transcripts)
     }
 
-    /// **The hour gives the contest to the life that is actually being written.**
-    ///
-    /// This is the defect the change was made for: on 2026-08-27 the hour reported
-    /// 42.53M, of which 30.58M reached rows and 11.95M — the largest single
-    /// spender on the machine, in a project with four agents working in it — was
-    /// dropped as ambiguous. 28.1% of the hour, and the row it belonged to printed
-    /// no rate at all, for the single reason that its chat had once been resumed
-    /// somewhere else. SPEC §2.9 already named that outcome as the thing not to do.
-    ///
-    /// The mtime is what settles it, and it is not a tie-break between two
-    /// transcripts (mtime and size as *tie-breaks* stay rejected — see
-    /// `DataSource.settle`): it is the observation that a file untouched for three
-    /// days cannot have spent anything in the last hour. The live session file
-    /// agrees, and this fixture has one, because that is the shape the live case
-    /// had.
-    ///
-    /// Checked by having `narrowToWindow` keep the newest copy instead of every
-    /// copy inside the window — the tempting rule, and the one that would answer
-    /// the week wrongly: this test stays green and its pair below fails.
+    /// The hour gives the contest to the life actually being written (SPEC §2.9).
+    /// mtime here is not a tie-break between transcripts (those stay rejected, see
+    /// `DataSource.settle`): a file untouched for three days cannot have spent in the
+    /// last hour.
     func testTheHourGivesTheContestToTheLifeThatWasWrittenInIt() throws {
         let now = Date()
         let fixture = try resumedSession(now: now)
@@ -1876,17 +1457,10 @@ final class UsageAttributionTests: XCTestCase {
         XCTAssertEqual(snapshot.ambiguousHourlyUsage, .zero)
     }
 
-    /// **And the week keeps the very same contest ambiguous, because over a week
-    /// both lives really were running.**
-    ///
-    /// One rule, two windows, two different and correct answers — that pair is the
-    /// whole change. Handing the week to `hammerola` as well would move up to four
-    /// days of another project's work onto the wrong row: a new silent
-    /// misattribution, which is the class of defect this path exists to remove.
-    ///
-    /// Checked by the mutation named on its pair above — `narrowToWindow` keeping
-    /// only the newest copy — which resolves this contest to `hammerola` and turns
-    /// this test red while leaving the hour's green.
+    /// The week keeps the same contest ambiguous, because over a week both lives were
+    /// running: handing it to `hammerola` would move days of another project's work
+    /// onto the wrong row. Keeping only the newest copy would pass the hour's test and
+    /// fail this one.
     func testTheWeekKeepsTheSameContestAmbiguousBecauseBothLivesRanInsideIt() throws {
         let now = Date()
         let fixture = try resumedSession(now: now)
@@ -1909,34 +1483,15 @@ final class UsageAttributionTests: XCTestCase {
         XCTAssertEqual(snapshot.ambiguousUsage.input, 12, "counted, and still named as nobody's")
     }
 
-    /// **A copy that cannot be stat'ed keeps its claim on the window.**
+    /// A copy that cannot be stat'ed keeps its claim on the window. A copy can vanish
+    /// between listing and stat; if it was the winning one, dropping it would leave a
+    /// single claim and `settle` would put the spend on the wrong row.
     ///
-    /// The rule was written down in `narrowToWindow`'s comment and held by nothing
-    /// else: turning its `else { return true }` into `else { return false }` left
-    /// the whole suite green. What it costs is not hypothetical. A copy is listed
-    /// and then stat'ed, the writer that removes it is not synchronised with this
-    /// pass at all, and any gap between the two will do — so a copy can be listed
-    /// and be gone by the time it is asked about. If the copy that vanishes is the
-    /// *winning* one, the contest is left holding a single claim, `settle` counts
-    /// it, and a whole session's spend lands on a row it does not belong to. That
-    /// is the silent misattribution `contested` exists to prevent.
-    ///
-    /// **The rule is written twice, so it is asked twice.** `wasWrittenInWindow`
-    /// stats two kinds of file — the parent transcript and every `*.jsonl` under
-    /// `subagents/` — and each has its own `else { return true }`. Only the parent's
-    /// was held here, and flipping the subagent one to `false` took down nothing at
-    /// all. The cost is the same and just as reachable, and the caching is beside
-    /// the point on both halves: the `subagents/` listing goes through no cache at
-    /// all (`UsageIndex.listingCache` serves `slugsBySessionId` alone), and the slug
-    /// listings that do are re-checked against directory mtime on every call, so
-    /// neither half's listing is any staler than the pass it runs in.
-    ///
-    /// Four lives, because a direction needs a control: the one written inside the
-    /// window survives, the one three days stale is dropped, the one whose own
-    /// transcript is missing survives with the first, and the one that is stale by
-    /// its transcript but has a subagent entry that cannot be stat'ed survives too.
-    /// Without the stale life this would agree with a rule that narrows nothing at
-    /// all.
+    /// `wasWrittenInWindow` stats two kinds of file, the parent transcript and every
+    /// `*.jsonl` under `subagents/`, each with its own `else { return true }`, so both
+    /// are asked. Four lives: written inside the window (kept), three days stale
+    /// (dropped, the control), transcript missing (kept), stale transcript with an
+    /// unstatable subagent entry (kept).
     func testACopyThatCannotBeStatedKeepsItsClaimOnTheWindow() throws {
         let now = Date()
         let longAgo = now.addingTimeInterval(-3 * 86_400)
@@ -1990,30 +1545,13 @@ final class UsageAttributionTests: XCTestCase {
                        + "would agree with a rule that narrows nothing")
     }
 
-    /// **A life whose subagent is writing could have spent**, even while the
-    /// session's own transcript stands still.
-    ///
-    /// The narrowing asked `<slug>/<sessionId>.jsonl` and nothing else, and that is
-    /// not where a subagent writes: its records go to
-    /// `<slug>/<sessionId>/subagents/agent-*.jsonl` (§2.6.3) while the gateway
-    /// keeps reporting one aggregate for the whole `session_id`. So the parent file
-    /// can stand still through a long stretch of real spending. That is a live
-    /// table, and the population moves with the finding, so neither is a fixed
-    /// number: passes on 2026-08-27 and 2026-08-28 over 609 session transcripts
-    /// with 344 `subagents/` directories found 10 and then 6 with a subagent file
-    /// newer than their parent, the largest gap 917.5 s (15.29 min) and then
-    /// 124.2 s, while recounts on 2026-08-28 saw 613 transcripts, 345 directories
-    /// and 5 such sessions both times, gap 355.8 s (5.93 min) at 05:44 and 330.2 s
-    /// at 05:58. All
-    /// fit inside the hour, so nothing is misattributed today — which is luck: a
-    /// subagent running longer than the window drops the working life out of the
-    /// survivors and leaves a rival copy that a resume had merely touched, and the
-    /// live-session veto is no backstop because it only sees sessions started from
-    /// the VSCode extension.
-    ///
-    /// Both lives carry a `subagents/` directory on purpose. What keeps the first
-    /// one is that something under it was written *inside the window*, not that it
-    /// has subagents at all.
+    /// A life whose subagent is writing could have spent, even while the session's own
+    /// transcript stands still: subagent records go to
+    /// `<slug>/<sessionId>/subagents/agent-*.jsonl` (§2.6.3) while the gateway reports
+    /// one aggregate per `session_id`. The live-session veto is no backstop: it only
+    /// sees sessions started from the VSCode extension.
+    /// Both lives have a `subagents/` directory: what keeps the first is a write inside
+    /// the window, not having subagents.
     func testASubagentWritingKeepsALifeWhoseTranscriptStandsStill() throws {
         let now = Date()
         let longAgo = now.addingTimeInterval(-3 * 86_400)
@@ -2038,16 +1576,10 @@ final class UsageAttributionTests: XCTestCase {
                        + "contest handed to the copy a resume had merely touched")
     }
 
-    /// **A workflow agent writing keeps the life too**, although it writes two levels
-    /// further down than the other subagents: `subagents/workflows/wf_<id>/`.
-    ///
-    /// While a workflow runs the parent transcript stands still, and the flat
-    /// `subagents/` may hold nothing written in the window — here its one file is
-    /// stale, and the only fresh file is the workflow agent's. Both lives carry
-    /// the same nested layout, so what keeps the first is the date, not the shape.
-    ///
-    /// Checked by reverting the walk to the flat loop over `subagents/`, which
-    /// narrows the working life away and turns this test red.
+    /// A workflow agent writing keeps the life too, though it writes two levels deeper:
+    /// `subagents/workflows/wf_<id>/`. Here the flat `subagents/` file is stale and only
+    /// the workflow agent's is fresh; both lives share the nested layout, so the date
+    /// decides, not the shape.
     func testAWorkflowAgentWritingKeepsALifeWhoseTranscriptStandsStill() throws {
         let now = Date()
         let longAgo = now.addingTimeInterval(-3 * 86_400)
@@ -2076,14 +1608,10 @@ final class UsageAttributionTests: XCTestCase {
                        + "the contest handed to the copy a resume had merely touched")
     }
 
-    /// **A workflow agent's file that cannot be stat'ed keeps the claim as well** —
-    /// the rule of `testACopyThatCannotBeStatedKeepsItsClaimOnTheWindow`, at the
-    /// depth workflow agents write to.
-    ///
-    /// The racing life's `subagents/` holds nothing but `workflows/wf_x/` with a
-    /// dangling `agent-1.jsonl` in it. A fresh life and a stale one are the
-    /// controls, as in that test. Checked by reverting the walk to the flat loop,
-    /// which sees no `*.jsonl` at the top and drops the racing life.
+    /// A workflow agent's file that cannot be stat'ed keeps the claim as well: the rule
+    /// of `testACopyThatCannotBeStatedKeepsItsClaimOnTheWindow` at workflow depth. The
+    /// racing life holds only `workflows/wf_x/` with a dangling `agent-1.jsonl`; a fresh
+    /// and a stale life are the controls.
     func testAWorkflowAgentFileThatCannotBeStatedKeepsItsClaimOnTheWindow() throws {
         let now = Date()
         let longAgo = now.addingTimeInterval(-3 * 86_400)
@@ -2121,33 +1649,13 @@ final class UsageAttributionTests: XCTestCase {
                        + "would agree with a rule that narrows nothing")
     }
 
-    /// A live session whose **own** life was narrowed out of the window, while a
-    /// rival copy was being written inside it. The two records describe two
-    /// different situations, and the safe answer is the one that was there before:
-    /// ambiguous.
+    /// A live session whose own life was narrowed out of the window while a rival copy
+    /// was written inside it: the safe answer is ambiguous.
     ///
-    /// This is the reachable form of the veto's condition, and it took a second
-    /// look to find. The fixture here used to name `/private/tmp/somewhere-else` —
-    /// a directory among none of the copies — which cannot happen: a running
-    /// session has a transcript under the slug of the directory it started in, and
-    /// `slugsBySessionId` lists every copy there is, so the live slug is always one
-    /// of them at the fold. What removes it is the *narrowing*: the live session's
-    /// own transcript can be silent longer than the window (it is idle, or the
-    /// hour has slid past its last record) while the other life of the same
-    /// `session_id`, resumed elsewhere, is being written right now. Then the hour
-    /// has exactly one claim standing and it is not the one the live record names.
-    ///
-    /// Reachable rather than decorative in the second sense too — the narrowing
-    /// has left exactly one claim standing, so without the veto this spend lands on
-    /// `hammerola`.
-    ///
-    /// Checked by deleting the live-session refusal in `settle`. It used to say
-    /// here that this test fails "and its neighbours do not", which was never run:
-    /// the mutation takes down **2 test cases and 6 assertions** of 639 — this one
-    /// and `testBothWindowsAreSettledAgainstTheSameLiveSessions`, which is exactly
-    /// right, since that one exists to check the veto reaches both windows. Rerun
-    /// on the fixture above (2026-08-28), because a fixture change is a change to
-    /// what the mutation can be caught by: same 2 cases, same 6 assertions.
+    /// A running session always has a transcript under its start directory's slug, so
+    /// the live slug is among the copies; what removes it is the narrowing (its own
+    /// transcript silent longer than the window while the other life of the same
+    /// `session_id` is written). Without the veto this spend lands on `hammerola`.
     func testALiveSessionWhoseOwnLifeFellOutOfTheWindowLeavesTheContestAmbiguous() throws {
         let now = Date()
         let fixture = try resumedSession(now: now)
@@ -2169,26 +1677,15 @@ final class UsageAttributionTests: XCTestCase {
         XCTAssertEqual(snapshot.ambiguousHourlySessions, 1)
     }
 
-    /// **One `session_id`, one live row.** This is the invariant that lets
-    /// `DataSource.liveSlugsBySessionId` be a map at all, and therefore lets the
-    /// contest veto ask one question and get one answer.
+    /// One `session_id`, one live row: the invariant that lets
+    /// `DataSource.liveSlugsBySessionId` be a map and the contest veto ask one question.
+    /// `ClaudeSessions.liveSessions` dedupes by session id (keeping the
+    /// lexicographically first `<pid>.json`); this must go red before that assumption
+    /// is reopened.
     ///
-    /// It replaces a `LiveStart.disputed` case that refused a contest when two live
-    /// sessions claimed one identifier from two different directories. That case
-    /// could not fire: the only producer of its input is
-    /// `ClaudeSessions.liveSessions`, which dedupes by session id, so the pair never
-    /// reached the map and the only test for it built the pair by hand — a test of
-    /// the line next to it rather than of the system. Its comment was wrong as well
-    /// as unreachable, claiming a protection against
-    /// `Dictionary(uniquingKeysWith:)` picking one of two disagreeing answers while
-    /// `liveSessions` had already done exactly that one layer below, keeping the
-    /// lexicographically first `<pid>.json`. So: the branch is gone, and this holds
-    /// the reason it is unnecessary. It is what has to go red before the veto's
-    /// assumption is reopened.
-    ///
-    /// Two session files naming one identifier from two directories, and a pid that
-    /// really is alive — this process — because `isSessionProcessAlive` throws out
-    /// everything else before the dedup is ever reached.
+    /// Two session files naming one identifier from two directories, with a live pid
+    /// (this process), because `isSessionProcessAlive` drops everything else before the
+    /// dedup.
     func testOneSessionIdYieldsOneLiveRow() throws {
         let sessionsDirectory = base.appendingPathComponent("claude-sessions")
         try FileManager.default.createDirectory(at: sessionsDirectory, withIntermediateDirectories: true)
@@ -2217,14 +1714,9 @@ final class UsageAttributionTests: XCTestCase {
                        "the veto is answered about a directory the surviving row does not name")
     }
 
-    /// No live session at all — both lives are over — and both copies were written
-    /// inside the window. This is the case that has to keep behaving exactly as it
-    /// did before any of this: two claims, nothing to choose between them,
-    /// ambiguous.
-    ///
-    /// Checked by the same "keep the newest copy" mutation as the week's test: it
-    /// hands this spend to whichever life was written last, which is the coin-flip
-    /// with a straight face `settle` has always refused.
+    /// No live session and both copies written inside the window: two claims, nothing
+    /// to choose between them, ambiguous. Keeping the newest copy would be a coin-flip
+    /// `settle` refuses.
     func testWithNoLiveSessionAndBothLivesInsideTheWindowNothingIsResolved() throws {
         let now = Date()
         let fixture = try resumedSession(now: now.addingTimeInterval(-3 * 86_400),
@@ -2247,43 +1739,17 @@ final class UsageAttributionTests: XCTestCase {
         XCTAssertEqual(snapshot.ambiguousUsageSessions, 1)
     }
 
-    /// **Both windows are settled against the same live sessions**, and nothing
-    /// else in the suite says so.
+    /// Both windows are settled against the same live sessions.
     ///
-    /// `spread` is one function called twice because "whose spend is this" may have
-    /// only one policy in one snapshot (SPEC §2.9). The live-session map is that
-    /// policy, so a window given it while the other went without would be exactly
-    /// the split the single function exists to prevent — and it would be invisible,
-    /// since each window's figures are read on their own.
+    /// `spread` is one function called twice because attribution may have only one
+    /// policy per snapshot (SPEC §2.9); a window given the live-session map while the
+    /// other went without would be invisible, since each window's figures are read on
+    /// their own.
     ///
-    /// The fixture makes both windows resolvable on their own: the rival life is a
-    /// month old, so it falls outside the week as well as the hour, and only the
-    /// live session's refusal keeps either figure off a row.
-    ///
-    /// The live record names that rival life, and it used to name
-    /// `/private/tmp/somewhere-else` — a directory among none of the copies, which
-    /// cannot happen for the reason
-    /// `testALiveSessionWhoseOwnLifeFellOutOfTheWindowLeavesTheContestAmbiguous`
-    /// gives: a running session has a transcript under the slug of the directory it
-    /// started in, and `slugsBySessionId` lists every copy there is. Pointing it at
-    /// `previous` costs the fixture nothing — that life is already a month silent,
-    /// so both windows narrow it away and the veto fires in both exactly as before —
-    /// and it buys the difference between "implausible" and "impossible": a session
-    /// resumed elsewhere and left idle for a month is a session anyone could have.
-    ///
-    /// Checked by passing `[:]` to one `spread` call and then to the other, and
-    /// the two directions are **not** symmetric — the note here used to claim each
-    /// way round turns one half red "and nothing else in the file notices", which
-    /// holds for one of them only. Starving the **week** takes down 1 test case and
-    /// 2 assertions of 639: this one, alone, as claimed. Starving the **hour**
-    /// takes down 2 test cases and 4 assertions — this one and
-    /// `testALiveSessionWhoseOwnLifeFellOutOfTheWindowLeavesTheContestAmbiguous`,
-    /// whose fixture is an hourly contest and which therefore has every right to
-    /// notice. Rerun on the fixture above (2026-08-28), because moving the live
-    /// record is a change to what those mutations can be caught by: same 1 case and
-    /// 2 assertions, same 2 cases and 4 assertions. Deleting the veto in `settle`
-    /// outright was rerun on it too — all four assertions here go red, 2 cases and
-    /// 6 assertions of 639 across the file, exactly as before the move.
+    /// The rival life is a month old, so both windows narrow it away and only the
+    /// live session's refusal keeps either figure off a row. The live record names that
+    /// rival life: a running session always has a transcript under its own slug (see
+    /// `testALiveSessionWhoseOwnLifeFellOutOfTheWindowLeavesTheContestAmbiguous`).
     func testBothWindowsAreSettledAgainstTheSameLiveSessions() throws {
         let now = Date()
         let fixture = try resumedSession(now: now, silentFor: 30 * 86_400)
@@ -2421,20 +1887,11 @@ final class UsageJoinTests: XCTestCase {
         XCTAssertEqual(row?.usage?.input, 20)
     }
 
-    /// A subdirectory of a project is *not* the project, and this is a deliberate
-    /// narrowing rather than an oversight.
-    ///
-    /// The old rule matched paths and so counted `<project>/macos` as the
-    /// project's. The rule matches slugs now, and a slug has lost the
-    /// separators: `-Users-x-Data-Projects-switcher-macos` is exactly what a
-    /// project genuinely called `switcher-macos` would be filed under, and
-    /// nothing can tell the two apart after the fact. Worktrees are the one
-    /// exception, and only because they are *enumerated* — the app knows their
-    /// real paths and slugs those.
-    ///
-    /// So such spend lands on no row, which is the honest outcome. On the live
-    /// 7-day window it costs nothing: all 30 local sessions were filed under a
-    /// project's own slug or a worktree's (measured 2026-08-17).
+    /// A subdirectory of a project is not the project, deliberately: matching is by
+    /// slug, and a slug has lost its separators, so
+    /// `-Users-x-Data-Projects-switcher-macos` is indistinguishable from a project
+    /// called `switcher-macos`. Worktrees are the exception because they are enumerated
+    /// and slugged from their real paths. Such spend lands on no row.
     func testSpendUnderASubdirectorySlugDoesNotReachTheProject() {
         let snapshot = assemble(spend: [projectPath + "/macos": tokens(3)])
         XCTAssertNil(snapshot.projects.first { $0.project?.path == projectPath }?.usage)
@@ -2472,17 +1929,11 @@ final class UsageJoinTests: XCTestCase {
         XCTAssertNil(snapshot.projects.first { $0.id.hasPrefix("cwd:") })
     }
 
-    /// Two windows on one project both carry the project's whole spend, and both
-    /// carry the same number. The decision, not an accident: the figure belongs
-    /// to the project. Sessions reach a window only through `distribute`, which
-    /// matches the chat topic against a title prefix VSCode truncated and gives
-    /// the rest to the frontmost window (SPEC §8), so a per-window share would
-    /// be that guess with a number printed on it. Both rows are labelled with
-    /// the project's name, so one figure twice reads correctly.
-    ///
-    /// The consequence worth naming: the rows of a snapshot no longer add up to
-    /// its total once a project has two windows. That is why `--dump` prints the
-    /// total and the rows and asserts nothing between them.
+    /// Two windows on one project both carry the project's whole spend. Sessions reach a
+    /// window only through `distribute`'s title-prefix guess (SPEC §8), so a per-window
+    /// share would print that guess as a number; both rows are labelled with the
+    /// project name. So rows no longer add up to the total once a project has two
+    /// windows, which is why `--dump` asserts nothing between them.
     func testBothWindowsOfOneProjectCarryTheSameSpend() {
         let first = TestFixtures.window(index: 0,
                                         title: "one thing \u{2014} switcher (Workspace)",
@@ -2543,14 +1994,10 @@ final class UsageJoinTests: XCTestCase {
         XCTAssertEqual(orphan.hourlyUsage?.input, 4)
     }
 
-    /// **The capped week.** The gateway keeps its 200 largest consumers over the
-    /// week and drops the rest, so a session spending right now after a quiet week
-    /// is in the hour's report and absent from the week's (§2.9). Its row still
-    /// has to show the rate: that session is the very one the rate exists for.
-    ///
-    /// The fixture genuinely has no week figure for this project — the week's
-    /// table is about another directory entirely — because a fixture that happened
-    /// to carry one would prove nothing about the case.
+    /// The capped week: the gateway keeps its 200 largest weekly consumers, so a session
+    /// spending now after a quiet week is in the hour's report and absent from the
+    /// week's (§2.9). Its row still shows the rate. The fixture has no week figure for
+    /// this project, so it proves the case.
     func testARowAbsentFromTheWeeksReportStillShowsItsHour() throws {
         let snapshot = assemble(spend: ["/tmp/somebody-else": tokens(500)],
                                 hourly: [projectPath: tokens(6)])
@@ -2659,17 +2106,10 @@ final class UsageJoinTests: XCTestCase {
     }
 }
 
-/// Which project a working directory belongs to — the rule both loops of
-/// `assemble` route through, the gateway's directories and the live sessions
-/// alike. It lives in this file because attributing spend is what made it
-/// load-bearing a second time.
-///
-/// Asked of `DataSource.project(for:in:prefixes:)` directly rather than through
-/// `assemble`: the matching is what has to be pinned down, and through the
-/// assembly every case needs a fixture of several projects and comes back as a
-/// figure missing from a row rather than as the wrong match. The suite exists
-/// because none of this was held by anything — deleting the `+ "/"` that
-/// `prefixes(of:)` is entirely made of left the whole suite green.
+/// Which project a working directory belongs to, the rule both loops of `assemble`
+/// route through.
+/// Asked of `DataSource.project(for:in:prefixes:)` directly: through `assemble` a
+/// wrong match comes back only as a figure missing from a row.
 final class ProjectMatchingTests: XCTestCase {
 
     private func match(_ cwd: String, in paths: [String]) -> String? {
@@ -2681,22 +2121,11 @@ final class ProjectMatchingTests: XCTestCase {
                                   prefixes: DataSource.prefixes(of: projects))?.path
     }
 
-    /// A path that merely *starts* with a project's path is not inside it. This
-    /// is the separator's whole job, and the machine has the pairs that make it
-    /// cost something: `asakusa_lab` beside `asakusa_lab_glaze_resolver`,
-    /// `portainer` beside `portainer-agent`. Without it the younger project's
-    /// entire spend, and every session running in it, is attributed to the older
-    /// project's row.
-    ///
-    /// Checked by deleting the `+ "/"`: this test is the only one that fails,
-    /// every other test in the suite passes (re-checked 2026-08-17, when the
-    /// suite was 409 tests: three assertions here, 408 others green).
-    /// Note which assertions do the work — three of the five below, and the two
-    /// that stay green stay green for two different reasons. The one with both
-    /// projects in the list is green either way because the deeper prefix wins
-    /// the sibling back; the control is green either way because it is genuine
-    /// containment, which matches with the separator and without it. The
-    /// separator only shows up when the sibling is not in the list.
+    /// A path that merely starts with a project's path is not inside it: that is the
+    /// `+ "/"` separator's job (`asakusa_lab` beside `asakusa_lab_glaze_resolver`,
+    /// `portainer` beside `portainer-agent`). Only three of the five assertions depend
+    /// on it: with both projects listed the deeper prefix wins anyway, and the control
+    /// is genuine containment.
     func testASiblingWhoseNameStartsWithAnothersIsNotInsideIt() {
         XCTAssertNil(match("/a/bc", in: ["/a/b"]),
                      "half a path component is not containment")
@@ -2713,32 +2142,16 @@ final class ProjectMatchingTests: XCTestCase {
                        "the spend of the agent stays on the agent's row")
     }
 
-    /// An exact match beats a project the path merely sits inside — and does so
-    /// whichever order the two arrive in. The walk returns the moment it sees
-    /// the exact match and keeps the deepest prefix as a running maximum, so
-    /// meeting the container first must not change the answer.
-    ///
-    /// That the exact branch exists at all is covered everywhere (deleting it
-    /// fails 28 tests). What only this holds is which of the two wins when both
-    /// are there: letting the deepest prefix win instead — the exact match
-    /// remembered and used only as a fallback — fails this test and nothing
-    /// else.
+    /// An exact match beats a containing project, in either arrival order: the walk
+    /// returns on the exact match and keeps the deepest prefix as a running maximum.
     func testAnExactMatchWinsOverAProjectThatContainsIt() {
         XCTAssertEqual(match("/a/b/c", in: ["/a/b", "/a/b/c"]), "/a/b/c", "container first")
         XCTAssertEqual(match("/a/b/c", in: ["/a/b/c", "/a/b"]), "/a/b/c", "exact first")
     }
 
-    /// Of several projects a directory sits inside, the deepest one takes it —
-    /// again in both orders, because the maximum is running and the tie rule is
-    /// "the first one wins".
-    ///
-    /// Checked by keeping the first containing project instead of the deepest:
-    /// this test is the only one that fails, every other test in the suite
-    /// passes (re-checked 2026-08-17, when the suite was 409 tests: this one,
-    /// 408 others green) — and only the `shallow first`
-    /// half of it fails, since with the deep project first the broken rule
-    /// happens to answer correctly. Which is the whole reason for asking both
-    /// orders.
+    /// Of several containing projects the deepest takes it, asked in both orders since
+    /// the maximum is running and ties go to the first; with the deep project first a
+    /// "first containing" rule would answer correctly by accident.
     func testTheDeepestContainingProjectWins() {
         XCTAssertEqual(match("/a/b/c/d", in: ["/a", "/a/b"]), "/a/b", "shallow first")
         XCTAssertEqual(match("/a/b/c/d", in: ["/a/b", "/a"]), "/a/b", "deep first")
@@ -2795,22 +2208,18 @@ final class UsageWiringTests: XCTestCase {
 /// runs.
 final class UsageStoreTests: XCTestCase {
 
-    /// Answers the three endpoints from the fixtures, or fails whichever of them
-    /// is handed `nil`.
+    /// Answers the three endpoints from the fixtures, or fails whichever of them is
+    /// handed `nil`.
     ///
-    /// The history is checked for first, because its path (`/gw/usage/acc2/
-    /// history`) begins with the quota endpoint's and would otherwise be served
-    /// the quota body — which decodes into nothing and would look like a
-    /// malformed gateway rather than a test that misrouted itself.
+    /// The history is checked first: its path (`/gw/usage/acc2/history`) begins with the
+    /// quota endpoint's and would otherwise be served the quota body.
     /// - Parameters:
-    ///   - sessionsBySince: a body for one particular `/gw/sessions` window,
-    ///     keyed by the `since` it asks for. The pass makes two calls to that one
-    ///     path — the week's and the sliding hour's — so a test that needs to
-    ///     tell them apart has to answer them apart; anything not named here
-    ///     falls back to `sessions`. (It was three while the histories half
-    ///     priced a percentage point in tokens; that request is gone.)
+    ///   - sessionsBySince: a body for one `/gw/sessions` window, keyed by the `since` it
+    ///     asks for. The pass calls that path twice (the week and the sliding hour), so a
+    ///     test that tells them apart answers them apart; anything not named here falls
+    ///     back to `sessions`.
     ///   - unreachableSince: the windows that fail instead of answering, same key.
-    ///     Failing *one* window is the only way to ask whether the blame names it.
+    ///     Failing one window is the only way to ask whether the blame names it.
     private func transport(usage: String? = UsageFixtures.usage,
                            sessions: String? = "{\"since\": 1786761516, \"sessions\": []}",
                            sessionsBySince: [Int: String] = [:],
@@ -2825,15 +2234,10 @@ final class UsageStoreTests: XCTestCase {
             log?.record(request.url)
             let body: String?
             if path.hasSuffix("/status") {
-                // `/gw/status`, which the histories half asks on the histories'
-                // cadence for the one thing it needs from it: who is switched out
-                // of the rotation. Before this arm existed the path fell to the
-                // `else` and was served the `/gw/usage` body, whose `accounts` is a
-                // *dictionary* where `GatewayStatus` decodes an array — so it threw,
-                // every pass in this file set `rotationFailure`, and the figure
-                // still came out right because the half fails open. A fixture that
-                // reaches the correct answer through an error on every run is not
-                // exercising the switch at all.
+                // `/gw/status`, asked on the histories' cadence for who is switched out of the
+                // rotation. Without this arm the path would fall to the `else` and get the
+                // `/gw/usage` body, whose `accounts` is a dictionary, so every pass would set
+                // `rotationFailure`.
                 body = rotation
             } else if path.hasSuffix("/history") {
                 // `/gw/usage/<label>/history`, so the label is the component
@@ -2866,15 +2270,9 @@ final class UsageStoreTests: XCTestCase {
     /// One account's series as the gateway sends it, `readings` spread evenly
     /// over `overHours`.
     /// The instant every pass in this suite polls at, and the instant every
-    /// history fixture below **ends** at.
-    ///
-    /// One constant for both halves because the figure is measured over the
-    /// trailing `FleetCapacity.burnWindowHours` counted back from the pass's own
-    /// `now`: a fixture anchored anywhere else lands outside that window and is
-    /// refused, which is a fixture testing the refusal rather than the thing it
-    /// was written for. Before the window existed the series ran forward from
-    /// 1786700000 and the passes polled at 1786800000, two unrelated instants that
-    /// happened to overlap.
+    /// history fixture below ends at: the figure is measured over the trailing
+    /// `FleetCapacity.burnWindowHours` from the pass's own `now`, so a fixture anchored
+    /// elsewhere would be refused.
     private static let pollInstant = Date(timeIntervalSince1970: 1_786_800_000)
 
     private static func historySeries(label: String = "acc2",
@@ -2895,15 +2293,10 @@ final class UsageStoreTests: XCTestCase {
     /// default.
     private static let risingHistory = historySeries(readings: [0, 5, 10])
 
-    /// `GET /gw/status` for a fleet nobody has switched off: the default, because
-    /// the switch is the exceptional state and a suite whose every pass excluded
-    /// somebody would be measuring the exception.
-    ///
-    /// All three labels any fixture in this file names, so that swapping a
-    /// `usage` body does not silently change who the rotation knows about.
-    /// `eligible` is present because `GatewayStatus` refuses a row without it, and
-    /// it is `true` here for the same reason the switches are `false`: this is the
-    /// quiet fleet.
+    /// `GET /gw/status` for a fleet nobody has switched off: the default, since the
+    /// switch is the exceptional state. All three labels any fixture in this file
+    /// names, so swapping a `usage` body does not change who the rotation knows about.
+    /// `eligible` is present because `GatewayStatus` refuses a row without it.
     static let nobodySwitchedOff = """
     {"accounts": [
        {"label": "acc2", "eligible": true, "disabled": false,
@@ -2919,37 +2312,22 @@ final class UsageStoreTests: XCTestCase {
         UsageClient(baseURL: Config.default.resolvedUsageBaseURL, transport: transport)
     }
 
-    /// A window's worth of spending, for the passes that need the sessions half
-    /// to carry something rather than an empty list. One session, and its
-    /// counters weigh 65.6M input-equivalent:
+    /// A window's worth of spending, for passes that need the sessions half to carry
+    /// something. One session, weighing 65.6M input-equivalent:
     /// `50 + 5 x 24264 + 1.25 x 41120 + 0.1 x 654_181_300`.
-    ///
-    /// It used to be load-bearing on the *histories* half: that half asked its
-    /// own `/gw/sessions` to price a percentage point in tokens, and this body
-    /// was the numerator of the price. Both sides of the figure are percentage
-    /// points now, so this is fixture furniture again.
     private static let spendingSessions = """
     {"since": 1786761516, "sessions": [
       {"session_id": "s-1", "input_tokens": 50, "output_tokens": 24264,
        "cache_creation_input_tokens": 41120, "cache_read_input_tokens": 654181300}]}
     """
 
-    /// **The histories half asks one endpoint, and `/gw/sessions` is not it.**
+    /// The histories half asks no `/gw/sessions` question of its own: both sides of the
+    /// figure are percentage points, so there is nothing to convert.
     ///
-    /// It used to ask two. The figure was a token rate over a token allowance,
-    /// and the allowance was priced by dividing a window's tokens by that same
-    /// window's percentage points — so the half asked `/gw/sessions` with the
-    /// `since` it asked the histories with, because a ratio of two different
-    /// windows is the price of nothing. Both sides of the figure are percentage
-    /// points now, so there is nothing left to convert: the second request is
-    /// gone and the half is a plain `do`/`catch`.
-    ///
-    /// What is asked of `/gw/sessions` is therefore exactly the panel's own two
-    /// windows — the week and the sliding hour — and neither of them may drift
-    /// onto the histories' 48 h. Driven from a real pass rather than from the
-    /// constants, because the mistake this catches is a *caller* that kept the
-    /// old request: counting the calls is the only way to see one that answers
-    /// harmlessly and costs 43 KB every ten minutes.
+    /// `/gw/sessions` is asked over exactly the panel's two windows, the week and the
+    /// sliding hour, never the histories' 48 h. Driven from a real pass, because a
+    /// caller making an extra request answers harmlessly and is only visible by
+    /// counting calls.
     func testTheHistoriesHalfAsksNoSessionQuestionOfItsOwn() async {
         let log = RequestLog()
         let now = Date(timeIntervalSince1970: 1_786_800_000)
@@ -2974,18 +2352,14 @@ final class UsageStoreTests: XCTestCase {
             """)
     }
 
-    /// A good pass produces both readings the surfaces print, and the second one
-    /// is the arithmetic `FleetCapacity.burnAgainstRefill` was tested on.
+    /// A good pass produces both readings the surfaces print, the second being the
+    /// arithmetic `FleetCapacity.burnAgainstRefill` was tested on.
     ///
-    /// `usageWithTokens` names one account, `acc2`, and `risingHistory` is its
-    /// series: 10 pp burned over the 8 h window, which is 1.25 pp/h. One
-    /// contributor refills 100 pp over 168 h, which is 0.5952 pp/h. 210%, and it
-    /// is over the refill rate — the state the menu bar colours for.
-    ///
-    /// **The pass polls at `pollInstant` and not at `Date()`**, which it used to.
-    /// A wall-clock `now` was harmless while the measurement took whatever span
-    /// the series held; against a trailing window it puts the window three years
-    /// away from the fixture and the pass answers no figure at all.
+    /// `usageWithTokens` names one account, `acc2`, and `risingHistory` is its series:
+    /// 10 pp over the 8 h window, 1.25 pp/h. One contributor refills 100 pp over 168 h,
+    /// 0.5952 pp/h. 210%, over the refill rate: the state the menu bar colours for.
+    /// The pass polls at `pollInstant`, not `Date()`: against a trailing window a
+    /// wall-clock `now` would leave the fixture outside it.
     func testAGoodPassProducesBothOfTheHeadlineReadings() async {
         let snapshot = await UsageStore.poll(
             client: client(transport(usage: UsageFixtures.usageWithTokens,
@@ -3005,38 +2379,22 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertNil(snapshot.rotationFailure, "and `/gw/status` answered, so nobody is switched off")
     }
 
-    /// **The pass reads the operator's switch from `/gw/status`, and it reads
-    /// `disabled` rather than `eligible`.** One fleet, both halves of the rule,
-    /// and three separable answers so that neither half can pass by luck.
-    ///
-    /// `UsageFixtures.status` is the live body that holds all three states at
-    /// once, and the burns are chosen so that every wrong reading of it lands on a
-    /// different number:
+    /// The pass reads the operator's switch from `/gw/status`, and reads `disabled`
+    /// rather than `eligible`. `UsageFixtures.status` holds all three states, and the
+    /// burns make every wrong reading land on a different number:
     ///
     ///     acc2  eligible, switched on    1.25 pp/h   counted
     ///     acc3  not eligible, off        2.50 pp/h   excluded — the operator's switch
     ///     main  not eligible, switched on 0.50 pp/h  counted — this is the trap
     ///
     ///     by `disabled`   1.75 / (2 x 0.5952) = 147%   <- correct
-    ///     no exclusion    4.25 / (3 x 0.5952) = 238%   <- the reported defect
+    ///     no exclusion    4.25 / (3 x 0.5952) = 238%   <- switched-off account counted
     ///     by `eligible`   1.25 / (1 x 0.5952) = 210%   <- the easy wrong fix
     ///
-    /// The middle row is what the live fleet printed on 2026-09-09 with a
-    /// switched-off acc3 in the denominator. The last is the one worth a fixture
-    /// of its own: `eligible` is `is_eligible`, which goes false the moment a
-    /// five-hour window fills, so reading it would drop `main` — an account in the
-    /// rotation, burning, and back within the hour — and take its burn out of the
-    /// numerator with its refill (`AccountSwitch` carries the measurement).
-    ///
-    /// Mutations, both run. Dropping the filter in `burnAgainstRefill` gives 238%
-    /// and reddens four assertions here and five in `FleetCapacityBurnTests`,
-    /// three test cases in all. Excluding by `eligible` gives 210% and reddens
-    /// the four here — and **it takes two files to write**, which is a result in
-    /// itself: `AccountSwitch` does not carry `eligible` and `GatewayStatus` keeps
-    /// it private, so the wrong fix cannot be typed without widening the model
-    /// first. The mutation had to add an `ineligible` set to `GatewayStatus` and
-    /// point `poll` at it. That barrier is a reason to keep this test rather than
-    /// to drop it: it stops the fix being written by accident, not on purpose.
+    /// `eligible` goes false when a five-hour window fills, so reading it would drop
+    /// `main`, an account in the rotation and burning. `AccountSwitch` does not carry
+    /// `eligible` and `GatewayStatus` keeps it private, so that fix cannot be typed
+    /// without widening the model first.
     func testTheSwitchedOffAccountLeavesTheFleetAndTheMerelyIneligibleDoesNot() async throws {
         let snapshot = await UsageStore.poll(
             client: client(transport(usage: UsageFixtures.usageThreeAccounts,
@@ -3068,32 +2426,14 @@ final class UsageStoreTests: XCTestCase {
             """)
     }
 
-    /// What the fail-open in `UsageStore.poll` actually costs, on the one fleet in
-    /// this file that can be made to pay it.
+    /// What the fail-open in `UsageStore.poll` costs, on a fleet that holds a
+    /// switched-off account (the three accounts of
+    /// `testTheSwitchedOffAccountLeavesTheFleetAndTheMerelyIneligibleDoesNot`, asked
+    /// twice). `testTheHistoriesHalfIsBlamedByItsOwnName` cannot show the price: nobody
+    /// is switched off there.
     ///
-    /// `testTheHistoriesHalfIsBlamedByItsOwnName` already asks that a dead
-    /// `/gw/status` leaves the figure standing, and it cannot ask anything about
-    /// the price: nobody is switched off in that fleet, so the pass with the
-    /// endpoint dead and the pass with it alive answer the same 210% and the
-    /// miss is worth exactly nothing. The claim in the comment there — that
-    /// leaving a switched-off account in costs points — needs a fleet that holds
-    /// one, and this is that fleet: the three accounts of
-    /// `testTheSwitchedOffAccountLeavesTheFleetAndTheMerelyIneligibleDoesNot`,
-    /// asked twice.
-    ///
-    /// The price here is **91 points and loud**, 147% against 238%. The direction
-    /// is a property of this fixture and not of the mechanism: acc3 burns 2.5 pp/h
-    /// against 1.25 and 0.5 on its neighbours, so leaving it in pulls the
-    /// unweighted mean up. Turn the burns round and the same miss pulls it down —
-    /// which is why nothing here asserts a direction, and why `UsageStore.poll`
-    /// carries a live sweep with both signs in it rather than a rule.
-    ///
-    /// Mutation: making the pass refuse the figure when `/gw/status` fails —
-    /// wrapping the histories block in `guard result.rotationFailure == nil` —
-    /// reddens the second half of this and the figure assertion in
-    /// `testTheHistoriesHalfIsBlamedByItsOwnName` with it. What only this one can
-    /// redden is the *difference*: a fleet with nobody switched off answers the
-    /// same number either way.
+    /// Here it is 147% against 238%. The direction belongs to this fixture (acc3 burns
+    /// more than its neighbours), not to the mechanism, so nothing asserts a direction.
     func testAFailedRotationLeavesTheFigureStandingAtWhateverThatCosts() async throws {
         func pass(rotation: String?) async -> UsageSnapshot {
             await UsageStore.poll(
@@ -3130,21 +2470,11 @@ final class UsageStoreTests: XCTestCase {
             """)
     }
 
-    /// The half's blame names the endpoint it asked, because a half that fails
-    /// without saying where is a half nobody can debug (§4).
-    ///
-    /// **One endpoint to name, and that is the change.** While two requests made
-    /// up this half they went to two different paths, an `Attempt` pair told them
-    /// apart, and this test asked that `/gw/sessions` failing be blamed on
-    /// `/gw/sessions` rather than on the histories. With the second request gone
-    /// the question left is the other half of the same rule: the histories
-    /// failing must not reach the *sessions* half's blame, which is a separate
-    /// field with its own window in it.
-    /// **And the histories half now makes two requests again**, so the rule it was
-    /// written for is live once more inside the half rather than only across it:
-    /// `/gw/status` rides the same cadence and must be blamed by its own name in
-    /// its own field, or a reader sent to `/gw/usage/<label>/history` looks at an
-    /// endpoint that answered perfectly.
+    /// The half's blame names the endpoint it asked, because a failure without a
+    /// location cannot be debugged (§4). The histories failing must not reach the
+    /// sessions half's blame, a separate field with its own window. `/gw/status` rides
+    /// the histories' cadence and must be blamed by its own name in its own field, or a
+    /// reader is sent to `/gw/usage/<label>/history`, which answered fine.
     func testTheHistoriesHalfIsBlamedByItsOwnName() async {
         let noHistory = await UsageStore.poll(
             client: client(transport(usage: UsageFixtures.usageWithTokens,
@@ -3155,9 +2485,8 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertNil(noHistory.sessionsFailure, "the week's own half answered and is not to blame")
         XCTAssertNil(noHistory.quotaFailure)
 
-        // And the other way round: the sessions half failing leaves the histories
-        // half alone, figure and all. They share an endpoint no longer, so there
-        // is nothing to confuse — which is the claim being pinned.
+        // And the other way round: the sessions half failing leaves the histories half
+        // alone, figure and all.
         let noSessions = await UsageStore.poll(
             client: client(transport(usage: UsageFixtures.usageWithTokens, sessions: nil)),
             previous: .empty, now: Self.pollInstant)
@@ -3200,15 +2529,10 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.quotaFetchedAt, now)
     }
 
-    /// A gateway that is not there is ordinary: the numbers from the pass before
-    /// stay put and only the blame changes. Blinking to blank would be worse.
-    ///
-    /// And the stamp stays with the numbers it belongs to. Moving it along with
-    /// the attempt is what had the popover describing hour-old figures as
-    /// fetched a moment ago, with the reason they were not standing right
-    /// underneath. The pass keeps no stamp of the attempt at all any more: what
-    /// says a failed pass ran are the numbers it left standing and the blame it
-    /// wrote, both of them here.
+    /// A gateway that is not there is ordinary: the numbers from the pass before stay
+    /// and only the blame changes. The stamp stays with the numbers it belongs to, so
+    /// the popover never describes old figures as just fetched; a failed pass is seen
+    /// through the numbers it left and the blame it wrote.
     func testAFailedPassKeepsThePreviousNumbersAndTheirStamps() async {
         let earlier = Date(timeIntervalSince1970: 1_786_700_000)
         var previous = UsageSnapshot.empty
@@ -3258,19 +2582,11 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertNotNil(second.quotaFetchedAt)
     }
 
-    /// The bridge `--dump` uses, against a port nothing listens on: a gateway
-    /// that is not there has to come back as a line to print, not as a dump that
-    /// never returns and not as a crash.
-    ///
-    /// What it asserts is as important as that it passes. "There is a failure,
-    /// no numbers and no fleet mean" is *also* what the 20-second watchdog
-    /// returns, so a test that stops there passes just as happily over a pass
-    /// that deadlocked on the main actor — checked by removing `nonisolated`
-    /// from `UsageStore.windowSeconds`, where it went green in 20.005 s. So the
-    /// failure has to name the endpoints that could not be reached, and the
-    /// whole thing has to be over long before the watchdog: two refused
-    /// connections are immediate, and even two full client timeouts would be
-    /// ten seconds.
+    /// The bridge `--dump` uses, against a port nothing listens on: a missing gateway
+    /// comes back as a line to print, not a hang or a crash.
+    /// "A failure, no numbers, no fleet mean" is also what the 20-second watchdog
+    /// returns, so the failure must name the unreachable endpoints and the call must
+    /// finish well before the watchdog (two refused connections are immediate).
     func testTheSynchronousPassSurvivesAGatewayThatIsNotThere() throws {
         var config = Config.default
         config.usageBaseURL = "http://127.0.0.1:1"
@@ -3293,15 +2609,11 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertNil(snapshot.fleetSevenDayMean)
     }
 
-    /// The pass must not need the main thread — §6, and more immediately: the
-    /// synchronous bridge `--dump` uses blocks the main thread while it waits.
-    ///
-    /// This deadlocked in exactly one way, and the way is not obvious: reading a
-    /// `static let` declared on the `@MainActor` store made the compiler insert
-    /// a hop to the main actor, silently and with no diagnostic under
-    /// `-strict-concurrency=complete`, and everything after that read ran on the
-    /// main thread. A timed wait rather than an open one so the regression is a
-    /// failure and not a hung test run.
+    /// The pass must not need the main thread (§6): the synchronous `--dump` bridge
+    /// blocks the main thread while it waits. Reading a `static let` on the
+    /// `@MainActor` store makes the compiler insert a silent hop to the main actor, even
+    /// under `-strict-concurrency=complete`. A timed wait makes a regression a failure,
+    /// not a hung run.
     func testPollDoesNotNeedTheMainThread() {
         let client = client(transport())
         let semaphore = DispatchSemaphore(value: 0)
@@ -3351,22 +2663,13 @@ final class UsageStoreTests: XCTestCase {
         return "{\"since\": 1786761516, \"sessions\": [\(items.joined(separator: ","))]}"
     }
 
-    /// **The hour is asked for as an hour, and that length is the figure's entire
-    /// claim to being a rate.**
-    ///
-    /// The gateway's aggregates are windowed — measured, §2.9 — so the spend it
-    /// reports for the last 3600 s already *is* tokens per hour, and no code
-    /// anywhere divides it by anything. Which is exactly why the constant needs
-    /// holding: at two hours the row would print twice the rate under the same
-    /// label, and every test of the arithmetic would stay green, there being no
-    /// arithmetic to fail. So the value is asserted with the reasoning beside it —
-    /// the pattern `historyWindowSeconds` already uses for a bound no fixture can
-    /// be walked to.
-    ///
-    /// Two halves that *are* walkable stand next to it. The request must actually
-    /// go out over this window, and the hour and the week must stay two different
-    /// questions: collapse them and the pass pays twice for one body while the
-    /// "rate" silently becomes the week's total.
+    /// The hour is asked for as exactly an hour, and that length is the figure's whole
+    /// claim to being a rate: the gateway's aggregates are windowed (§2.9), so the
+    /// spend for the last 3600 s already is tokens per hour and nothing divides it. At
+    /// two hours the row would print twice the rate with no arithmetic to fail, so the
+    /// value is asserted, as `historyWindowSeconds` is.
+    /// The request must go out over this window, and the hour and the week must stay
+    /// two different questions.
     func testTheHourlyFigureIsAskedOverExactlyOneSlidingHour() async {
         let log = RequestLog()
         let now = Date(timeIntervalSince1970: 1_786_800_000)
@@ -3389,22 +2692,14 @@ final class UsageStoreTests: XCTestCase {
                           "the rate and the total became one question over one window")
     }
 
-    /// **Both reports resolve their slugs through one union of identifiers.**
+    /// Both reports resolve their slugs through one union of identifiers.
     ///
-    /// `slugsBySessionId` walks every slug directory under `~/.claude/projects`
-    /// and is the expensive part of the pass (§6), so it runs once — and once
-    /// means the identifiers of *both* reports have to go into it.
-    ///
-    /// The week's list alone will not do, and the reason is not caution: the
-    /// gateway keeps the 200 largest consumers and drops the rest, so a session
-    /// that has spent little across the week but is burning right now can be in
-    /// the hour's report and missing from the week's. Fold the hour against a map
-    /// built from the week's identifiers and that session — the live one, the only
-    /// kind this figure exists to show — is filed as spend with no owner.
-    ///
-    /// The fixture puts each window's session in a different project, so the two
-    /// folds cannot borrow each other's answer: the mutation "resolve the week's
-    /// identifiers only" empties the hourly map outright.
+    /// `slugsBySessionId` walks every slug directory under `~/.claude/projects` and is
+    /// the expensive part of the pass (§6), so it runs once with both reports'
+    /// identifiers. The gateway keeps only the 200 largest weekly consumers, so a
+    /// session burning now can be in the hour's report and missing from the week's.
+    /// Each window's session is in a different project, so the folds cannot borrow each
+    /// other's answer.
     func testBothWindowsFoldTheirSlugsThroughOneUnionOfIdentifiers() async throws {
         let root = try makeProjectsDirectory()
         try file("s-week", under: "/Users/x/slow", in: root)
@@ -3430,23 +2725,10 @@ final class UsageStoreTests: XCTestCase {
                        "a session with a transcript right here was called ownerless")
     }
 
-    /// One window failing leaves the other's figure standing, and the blame names
-    /// which window was lost.
-    ///
-    /// **Deliberately not the rule the histories half used to follow.** There, one
-    /// lost request took both figures with it, because the two were halves of one
-    /// ratio — a token rate over a token allowance — and a ratio of one half is
-    /// nothing. That pair is gone (both sides of the figure are percentage points
-    /// now), and this one was never it: these are two independent answers to the
-    /// same question over two windows, so throwing away a week's spend because the
-    /// hour timed out would delete a figure for no reason at all.
-    ///
-    /// And both calls go to `/gw/sessions`, so the path names neither — a half
-    /// that fails without saying which request is a half nobody can debug (§4).
-    /// This is the last pair of that shape in the pass.
-    /// Each direction is checked for the blame it should carry *and* for the blame
-    /// it should not: naming the window that answered sends the reader to the
-    /// wrong request, which is the whole failure this guards.
+    /// One window failing leaves the other's figure standing, and the blame names which
+    /// window was lost: these are two independent answers over two windows. Both calls
+    /// go to `/gw/sessions`, so the path names neither (§4). Each direction is checked
+    /// for the blame it should carry and the one it should not.
     func testOneWindowFailingLeavesTheOtherStandingAndIsBlamedByName() async throws {
         let root = try makeProjectsDirectory()
         try file("s-week", under: "/Users/x/slow", in: root)
@@ -3484,13 +2766,8 @@ final class UsageStoreTests: XCTestCase {
     }
 
     /// The hour is folded by the same `fold` as the week, so a session resumed in
-    /// another directory is set aside in both and counted in neither.
-    ///
-    /// A second policy for "whose spend is this" would put two answers to one
-    /// question in one snapshot. The cost of having no policy at all is worse than
-    /// it looks: dropping the hour's contested sessions would leave a project
-    /// being worked in *right now* reading as idle, for the single reason that its
-    /// chat was once resumed somewhere else.
+    /// another directory is set aside in both and counted in neither: one policy for
+    /// "whose spend is this" per snapshot.
     func testTheHourSetsAsideAContestedSessionExactlyAsTheWeekDoes() async throws {
         let root = try makeProjectsDirectory()
         try file("s-both", under: "/Users/x/one", in: root)
@@ -3513,18 +2790,10 @@ final class UsageStoreTests: XCTestCase {
                       "a contested session was counted onto a row after all")
     }
 
-    /// **Each window narrows a contested session against its own length.**
-    ///
-    /// One session, two copies, and the second copy last written three days ago:
-    /// inside the week, days outside the hour. So the week keeps both claims — over
-    /// seven days the gateway's single aggregate really does hold spend from both
-    /// lives — and the hour keeps one, because a file nothing has touched since
-    /// Tuesday cannot have spent in the last sixty minutes. Which project each
-    /// claim belongs to is settled a layer up; what is held here is that the two
-    /// windows are narrowed apart.
-    ///
-    /// Checked by narrowing the hour with `windowSeconds` instead of
-    /// `hourWindowSeconds`: the hour then keeps the stale copy and this fails.
+    /// Each window narrows a contested session against its own length. The second copy
+    /// was last written three days ago: inside the week, outside the hour. So the week
+    /// keeps both claims and the hour keeps one; which project each claim belongs to is
+    /// settled a layer up.
     func testEachWindowNarrowsAContestedSessionAgainstItsOwnLength() async throws {
         let root = try makeProjectsDirectory()
         let now = Date(timeIntervalSince1970: 1_786_800_000)
@@ -3547,20 +2816,9 @@ final class UsageStoreTests: XCTestCase {
                        "the identifier is what lets the live sessions be asked about this entry")
     }
 
-    /// **The hour's ownerless spend reaches the snapshot, and a line of `--dump`.**
-    ///
-    /// The week has always kept `unmatched` and printed it; the hourly fold threw
-    /// its copy away, so spend by a session with no local transcript — the agent
-    /// nodes, mostly — left the hour with nothing anywhere to notice it by. That
-    /// bucket does fill: `--dump` on this machine printed `no local session 1h:
-    /// 1 sessions, 179k ie` on 2026-08-27 beside the week's `1 sessions, 7.52M ie`,
-    /// the same session `71fbe714-…` in both, and `0 sessions, -` at 02:37 the next
-    /// night while the week still held it. So the hourly fold was discarding a live
-    /// figure — a stronger reason for the field than an empty bucket would have
-    /// been, and the reason the line is printed even when it reads zero.
-    ///
-    /// Checked by deleting the two assignments in the hourly branch of `poll`: the
-    /// counters go to zero and this fails.
+    /// The hour's ownerless spend reaches the snapshot and a line of `--dump`: spend by
+    /// a session with no local transcript (mostly the agent nodes). The line is printed
+    /// even when it reads zero.
     func testTheHoursOwnerlessSpendIsKeptAndPrinted() async throws {
         let root = try makeProjectsDirectory()
         try file("s-here", under: "/Users/x/project", in: root)
@@ -3590,60 +2848,17 @@ final class UsageStoreTests: XCTestCase {
 
     // MARK: - The histories' own half
 
-    /// **The window the histories are asked over is a constant, and this holds
-    /// the value, not merely a floor under it.**
+    /// The window the histories are asked over is a constant, and this holds the value,
+    /// not merely a floor: a floor alone does not catch shortening it.
     ///
-    /// It was a setting — `usageLoadWindowHours`, which chose between two ways of
-    /// estimating the week's demand and, by the same number, how deep to fetch.
-    /// Both estimators are gone and the setting with them, so the depth is fixed,
-    /// and it is fixed at 48 h for a reason on each side.
-    ///
-    /// **From below the floor moved, and it is now the measurement's own.** While
-    /// the figure was a token allowance the depth was argued from the split of the
-    /// day: a series shorter than 24 h has not seen every hour of the day even
-    /// once, so it could not be split, and 23 h answered nothing. There is no
-    /// split any more. What refuses a short series now is
-    /// `FleetCapacity.minimumMeasuredHours` = 6 h, four times shallower — and it
-    /// is still a refusal rather than a worse figure, which is what the control
-    /// half below proves. **That is why this control had to be re-derived rather
-    /// than re-pointed:** kept at 23/24 h it would have gone on passing while
-    /// testing a boundary that no longer exists anywhere in the code.
-    ///
-    /// **From above the argument was the ratio's and is no longer this constant's
-    /// at all**, which is why the test had to be renamed and not merely
-    /// re-pointed. Two arguments have already lived here and died: the price of a
-    /// point in tokens being steady across the range (6.934 / 7.047 / 7.044 M
-    /// tokens a point over 12, 24 and 48 h), and after it the ±1 pp sawtooth of §4
-    /// divided by the span — ±7.01 pp of figure at a 12 h window against ±1.65 at
-    /// 48 (2026-09-05 02:50Z). Since 2026-09-09 the figure is measured over a
-    /// trailing `FleetCapacity.burnWindowHours` = 8 h wherever the series reaches,
-    /// so the sawtooth's cost belongs to *that* constant and this one no longer
-    /// touches it. A test still called `…TheRatioIsSteadyOver` would have been a
-    /// retired reason signed by the compiler.
-    ///
-    /// **What is true today is that the fetch is deeper than its only reader**, and
-    /// this test says so rather than dressing that up. There is exactly one reader,
-    /// `FleetCapacity.burnAgainstRefill`, and it throws away everything older than
-    /// eight hours; the popover's chart, the obvious candidate for the other forty,
-    /// asks over `HistoryPeriod.seconds` and never over this window at all — which
-    /// is asserted below rather than asserted about, because a claim of that shape
-    /// is exactly the one that rots. Shrinking the fetch is live and unmeasured
-    /// (`UsageStore.historyWindowSeconds` carries the byte table and what a smaller
-    /// one would need), so the value is pinned with the reasoning beside it and
-    /// moving it stays a deliberate act.
-    ///
-    /// Deeper than 48 h is in any case not on offer: the accounts are capped at
-    /// `max_points` = 2000, so a week's request comes back truncated on all three.
-    /// **Retention is not the mechanism and this docblock used to say it was**, on
-    /// the 2026-08-17 reading that `since` of 7 and 30 days came back identical.
-    ///
-    /// **A floor alone would not have held it, and that was measured rather than
-    /// reasoned.** With only `>= 24 h` asserted here, shortening the constant on
-    /// a copy of the source killed nothing at all at 48 → 24 h — 0 of 532 — and
-    /// killed exactly this test at 24 → 23 h (2026-08-24). The equality is what
-    /// closes that, and it is now the *only* thing that does: the measurement
-    /// window is a separate constant, so 48 → 12 h no longer even reaches the
-    /// figure.
+    /// The only reader, `FleetCapacity.burnAgainstRefill`, measures over a trailing
+    /// `FleetCapacity.burnWindowHours` = 8 h and refuses a series shorter than
+    /// `FleetCapacity.minimumMeasuredHours` = 6 h, so the 48 h fetch is deeper than its
+    /// reader. The popover's chart asks over `HistoryPeriod.seconds`, not this window,
+    /// asserted below. Shrinking the fetch is unmeasured (see
+    /// `UsageStore.historyWindowSeconds`), so the value is pinned and moving it stays a
+    /// deliberate act. Deeper than 48 h is not on offer: accounts are capped at
+    /// `max_points` = 2000, so a week's request comes back truncated.
     func testTheHistoriesAreAskedOverOneFixedWindowWiderThanTheRatioMeasures() async {
         let log = RequestLog()
         let now = Self.pollInstant
@@ -3669,18 +2884,10 @@ final class UsageStoreTests: XCTestCase {
                        reader now and the docblock above is out of date
                        """)
 
-        // The control, and it is the whole point: just under the measurement's
-        // floor nothing is answered, so the floor is a boundary rather than a
-        // taste. Both halves are literals straddling `minimumMeasuredHours`, and
-        // the deep one used to be built from the constant — riding it, so moving
-        // the constant moved the fixture with it and the half stayed green.
-        //
-        // **What 5.99 h means changed with the window, and the number survives the
-        // change on its own merits.** It used to be the length the gateway returns
-        // for a six-hour request. Now the request is 48 h regardless, and this is
-        // an account that went quiet for the first two hours of the measurement
-        // window — the shape acc3 was in on 2026-09-09 and main's 52 h hole makes
-        // ordinary. The floor refuses it either way, which is what is being pinned.
+        // The control: just under the measurement's floor nothing is answered, so the floor
+        // is a boundary. Both halves are literals straddling `minimumMeasuredHours`, so
+        // moving the constant cannot move the fixture with it. 5.99 h is an account that
+        // went quiet for the first two hours of the measurement window.
         let floor = FleetCapacity.minimumMeasuredHours
         XCTAssertEqual(floor, 6, "the 5.99 h and 6.5 h below straddle this value and only this one")
         let shallow = await UsageStore.poll(
@@ -3698,28 +2905,18 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertNotNil(deep.fleetBurn, "the floor is one to stand on, not one to fall through")
     }
 
-    /// The same deadlock, one endpoint further on. `historyWindowSeconds` is
-    /// another `static let` on a `@MainActor` type read straight from the
-    /// `nonisolated async` pass, and losing `nonisolated` on it hops the rest of
-    /// the pass — two HTTP calls, the histories and the transcript walk — onto a
-    /// main thread that is standing on a semaphore right here.
+    /// The same deadlock, one endpoint further on: `historyWindowSeconds` is a
+    /// `static let` on a `@MainActor` type read from the `nonisolated async` pass, and
+    /// losing `nonisolated` on it hops the rest of the pass onto a main thread blocked
+    /// on a semaphore here.
     ///
-    /// Only that one, and the difference is worth naming because the two
-    /// constants read alike. `historyIntervalSeconds` has no `async` reader —
-    /// `shouldFetchHistories` is synchronous and `UsagePopoverView.historyStaleSeconds`
-    /// is a constant — so there is nowhere for the compiler to put a hop: taking
-    /// its `nonisolated` off (2026-08-17) leaves this test green and fails the
-    /// build instead, under the `-strict-concurrency=complete` the project has to
-    /// be clean under. What holds it is the compiler; what holds
-    /// `historyWindowSeconds` is the timeout below.
+    /// `historyIntervalSeconds` has no `async` reader, so losing its `nonisolated` fails
+    /// the build under `-strict-concurrency=complete` instead; the compiler holds that
+    /// one and the timeout below holds this one. Without the timeout a regression is a
+    /// run that never returns.
     ///
-    /// The timeout is the whole test. Without it a regression is a run that
-    /// never comes back, which is what this looked like when it happened to
-    /// `windowSeconds`: `--dump` hung forever and had to be found by sampling
-    /// the stuck process.
-    ///
-    /// A previous snapshot with no stamp, so the half actually runs — a pass
-    /// that skipped it would never read either constant and would prove nothing.
+    /// A previous snapshot with no stamp, so the half actually runs and reads the
+    /// constant.
     func testTheHistoriesPassDoesNotNeedTheMainThread() {
         let client = client(transport())
         let semaphore = DispatchSemaphore(value: 0)
@@ -3738,18 +2935,12 @@ final class UsageStoreTests: XCTestCase {
                         "the histories were never fetched, so neither constant was ever read")
     }
 
-    /// The half runs on its own clock, and the reason is bandwidth and nothing
-    /// else: one round over the fleet is 248 015 B, which is 1.5 MB/h at this
-    /// interval and 14.9 MB/h at the once-a-minute cadence of the rest of the
-    /// pass, on a laptop that is often on a tether. ("The figure is an average
-    /// over two days and cannot move fast enough to be worth it" stood here as
-    /// the second half of that and is dead — the ratio is measured over eight
-    /// hours now and moves inside ten minutes; the numbers are over
-    /// `UsageStore.historyIntervalSeconds`.)
-    ///
-    /// Driven to the state where the skip could fail to happen before it is
-    /// asked about: the first pass has to fetch, or "no second request" would be
-    /// true of a store that never asks at all.
+    /// The half runs on its own clock for bandwidth: one round over the fleet is
+    /// 248 015 B, 1.5 MB/h at this interval against 14.9 MB/h at the once-a-minute
+    /// cadence of the rest of the pass, often on a tether (see
+    /// `UsageStore.historyIntervalSeconds`).
+    /// The first pass has to fetch, or "no second request" would hold for a store that
+    /// never asks.
     func testTheHistoriesAreNotFetchedAgainWhileTheFigureIsYoung() async {
         let log = RequestLog()
         let client = client(transport(log: log))
@@ -3779,33 +2970,15 @@ final class UsageStoreTests: XCTestCase {
 
     /// The points that reach `FleetCapacity` are the gateway's own.
     ///
-    /// The other loader in this app, `UsageHistoryModel.load`, hands out
-    /// `withoutSourceLag(answer.points)` because the chart wants the sawtooth
-    /// gone, and routing this half through it would be an easy mistake to make
-    /// and a hard one to see. The fixture is the shape where it is not subtle: a
-    /// lone reading one point *below* the ceiling among ceiling readings is
-    /// exactly what that filter deletes, and it is the only thing keeping an
-    /// otherwise pinned account inside the measurement. Smoothed, the account is
-    /// refused as one that spent the whole window blocked, and it leaves with its
-    /// 100 pp of capacity as well as its demand.
+    /// `UsageHistoryModel.load` hands out `withoutSourceLag(answer.points)` for the
+    /// chart; routing this half through it is an easy mistake to miss. The fixture is a
+    /// lone reading one point below the ceiling among ceiling readings: exactly what the
+    /// filter deletes, and the only thing keeping that account inside the measurement.
+    /// Smoothed, the account is refused as blocked all window and leaves the
+    /// denominator, so the figure goes up from 105% to 210%.
     ///
-    /// Both halves are asserted here, because "the answer is not nil" alone
-    /// would pass over a filter that had never been applied to anything: the
-    /// filter is run on the very same points to show it does change them, and the
-    /// smoothed series is then put through `FleetCapacity` to show what that
-    /// would have cost.
-    ///
-    /// **The account the filter refuses need not burn anything, and that is what
-    /// changed with the metric.** While the allowance was the reader, the fixture
-    /// had to spend points as well as touch its ceiling — a flat series priced no
-    /// tokens, so it was refused either way and the filter cost nothing visible.
-    /// The ratio has no price in it: a contributor brings a refill share whatever
-    /// it burned, so an account pinned at 100 with one 99 in it is a full
-    /// contributor with a burn of zero, and refusing it takes a whole account's
-    /// week out of the *denominator*. The cost is therefore visible in the
-    /// direction that matters — the figure goes **up** when the account is
-    /// smoothed away, from 105% to 210%, which is the reading of a fleet that
-    /// has one exhausted account read as the reading of a fleet that does not.
+    /// Both halves are asserted: the filter is run on the same points to show it changes
+    /// them, and the smoothed series is put through `FleetCapacity` to show the cost.
     func testTheFigureIsBuiltFromRawPointsRatherThanSmoothedOnes() async throws {
         // The shape the filter destroys: a lone reading one point under a ceiling
         // it is otherwise pinned to. That one 99 is the only evidence the account
@@ -3897,21 +3070,12 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.quotaFetchedAt, now)
     }
 
-    /// And the attempt is stamped anyway, so the half that keeps failing keeps
-    /// failing on its own ten-minute cadence rather than on the once-a-minute
-    /// one of the rest of the pass.
-    ///
-    /// The cost of the other behaviour is measured rather than feared: one round
-    /// over the live fleet is 481 KB (2026-08-18, three accounts, a 48 h
-    /// window), which is 2.9 MB/h at ten minutes — and every minute, carrying
-    /// every account but the one that failed, some 19 MB/h, the figure
-    /// `historyIntervalSeconds` exists to avoid.
-    /// Affordable now because the screen says so: the figure keeps the age it
-    /// arrived under and the footer prints both that and the reason.
-    ///
-    /// Driven to the state where the skip could fail to happen: the failing pass
-    /// has to *make* its request first, or "no second request" would be true of
-    /// a pass that never asked at all.
+    /// The attempt is stamped anyway, so a half that keeps failing retries on its own
+    /// ten-minute cadence rather than every minute with the rest of the pass (one round
+    /// over the live fleet is about 481 KB). The footer shows the figure's age and the
+    /// reason.
+    /// The failing pass has to make its request first, or "no second request" would hold
+    /// for a pass that never asked.
     func testAFailedHistoryHalfWaitsOutItsOwnIntervalBeforeRetrying() async {
         let log = RequestLog()
         let start = Date(timeIntervalSince1970: 1_786_800_000)
@@ -3934,18 +3098,11 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(log.historyRequests, 2, "the interval came round and the retry never happened")
     }
 
-    /// The histories are not asked for at all when the quota half did not
-    /// answer, and that is not thrift: the fleet's membership and each account's
-    /// window boundary both come from that answer, and `FleetCapacity` reads a
-    /// history only under a label the fleet has.
-    ///
-    /// The previous snapshot has to carry accounts, or this cannot come out
-    /// wrong. Started from `.empty` the labels are an empty list whatever the
-    /// guard does, so no request is made for want of anything to request —
-    /// checked by removing the guard, where the test stayed green. With a
-    /// remembered account in hand the ungated pass fetches its history, which is
-    /// the mistake being described: measuring a fleet against a membership the
-    /// gateway has stopped confirming.
+    /// The histories are not asked for when the quota half did not answer: the fleet's
+    /// membership and each account's window boundary come from that answer, and
+    /// `FleetCapacity` reads a history only under a label the fleet has.
+    /// The previous snapshot carries accounts; from `.empty` there is nothing to request
+    /// whatever the guard does.
     func testNoHistoryIsFetchedWhenTheQuotaHalfDidNotAnswer() async throws {
         var previous = UsageSnapshot.empty
         previous.accounts = try UsageFixtures.decode(UsageFixtures.usage, as: UsageReport.self).accounts

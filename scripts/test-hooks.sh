@@ -3,10 +3,8 @@
 # the panel shows for every chat — plus the debug-dump cap of hooks/statusline.sh
 # at the very end.
 #
-# The hook is the riskiest artefact here: seven events, three guards, and it runs
-# inside every session the user has open, where a wrong answer is either a lost
-# "answer me" signal or an orange indicator that never goes away. Everything
-# below used to be checked by hand.
+# A wrong answer from the hook is either a lost "answer me" signal or an orange
+# indicator that never goes away.
 #
 # Run: bash scripts/test-hooks.sh   (also wired into `make test`)
 #
@@ -222,12 +220,9 @@ check "state" "$(state)" "permission"
 
 # --- PostToolUseFailure: a call that failed ends its wait just the same -------
 #
-# PostToolUse fires only after a *successful* call; a failed one arrives as
-# PostToolUseFailure (verified on CLI 2.1.233, SPEC §2.6.2), and "failed" includes
-# an MCP tool that answered with an error in its result — which is how a granted
-# permission for an MCP call that returned 403 held the orange hand for twelve
-# minutes. Everything the successful event is asked to do below, the failing one
-# has to do identically, and everything it must *not* do it must not do either.
+# PostToolUse fires only after a *successful* call; a failed one (including an
+# MCP tool that returned an error result) arrives as PostToolUseFailure
+# (SPEC §2.6.2). It must behave exactly like PostToolUse.
 
 start "PostToolUseFailure clears the permission it was granted"
 send "$(payload PermissionRequest '"tool_name":"Bash"')"
@@ -280,15 +275,9 @@ check "nothing is rewritten" "$(field event)" "Stop"
 check "state" "$(state)" "waiting"
 
 start "the state of a record never disagrees with the waits it carries"
-# The invariant that makes a second guard on the post-tool path unnecessary: the
-# state written is the worst of the list, so a non-empty list can only ever
-# appear next to `permission` or `question`. That is what lets the pair check
-# stand alone — a post-tool event that finds a wait of its own has, by
-# construction, found a record in a wait state, and one that finds none writes
-# nothing at all. A guard on the previous state used to sit next to the pair
-# check; no event sequence could tell the two apart, only a record built by
-# hand, so it went (SPEC §2.6.3). If this invariant ever breaks, that door
-# reopens — hence a test rather than a comment.
+# The state written is the worst of the list, so a non-empty list only ever
+# appears next to `permission` or `question`. The post-tool path relies on this
+# to need only the pair check, with no guard on the previous state (SPEC §2.6.3).
 broken=""
 held=0
 step() { # payload fragments
@@ -402,8 +391,7 @@ start "the new list is computed from the file as it is at write time"
 # Checked without depending on timing: `date` is called while the writer's
 # arguments are being built, which is exactly the window between the two reads,
 # so a `date` on PATH that rewrites the state file stands in for the other hook
-# finishing first. The wait it adds meanwhile has to survive; on the old scheme
-# the writer would never see it and the row would end up plain `working`.
+# finishing first. The wait it adds meanwhile has to survive.
 printf '{"sessionId":"%s","cwd":"/tmp/project","state":"permission","event":"PermissionRequest","waits":[{"tool":"Bash","agent":"","state":"permission"}],"ts":1}' \
 	"$SESSION" >"$(STATE_FILE)"
 printf '{"sessionId":"%s","cwd":"/tmp/project","state":"question","event":"PermissionRequest","waits":[{"tool":"Bash","agent":"","state":"permission"},{"tool":"AskUserQuestion","agent":"","state":"question"}],"ts":1}' \
@@ -497,25 +485,14 @@ printf '{"session_id":"%s","cwd":"/tmp/project","tool_input":{"command":"%s"},"h
 check "state" "$(state)" "working"
 
 start "the post-tool events leave before the dump is written"
-# The fast path is the fourth place the two event names appear, and the only one
-# no assertion reached: removing both `PostToolUseFailure` patterns from
-# `case $head` broke nothing at all. A typo in that list — it spans a line
-# continuation, with tabs inside it — would then quietly send every failed call
-# down the slow path, paying for a jq the exit exists to avoid, and no test
-# would notice.
+# A typo in the `case $head` patterns would silently send every post-tool event
+# down the slow path. Each name appears there twice, with and without a space
+# after the colon (the CLI's exact spelling is unverified), so both spellings
+# are written out literally here; `payload` only produces the unspaced one.
 #
-# There are four patterns there, not two: each name is written twice, with and
-# without a space after the colon. `payload` above prints its JSON without
-# spaces, so a test going through it would never reach the spaced half of the
-# list at all. Which of the two spellings the CLI puts on the wire has never
-# been checked byte for byte, so both stay in the list — and both are therefore
-# written out literally here rather than built by the helper.
-#
-# The dump is what makes the exit observable: it is appended *after* it, so its
-# absence is the evidence that the exit ran. Which is only worth anything if the
-# dump would otherwise appear — hence the `Stop` at the end, which has no fast
-# path of its own. Nothing is on disk here, so the exit is the `[ -s "$probe" ]`
-# one, the cheapest of the three.
+# The dump is appended after the exit, so its absence proves the exit ran; the
+# final `Stop` (no fast path) shows the dump would otherwise appear. Nothing is
+# on disk here, so the exit taken is the `[ -s "$probe" ]` one.
 export VSCODE_SWITCHER_DEBUG=1
 dump="$VSCODE_SWITCHER_STATUS_DIR/_debug.jsonl"
 # Every pattern is asserted on a clean slate: all four share one dump file, so

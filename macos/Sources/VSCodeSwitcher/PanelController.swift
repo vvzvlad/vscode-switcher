@@ -27,16 +27,13 @@ final class SwitcherPanel: NSPanel {
 /// field, the status item's popover and the alerts its menu items put up — and
 /// only all of them together are the answer to "may the app hide now": whichever
 /// is dismissed first, another may still legitimately need the app in front.
-/// Which is why they share one account instead of each minding its own: the
-/// alert was the one that did mind its own, activating with a bare `NSApp`
-/// call, and it left the app frontmost over nothing every time it was dismissed.
+/// Which is why they share one account instead of each minding its own.
 ///
-/// A value type, and the whole rule in one place, because the sequence that
-/// broke it cannot be reached from a test through `NSApp`: the popover activates,
-/// the popover is dismissed while the panel is up (nothing owed — the panel is in
+/// A value type, and the whole rule in one place, because the tricky sequence
+/// cannot be reached from a test through `NSApp`: the popover activates, the
+/// popover is dismissed while the panel is up (nothing owed — the panel is in
 /// front for its own sake), and the panel then goes away with the debt still
-/// standing. Kept as two flags on the controller, that middle step used to lose
-/// the debt or never record it at all.
+/// standing.
 struct ActivationDebt: Equatable {
 
     /// What the caller should do about the debt right now.
@@ -370,14 +367,11 @@ final class PanelController {
     /// alert behind every other window is worse still.
     ///
     /// It goes through here rather than through `NSApp.activate` at the call
-    /// site so that every activation lands on the same account. Kept apart, an
-    /// activation is one nobody is owed back: the popover hands it over only in
-    /// `popoverDidClose` and only with the panel down, so "clicked the status
-    /// item, then went to the panel, then dismissed the popover" left the app
-    /// frontmost with no window — §4's defect exactly, and the user typing into
-    /// nowhere until they clicked something. The alert reached the same end by a
-    /// shorter road: it activated for itself, was dismissed, and left nothing on
-    /// screen and nobody counting.
+    /// site so that every activation lands on the same account. An activation
+    /// outside it is one nobody gives back: "clicked the status item, then went
+    /// to the panel, then dismissed the popover", or an alert dismissed with
+    /// nothing else on screen, would leave the app frontmost with no window —
+    /// §4's defect.
     func activateAppForOwnWindow() {
         NSApp.activate(ignoringOtherApps: true)
         debt.activated()
@@ -393,15 +387,10 @@ final class PanelController {
     /// as long as AppKit delivers the close synchronously, which is nobody's
     /// promise; this closes the gap instead of stepping over it.
     ///
-    /// Dropping the flag the moment tracking begins — a third writer, in
-    /// `didBeginTracking` — was removed rather than kept. The tracking count
-    /// answers no on its own only from that moment until `didEndTracking`, not
-    /// until the call below, and it is not a count this path may lean on
-    /// anyway: the retry tick zeroes it before every attempt
-    /// (`scheduleKeyboardReleaseRetry`). So the one interval the early clear
-    /// would change is the sliver between `didEndTracking` and
-    /// `menuOpeningDidFinish`, where it *permits* a hide this flag exists to
-    /// postpone.
+    /// The flag is not cleared when tracking begins: the tracking count is
+    /// zeroed before every retry (`scheduleKeyboardReleaseRetry`), so this path
+    /// may not lean on it, and an early clear would permit a hide in the sliver
+    /// between `didEndTracking` and `menuOpeningDidFinish`.
     func menuWillOpen() {
         menuOpening = true
     }
@@ -439,11 +428,9 @@ final class PanelController {
     ///
     /// This app is an `.accessory` with no window of its own once the panel is
     /// ordered out, and activating it is not undone by hiding that panel: it
-    /// stays the frontmost application, with nothing to type into. "Searched and
-    /// walked away without clicking a row" ended there — the user went back to
-    /// their editor, typed, and the keystrokes went nowhere while the editor
-    /// looked perfectly alive; only a click anywhere fixed it. Clicking a row
-    /// hid the defect, because that path activates the editor itself.
+    /// stays the frontmost application, with nothing to type into, and the
+    /// user's keystrokes go nowhere while the editor looks perfectly alive.
+    /// Clicking a row avoids it, because that path activates the editor itself.
     ///
     /// `NSApp.deactivate()` does not do it — probed: the app is still frontmost
     /// afterwards. `NSApp.hide(nil)` does, and the next `orderFrontRegardless`
@@ -517,7 +504,7 @@ final class PanelController {
     }
 
     /// The rule itself, free of `NSApp`, so all four of its states can be
-    /// checked. Every one of them was a defect before it was a clause.
+    /// checked.
     static func canHideApp(modal: Bool,
                            menuTrackingDepth: Int,
                            menuOpening: Bool,
@@ -590,9 +577,8 @@ final class PanelController {
     /// The row is handed to `raise` exactly as the snapshot built it: it carries
     /// the window's `CGWindowID`, which no raise reshuffles, so a row clicked a
     /// second ago still names the same window. Looking the window up again by
-    /// `pid` + project — as this used to do — picked an arbitrary one of the two
-    /// windows a project can have open, which is the very "clicking row 2 raises
-    /// window 4" defect the stable identity removed.
+    /// `pid` + project would pick an arbitrary one of the two windows a project
+    /// can have open.
     private func activate(_ row: SwitcherRow) {
         let config = config
         model.rowActivated(row)
@@ -612,12 +598,10 @@ final class PanelController {
     }
 
     /// A project stand-in for an orphan `cwd:` row — a live session running
-    /// outside every scan root, so the index knows nothing about it.
-    ///
-    /// The row looks exactly as clickable as any other and used to do nothing at
-    /// all. It still names a real directory, and `openProject` already has the
-    /// "open the folder when there is no workspace file" branch, so the row can
-    /// open like every other project.
+    /// outside every scan root, so the index knows nothing about it. It still
+    /// names a real directory, and `openProject` already has the "open the
+    /// folder when there is no workspace file" branch, so the row can open like
+    /// every other project.
     static func syntheticProject(for row: SwitcherRow) -> ProjectInfo? {
         guard row.window == nil, row.project == nil else { return nil }
         guard let cwd = row.sessions.first?.cwd, !cwd.isEmpty else { return nil }

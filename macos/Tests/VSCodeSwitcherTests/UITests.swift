@@ -11,25 +11,16 @@ import XCTest
 /// question — a second copy could drift into asking an easier one.
 private let rampSamples: [Double] = [60, 70, 85, 100, 115, 130, 150]
 
-/// The loads the ramp's *legibility* is measured at, on every surface and in
-/// both appearances.
-///
-/// Two more than `rampSamples`, and they are the two that matter: 110 and
-/// 120 sit inside 100–124, which is the band this fleet actually lives in
-/// (`make dump` read 144% on 2026-08-18) and the band the old luminance ceiling
-/// clamped hardest. A separate list rather than a wider `rampSamples`
-/// because `assertRamp` is about the shape of the ramp and reads its samples by
-/// position.
+/// The loads the ramp's legibility is measured at, on every surface and in both
+/// appearances. Two more than `rampSamples`: 110 and 120 sit inside 100–124, the
+/// band this fleet actually lives in. A separate list because `assertRamp` reads
+/// its samples by position.
 private let legibilityLoadSamples: [Double] = [60, 70, 85, 100, 110, 115, 120, 130, 150]
 
-/// The WCAG contrast of an sRGB colour against an sRGB grey plate: linearise
-/// each component, weigh by Rec. 709, take the ratio with 0.05 added to both
-/// sides.
-///
-/// The tests keep their own copy of this arithmetic on purpose. The
-/// linearisation is exactly the step the source had missing, and a check that
-/// borrowed the function under test would have agreed with the mistake as
-/// happily as it now agrees with the fix.
+/// The WCAG contrast of an sRGB colour against an sRGB grey plate: linearise each
+/// component, weigh by Rec. 709, take the ratio with 0.05 added to both sides.
+/// The tests keep their own copy of this arithmetic so the check does not share a
+/// mistake with the function under test.
 private func wcagContrast(_ colour: (red: Double, green: Double, blue: Double),
                           against plate: Double) -> Double {
     func linear(_ component: Double) -> Double {
@@ -44,15 +35,13 @@ private func wcagContrast(_ colour: (red: Double, green: Double, blue: Double),
 }
 
 /// What a ramp read off a drawing has to be, whichever surface drew it: flat
-/// outside the end anchors, strictly falling between them, and spanning the
-/// whole way from blue to red.
+/// outside the end anchors, strictly falling between them, and spanning the whole
+/// way from blue to red.
 ///
-/// Three properties rather than one, because each survives the others being
-/// broken. A step at capacity passes "flat at the ends" and fails the fall; a
-/// table of hand-picked colours can fall and still stand still somewhere; and a
-/// ramp squeezed into a corner of the wheel — greens through greens — passes
-/// both and fails the span. `hues` is the drawn hue at each of
-/// `rampSamples`, in that order.
+/// Three properties because each survives the others being broken: a step at
+/// capacity passes "flat at the ends" and fails the fall; hand-picked colours can
+/// fall and still stand still somewhere; a ramp squeezed into greens passes both
+/// and fails the span. `hues` is the drawn hue at each of `rampSamples`, in order.
 private func assertRamp(_ hues: [Double], on surface: String,
                         file: StaticString = #filePath, line: UInt = #line) {
     XCTAssertEqual(hues.count, rampSamples.count, "not every sample was read", file: file, line: line)
@@ -238,15 +227,10 @@ final class RowLabelTests: XCTestCase {
         XCTAssertEqual(SwitcherRowView.cpuLabel(for: row(cpu: 412.0)), "412%")
     }
 
-    /// A sum the sweep could not take over every chat of the row wears `≥`, the
-    /// mark the token figure already uses for the same hole (§3.1). It goes on
-    /// the label rather than turning the number into `nil`, because `nil` is
-    /// drawn as a dash — the quiet row — and would understate by the whole
-    /// figure instead of by one chat's share.
-    ///
-    /// Below the one-percent threshold there is no label to mark, and the mark
-    /// must not resurrect one: `≥` on nothing would be a row claiming a floor it
-    /// does not print a number for.
+    /// A sum the sweep could not take over every chat of the row wears `≥`, the mark
+    /// the token figure uses for the same hole (§3.1). `nil` would draw a dash and
+    /// understate by the whole figure.
+    /// Below the one-percent threshold there is no label, and `≥` must not create one.
     func testAPartialSumWearsTheSameMarkTheTokenFigureDoes() {
         XCTAssertEqual(SwitcherRowView.cpuLabel(for: row(cpu: 38.4, cpuIsLowerBound: true)), "≥38%")
         XCTAssertEqual(SwitcherRowView.cpuLabel(for: row(cpu: 38.4)), "38%")
@@ -263,15 +247,9 @@ final class RowLabelTests: XCTestCase {
         XCTAssertEqual(SwitcherRowView.cpuLabel(for: row(cpu: 1.0)), "1%")
     }
 
-    /// The tooltip is where there is room to say what the two numbers count: a
-    /// share of *one* core, which is what makes 412% read as four cores, and the
-    /// second number as **detached processes** rather than as orphaned ones.
-    ///
-    /// The wording matters because the count is not a tally of dead parents: a
-    /// detached process brings everything running underneath it into the number
-    /// (SPEC §2.8), so the live claim that was a `python` with a `docker` and
-    /// two `ssh` under it counts 4 with one parent gone. `4 orphaned processes`
-    /// said four parents had exited.
+    /// The tooltip says what the two numbers count: a share of one core (412% reads as
+    /// four cores), and detached processes rather than orphaned ones, because a
+    /// detached process brings everything under it into the count (SPEC §2.8).
     func testTheTooltipSpellsOutWhatTheFiguresCount() {
         XCTAssertEqual(SwitcherRowView.processLines(for: row(orphans: 2, cpu: 38.4)),
                        ["", "CPU 38% of one core · 2 processes detached from the parent chain"])
@@ -294,9 +272,8 @@ final class RowLabelTests: XCTestCase {
     }
 }
 
-/// The "projects" section lists every project, in the order the data layer
-/// ranked them. It used to be cut at thirty rows, which made it a top-of-list
-/// rather than a list.
+/// The "projects" section lists every project, in the order the data layer ranked
+/// them.
 @MainActor
 final class ProjectSectionTests: XCTestCase {
 
@@ -460,18 +437,11 @@ final class WindowOrderTests: XCTestCase {
                        ["new", "a", "b", "c"])
     }
 
-    /// The two sides can disagree, and this is the price that was accepted for
-    /// keeping the second one: the newcomer trails `c` (whose slot is the last)
-    /// and leads `a` (whose slot is the first), so it goes above `a` — and thus
-    /// above `b` and `c`, which currently outrank it. One layout on one
-    /// appearance, and the next show re-freezes from scratch.
-    ///
-    /// A twin of the case above rather than a second net: measured by mutation,
-    /// every break it catches that one catches too, and the reverse does not
-    /// hold (`.first` → `.last` fails only the neighbour). It is here as the
-    /// executable form of the example in `merged`'s doc comment — the awkward
-    /// half of the bargain, written down so a later repair of one side cannot
-    /// quietly change what was agreed.
+    /// The two sides can disagree, the accepted price of keeping the second one: the
+    /// newcomer trails `c` (last slot) and leads `a` (first slot), so it goes above
+    /// `a`, and thus above `b` and `c`, which outrank it. The next show re-freezes.
+    /// This is the executable form of the example in `merged`'s doc comment, so a
+    /// repair of one side cannot change what was agreed.
     func testTheTwoSidesDisagreeAndTheFrontOneWins() {
         XCTAssertEqual(SwitcherViewModel.merged(["a", "b", "c"], with: ["b", "c", "new", "a"]),
                        ["new", "a", "b", "c"])
@@ -833,9 +803,7 @@ final class ProjectOrderTests: XCTestCase {
     }
 }
 
-/// Clicking an orphan row. It has neither a window nor an indexed project, and
-/// used to do nothing at all while looking exactly as clickable as its
-/// neighbours.
+/// Clicking an orphan row, which has neither a window nor an indexed project.
 @MainActor
 final class SyntheticProjectTests: XCTestCase {
 
@@ -941,15 +909,9 @@ final class StatusBadgeTests: XCTestCase {
         XCTAssertNotEqual(StatusBadge.color(for: .blocked), StatusBadge.color(for: .done))
     }
 
-    /// A name SF Symbols does not know draws nothing at all — an empty slot
-    /// where the one indicator of the row should be. There is no compiler check
-    /// for these strings.
-    ///
-    /// Every symbol the app names anywhere goes through here, not just the row's
-    /// four: the popover's failure mark is the same kind of unchecked string,
-    /// and a picture drawing nothing at all is the same silent failure wherever
-    /// it happens. The menu bar icon names none — it is drawn, not symbolic,
-    /// and its app glyph is gone.
+    /// A name SF Symbols does not know draws nothing, and nothing checks these strings
+    /// at compile time. Every symbol the app names goes through here, including the
+    /// popover's failure mark. The menu bar icon names none: it is drawn.
     func testEverySymbolNameActuallyResolves() {
         let names = RowStatus.allCases.map { StatusBadge.symbol(for: $0) }
             + [UsagePopoverView.failureSymbolName]
@@ -1032,18 +994,10 @@ final class RowTitleTests: XCTestCase {
         XCTAssertNil(SwitcherRowView.countLabel(for: row(working: 0, subagents: 0)))
     }
 
-    /// The same pair in `--dump`, where the column has a width to keep to: the
-    /// name is cut to what the brackets leave of the cell, so the cell comes out
-    /// exactly as wide as its column and the count comes out whole.
-    ///
-    /// The rows that have a count are the ones a dump of this machine may or may
-    /// not contain — an orphan session, or a project with a live session and no
-    /// window — so this cannot be left to be noticed in the output. Budgeting
-    /// the name to the full 34 first and appending the brackets afterwards makes
-    /// the cell as wide as the two together — 48 characters for the row below —
-    /// and `column` pads without cutting: every column to the right of it
-    /// shifts, on the rows where name and brackets do not fit in 34 together and
-    /// nowhere else.
+    /// The same pair in `--dump`, where the column has a width: the name is cut to what
+    /// the brackets leave of the cell, so the cell is exactly as wide as its column and
+    /// the count comes out whole. `column` pads without cutting, so a cell wider than
+    /// 34 would shift every column to its right on that row only.
     func testTheDumpCellKeepsTheCountWholeInsideItsColumn() {
         let longest = "wirenboard/node-red-contrib-wirenboard"
         let cell = ConsoleDump.nameCell(for: row(working: 1, subagents: 122, name: longest), width: 34)
@@ -1069,15 +1023,12 @@ final class RowTitleTests: XCTestCase {
     }
 }
 
-/// The requirement this whole round exists for, measured rather than eyeballed:
-/// the indicator keeps the same place in every row, whatever else the row holds.
-/// Now that the count sits in the title line instead of a slot of its own, there
-/// is a second half to it — the count has to survive a name too long for the
-/// row, and it still may not nudge the indicator.
+/// The indicator keeps the same place in every row, whatever else the row holds,
+/// and the count in the title line survives a name too long for the row without
+/// nudging it.
 ///
-/// `StatusBadge` and `SwitcherRowView` are rendered for real — what the panel
-/// draws, not a copy of it — and the ink is read back off the bitmap. Everything
-/// is measured in points at scale 4, so a quarter of a point shows.
+/// `StatusBadge` and `SwitcherRowView` are rendered for real and the ink is read
+/// back off the bitmap, in points at scale 4, so a quarter of a point shows.
 @MainActor
 final class RowLayoutTests: XCTestCase {
 
@@ -1157,17 +1108,13 @@ final class RowLayoutTests: XCTestCase {
         return Rendered(size: image.size, ink: columns)
     }
 
-    /// A whole row at a given width, laid out the way the list lays it out and
-    /// built the way the data layer builds one: both the status and the count
-    /// come out of real chats and real subagents, and the row is asked to
+    /// A whole row at a given width, laid out as the list lays it out and built as the
+    /// data layer builds one, from real chats and subagents; the row is asked to
     /// confirm it folded to what the test meant.
     ///
-    /// Not every pair of status and count exists, and the fold is why (§3.1):
-    /// `done` and `asleep` say nothing is running, so their count is zero by
-    /// construction, and `active` says something is, so its count is never zero.
-    /// Only `blocked` is free in both — a chat can hold its hand up while the
-    /// rest of the window keeps working — which is why it is the status the
-    /// count-vs-indicator checks below are run against.
+    /// Not every status/count pair exists (§3.1): `done` and `asleep` have count zero,
+    /// `active` never does. Only `blocked` is free in both, so the count-vs-indicator
+    /// checks run against it.
     private func makeRow(status: RowStatus,
                          count: Int,
                          name: String = "проект с длинным именем, которое не влезает",
@@ -1241,17 +1188,11 @@ final class RowLayoutTests: XCTestCase {
     /// spaces in it — the row where the name and the count fight for the line.
     private static let longestName = "wirenboard/node-red-contrib-wirenboard"
 
-    /// The least ink the name may be left with while the count is still drawn.
-    ///
-    /// Not the width of four glyphs, because that is not what a span across the
-    /// name measures: the ellipsis is inside the span too, and so is the gap in
-    /// front of it. At the floor the name renders `wire…` — 37.00 pt in all,
-    /// 25.75 of them glyphs, 1.75 the gap, 9.50 the three dots. One character
-    /// less is `wir…`, 29.25 pt in the row. The threshold sits between those two
-    /// with 3.75 pt of slack either way: enough to fail a floor that has dropped
-    /// a character, enough to survive the half-point of glyph drift an OS update
-    /// can bring. Asserting the glyphs' own 25.75 instead let `wir…` through, so
-    /// every floor from 31 pt up passed a check that promises four characters.
+    /// The least ink the name may be left with while the count is still drawn. The span
+    /// includes the ellipsis and the gap before it: at the floor the name renders
+    /// `wire…`, 37.00 pt (25.75 glyphs, 1.75 gap, 9.50 dots); one character less,
+    /// `wir…`, is 29.25 pt. The threshold sits between them with 3.75 pt of slack
+    /// either way for OS glyph drift.
     private static let nameSpanFloor: Double = 33
 
     /// Where the badge lands in a whole row: the last box-width before the row's
@@ -1262,11 +1203,8 @@ final class RowLayoutTests: XCTestCase {
         return (slotEnd - Double(StatusBadge.boxWidth))...slotEnd
     }
 
-    /// The numbers, in one place, so a change to any of them has to be
-    /// deliberate. One slot on the right, and it is the badge's own box: the
-    /// count that used to have a slot of its own beside it now lives in the
-    /// title line, and there is nothing left outside the badge to set a width
-    /// for.
+    /// The numbers, in one place, so a change to any of them has to be deliberate. One
+    /// slot on the right, the badge's own box; the count lives in the title line.
     func testTheSlotIsWhatTheSpecSays() {
         XCTAssertEqual(StatusBadge.boxWidth, 14)
         XCTAssertEqual(StatusBadge.boxHeight, 12)
@@ -1284,23 +1222,15 @@ final class RowLayoutTests: XCTestCase {
         }
     }
 
-    /// And the four glyphs sit in the same slot as each other: each is centred
-    /// in the same 14 pt box, so their ink is inside it and shares a midpoint.
-    /// They are not the same width — that is exactly why the box is fixed.
+    /// The four glyphs sit in the same slot: each is centred in the same 14 pt box, so
+    /// their ink is inside it and shares a midpoint. They differ in width, which is why
+    /// the box is fixed.
     ///
-    /// The containment half is a canary rather than the requirement: `frame`
-    /// does not clip, so a glyph that outgrew the box would spill outside it
-    /// without moving the slot. Worth hearing about all the same.
-    ///
-    /// And it is a canary with very little room: measured in the 20…34 slot,
-    /// `hand.raised.fill` 22.75…31.5, `checkmark.circle.fill` and
-    /// `moon.zzz.fill` 21.5…32.5, `arrow.triangle.2.circlepath` 20.25…33.5 —
-    /// a quarter of a point from the left edge of the box. Half a point of
-    /// glyph drift in an SF Symbols or macOS update breaks this line with
-    /// nothing changed in the repository. If it fails on the containment
-    /// assertions alone while the midpoints still agree, that is the OS having
-    /// moved, not the layout: widen the box rather than hunting for a regression
-    /// that is not there.
+    /// The containment half is a canary: `frame` does not clip, so an outgrown glyph
+    /// would spill without moving the slot. It has little room (measured in the 20…34
+    /// slot, `arrow.triangle.2.circlepath` inks 20.25…33.5), so an SF Symbols or macOS
+    /// update can break it. If only containment fails while the midpoints agree, the OS
+    /// moved: widen the box.
     func testEveryGlyphSitsInTheSameSlot() throws {
         var midpoints: [Double] = []
         for status in RowStatus.allCases {
@@ -1324,17 +1254,11 @@ final class RowLayoutTests: XCTestCase {
         XCTAssertEqual(empty.size.width, 2 * Self.pad + StatusBadge.boxWidth, accuracy: 0.01)
     }
 
-    /// The same thing measured where the user sees it: a whole row, laid out at
-    /// the real panel width, with the list's padding around it. The indicator
-    /// lands in the last 14 pt before the row's trailing padding — 353…367 in a
-    /// 380 pt panel — for every status and every count that status can have.
-    ///
-    /// Containment alone does not say "the same place": the four glyphs are
-    /// right-aligned against one edge, so all of them fit inside 353…367 even
-    /// with the fixed box gone — which is what the midpoint check is for.
-    /// Measured 359.875 / 360.0 / 360.125 against a slot midpoint of 360, so
-    /// 0.375 of the tolerance is spare. A 1 pt nudge of the slot fails it even
-    /// for the narrow moon, whose ink would still be inside the bounds.
+    /// The same thing in a whole row at the real panel width with the list's padding:
+    /// the indicator lands in the last 14 pt before the trailing padding (353…367 in a
+    /// 380 pt panel) for every status and every count that status can have.
+    /// Containment alone does not say "the same place": right-aligned glyphs fit even
+    /// without the fixed box, hence the midpoint check (measured within 0.125 of 360).
     func testTheIndicatorIsInTheSamePlaceInAWholeRowAtPanelWidth() throws {
         let panelWidth = Config.default.panelWidth
         let slot = badgeSlot(inRowOfWidth: panelWidth)
@@ -1386,45 +1310,24 @@ final class RowLayoutTests: XCTestCase {
         }
     }
 
-    /// The name is what gives way when the row runs out of width, not the count:
-    /// the ellipsis lands in the name and `(agents: N)` stays whole. The other
-    /// way round it would be the long-named row — the one worth reading the
-    /// number on — that lost it.
+    /// The name gives way when the row runs out of width, not the count: the ellipsis
+    /// lands in the name and `(agents: N)` stays whole.
     ///
-    /// Measured rather than asserted about. The label is rendered on its own to
-    /// learn how wide its ink is, and then looked for at the end of the title
-    /// line: that many points of ink flush with the right edge of the text, with
-    /// a blank band in front of them where the `HStack` spacing is. A label
-    /// truncated to fit would be narrower than its own ink, so the name would
-    /// fill that band; a label dropped altogether leaves the name running
-    /// unbroken to the edge. Both counts are checked, because a label clamped to
-    /// some fixed width would pass one of them by accident.
+    /// The label is rendered alone to learn its ink width, then looked for at the end of
+    /// the title line: that much ink flush right, with a blank band before it (the
+    /// `HStack` spacing). A truncated label would let the name fill that band; a dropped
+    /// one leaves the name running to the edge. Both counts are checked, since a label
+    /// clamped to a fixed width would pass one by accident.
     ///
-    /// The name is the longest real one on this machine, 36 characters, and has
-    /// no spaces in it — so a blank band this wide inside the title line is the
-    /// gap in front of the label and nothing else. The row is rendered without a
-    /// chat topic for the same reason: the second line would put its own ink in
-    /// these columns.
+    /// The name is the longest real one, 36 characters with no spaces, so a blank band
+    /// inside the title line is only the gap before the label; no chat topic, whose
+    /// second line would ink the same columns.
     ///
-    /// Several widths, because the narrow ones are where the name has to be
-    /// defended. At the 380 pt default there is room for both and the shrink
-    /// lands on the name by itself. Further down — `panelWidth` is a setting and
-    /// takes any value above zero — the name is at its floor and the count is
-    /// still whole, which is the middle rung of the ladder doing its job: 40 pt
-    /// answers the fit question, the rest of the line is still drawn in, and at
-    /// least `nameSpanFloor` of the name survives — 33 pt, which is four
-    /// characters and their ellipsis. Measured without the colour bar in front
-    /// of it: the bar's own 13.00…16.75 is in every row and would carry any such
-    /// assertion on its own.
-    ///
-    /// Where that rung gives out was measured by sweeping the width a point at a
-    /// time against the longest real name: the count is drawn down to 188 pt with
-    /// one digit, 193 with two, 201 with three. Hence the pairs — 200 pt is
-    /// below the three-digit line. The two tests below take it from here: the
-    /// sweep walks every width down to where the rung gives out, and the
-    /// narrow-panel one stands on the far side of it. (A short name keeps its
-    /// count further down still, 156 pt for a single character: the first rung
-    /// fits where the second does not.)
+    /// Several widths: at the 380 pt default both fit; narrower (`panelWidth` takes any
+    /// positive value) the name is at its floor and the count still whole, at least
+    /// `nameSpanFloor` (33 pt, four characters and an ellipsis) surviving, measured
+    /// without the colour bar (13.00…16.75). Against the longest name the count is drawn
+    /// down to 188 pt with one digit, 193 with two, 201 with three.
     func testALongNameGivesWayBeforeTheCountDoes() throws {
         for (width, count) in [(Config.default.panelWidth, 5), (Config.default.panelWidth, 123),
                                (240.0, 5), (240.0, 123), (200.0, 5)] {
@@ -1436,20 +1339,14 @@ final class RowLayoutTests: XCTestCase {
         }
     }
 
-    /// The top rung, which neither the test above nor the sweep below ever
-    /// reaches: both are run against the longest real name, which has not fitted
-    /// whole since 380 pt, so both of them land on the middle rung and a build
-    /// with the top rung deleted passes them all.
+    /// The top rung, which the test above and the sweep below never reach: the longest
+    /// name does not fit whole at 380 pt, so both land on the middle rung.
     ///
-    /// A short name is where the top rung is the one that fits, and it fits
-    /// further down than the middle one can: the middle rung asks for 40 pt of
-    /// name whatever the name is, the top rung asks for the name's own width.
-    /// Measured against `p`, the count survives down to 156 pt with one digit,
-    /// 162 with two, 170 with three; the longest name loses a one-digit count
-    /// already at 188. So the width here is between those two, halfway, with
-    /// 16 pt of drift in either direction before the test stops meaning what it
-    /// says — and both halves are asserted, because "the count is drawn" alone
-    /// would also pass if the middle rung had somehow reached down here.
+    /// A short name fits on the top rung further down, since the middle rung asks for
+    /// 40 pt of name and the top rung for the name's own width. Against `p` the count
+    /// survives to 156 pt with one digit, 162 with two, 170 with three; the longest name
+    /// loses a one-digit count at 188. The width here is halfway, and both halves are
+    /// asserted.
     func testAShortNameKeepsItsCountWhereTheFloorWouldNotFit() throws {
         let width = 172.0
         let labelWidth = try inkWidthOfLabel(count: 5)
@@ -1462,21 +1359,11 @@ final class RowLayoutTests: XCTestCase {
         XCTAssertNil(long, "the middle rung reached \(width) pt, so the count there proves nothing")
     }
 
-    /// And the floor holds all the way down to where the rung gives out, not
-    /// merely at the widths named above.
-    ///
-    /// This is the assertion that pins `nameFloorWidth` to a number. At 200 pt
-    /// and up the floor is not binding — the name is offered the rest of the
-    /// line and takes 44.75 pt of ink or more — so those widths draw the same
-    /// row whatever the floor is set to, and a floor of 5 pt passed them all.
-    /// What a lower floor really does is keep the count alive further down, on
-    /// rows where the name is already a stump: measured at 20 pt, the count
-    /// still draws at 178 pt beside 24.25 pt of name (`wi…`) and at 169 pt
-    /// beside 9.50 pt (the ellipsis alone, no name at all). Sweeping every
-    /// width down to the narrow panel of the next test is what catches that.
-    ///
-    /// One digit, because the shortest label is the one that survives furthest
-    /// down and squeezes the name hardest.
+    /// The floor holds all the way down to where the rung gives out, which pins
+    /// `nameFloorWidth` to a number: at 200 pt and up the floor is not binding (the name
+    /// takes 44.75 pt or more), so only the sweep catches a floor set too low.
+    /// One digit, because the shortest label survives furthest down and squeezes the
+    /// name hardest.
     func testTheNameKeepsItsFloorWhereverTheCountIsDrawn() throws {
         // From just above the three-digit line — the widths above it are the
         // test before this one — down to the panel of the narrow-panel test.
@@ -1492,31 +1379,19 @@ final class RowLayoutTests: XCTestCase {
             }
             width -= 1
         }
-        // And the sweep is not a sweep over rows that all dropped the count,
-        // which would assert nothing at all. One digit reaches 188 pt, so
-        // eighteen of these widths draw it — and the assertion is deliberately
-        // far below that. Like the badge-slot check (§4) this is a canary rather
-        // than the requirement itself, and there the resemblance ends: that one
-        // is deliberately tight, a quarter of a point, so that glyph drift is
-        // what trips it. This one is deliberately loose. What it guards against
-        // is a sweep gone empty (a floor of 60 pt draws no count at any of these
-        // widths at all), not the exact place the rung gives out, which an OS
-        // metrics change may move by a point or two on its own.
+        // The sweep must not be over rows that all dropped the count. One digit reaches
+        // 188 pt, so eighteen of these widths draw it; the bound is deliberately loose. It
+        // guards against an empty sweep (a 60 pt floor draws no count at any of these
+        // widths), not the exact edge, which OS metrics may move by a point or two.
         XCTAssertGreaterThanOrEqual(widthsWithACount, 8)
     }
 
-    /// One rung of the ladder at one width: is the count still drawn whole, and
-    /// if it is, how much ink is the name in front of it left with? `nil` when
-    /// the row dropped the count altogether.
+    /// One rung of the ladder at one width: is the count still drawn whole, and if so,
+    /// how much ink is the name left with? `nil` when the row dropped the count.
     ///
-    /// Whether the count is drawn is decided against the same row without one,
-    /// because a row that dropped it draws exactly what a count-less row draws.
-    /// The name is measured between the colour bar and the label, so that what
-    /// the floor promises — the *name*, not the row — is what is counted.
-    ///
-    /// The label's own ink is passed in rather than measured here: it does not
-    /// depend on the width, and rendering it again at every step of the sweep
-    /// was a third of the whole suite's running time.
+    /// Whether the count is drawn is decided against the same row without one. The name
+    /// is measured between the colour bar and the label. The label's ink is passed in
+    /// because it does not depend on the width and rendering it per step is slow.
     private func nameInkBesideTheCount(width: Double,
                                        count: Int,
                                        name: String,
@@ -1554,19 +1429,11 @@ final class RowLayoutTests: XCTestCase {
         return true
     }
 
-    /// Below that floor the count is what goes, and it goes whole.
-    ///
-    /// A 150 pt panel cannot hold a long name and `(agents: N)` at once, and the
-    /// half that has to survive is the name: a row that reads `(agents: 124)` and
-    /// nothing else identifies no project, the same objection §2.2.1 makes to a
-    /// row parked at the bottom of a 93-row list. So the row is asked to draw
-    /// exactly what the same row without a count draws — not a truncated label,
-    /// which is what a minimum width on the name gives instead (measured: the
-    /// same 25.75 pt stump for 5 as for 124, a count that lies about its number).
-    ///
-    /// The equality is over the whole row, indicator included, so an overflow
-    /// would fail it too: `fixedSize` alone pushed the colour bar 5.5 pt out of
-    /// the row's own frame here.
+    /// Below that floor the count goes, and it goes whole: a row reading
+    /// `(agents: 124)` and nothing else identifies no project (§2.2.1). So the row must
+    /// draw exactly what the same row without a count draws, not a truncated label.
+    /// The equality is over the whole row, indicator included, so an overflow fails it
+    /// too.
     func testANarrowPanelDropsTheCountAndKeepsTheName() throws {
         let width = 150.0
         let bare = try renderRow(status: .blocked, count: 0, name: Self.longestName, topic: nil, width: width)
@@ -1600,14 +1467,11 @@ final class RowLayoutTests: XCTestCase {
         }
     }
 
-    /// Every measurement above starts its band at the right-hand edge of
-    /// `colourBar`, a range written down by hand, and reads whatever is left of
-    /// the badge as the name. Both halves of that are worth one cheap render: a
-    /// row with no name at all draws the bar exactly where the constant says,
-    /// and nothing whatever between it and the indicator. If a future row grows
-    /// something in that band — a second bar, a leading icon — the assertions
-    /// that ask "is the name still there" would start passing on its ink
-    /// instead, which is the very hole this constant was introduced to close.
+    /// Every measurement above starts its band at the right edge of `colourBar`, a
+    /// hand-written range, and reads what is left of the badge as the name. A row with
+    /// no name draws the bar exactly there and nothing between it and the indicator; if
+    /// a row grows something in that band, the "is the name still there" assertions
+    /// would pass on its ink instead.
     func testNothingButTheNameLivesBetweenTheBarAndTheSlot() throws {
         let width = 150.0
         let rendered = try renderRow(status: .blocked, count: 0, name: "", topic: nil, width: width)
@@ -1705,19 +1569,10 @@ final class RowLayoutTests: XCTestCase {
         XCTAssertLessThan(topic.lowerBound, Self.colourBar.upperBound + 11)
     }
 
-    /// The number never gives way; the topic does. `fixedSize` is what says so,
-    /// and 150 pt is where it starts to matter — the panel width is a setting,
-    /// and at the default there is room for both.
-    ///
-    /// Held by measurement rather than by belief: the number's ink is compared
-    /// against the same string rendered on its own, so a truncated `3.40M/…`
-    /// fails even though it is still "drawn". Proved by removing the modifier and
-    /// re-measured 2026-08-27, now that the label is a rate: `3.40M/h` inks 42.00
-    /// pt whole and 24.25 pt clipped at 150 pt — 17.75 pt of it gone — and this
-    /// fails there. **Only there.** At 240 pt, and at the 380 pt default, the two
-    /// extra characters still fit and nothing fails, so 150 is the whole of what
-    /// holds this modifier down; a claim that it also broke at 240 was in this
-    /// comment until the mutation was actually run.
+    /// The number never gives way; the topic does. `fixedSize` says so, and only at
+    /// 150 pt does it matter (at 240 and 380 pt both fit). The number's ink is compared
+    /// with the same string rendered alone, so a truncated `3.40M/…` fails though it is
+    /// still drawn.
     func testTheRateIsNeverCutWhileTheTopicIs() throws {
         let label = try XCTUnwrap(SwitcherRowView.rateLabel(for: makeRow(status: .blocked,
                                                                          count: 0,
@@ -1795,29 +1650,15 @@ final class RowLayoutTests: XCTestCase {
                        "the week's total is the tooltip's; the line must not grow for it")
     }
 
-    /// **Is the rate drawn at all** — asked with two rates of different width
-    /// rather than with a rate against no rate.
+    /// Is the rate drawn at all, asked with two rates of different width rather than a
+    /// rate against no rate: two rates differ only in the label's width, so only the
+    /// label can make the renders differ.
     ///
-    /// Two rates differ in **the label's width and nothing else**, so nothing but
-    /// the label can make the two renders differ. That is the whole argument, and
-    /// it does not depend on guessing how the label might one day stop being
-    /// drawn.
-    ///
-    /// A rate against no rate is two different compositions of the line, not one
-    /// composition with an element missing: `secondLine` hands the topic whatever
-    /// the number does not take (`Spacer(minLength: 0)`, the topic truncating to a
-    /// tail), so "these differ" is a fact about the line rather than about the
-    /// number. Measured 2026-08-27 — the topic's own ink with the rate against
-    /// without it: 12.75 pt against 64.50 at 150 pt, 104.25 against 150.50 at 240,
-    /// and 189.50 either way at the 380 pt default, where the topic fits whole. So
-    /// the naive form is contaminated exactly at the narrow widths, which are the
-    /// widths the label is at risk in.
-    ///
-    /// §4 keeps this trap under the bracket and the percentage, where the
-    /// mechanism is a rung of `titleLine`'s `ViewThatFits` ladder. That is a
-    /// *different* case, not this one: `secondLine` has no `ViewThatFits` at all,
-    /// and `renderSecondLine` draws the title line empty anyway. Same trap, other
-    /// machinery.
+    /// A rate against no rate is two compositions of the line: `secondLine` gives the
+    /// topic whatever the number does not take (`Spacer(minLength: 0)`, a tail-truncating
+    /// topic), so at narrow widths the topic's own ink changes too. §4 keeps the same trap
+    /// under the bracket and the percentage, but there the mechanism is `titleLine`'s
+    /// `ViewThatFits`; `secondLine` has none.
     func testPROBEnaiveVerdict() throws {
         let topic = "тема чата, тоже подлиннее строки"
         for width in [150.0, 240.0, Config.default.panelWidth] {
@@ -1863,29 +1704,15 @@ final class RowLayoutTests: XCTestCase {
         return narrow.ink != wide.ink
     }
 
-    /// The rate is two characters wider than the total it replaced, and §4's
-    /// floors were measured on the narrower string. Re-measured here: the rate is
-    /// whole at the default width **and** at 150 pt, the narrow end of the
-    /// `panelWidth` setting — the end where a modifier that "changes nothing" is
-    /// the one that breaks (`AGENTS.md`).
+    /// The rate is whole at the default width and at 150 pt, the narrow end of
+    /// `panelWidth`, where a modifier that "changes nothing" breaks (`AGENTS.md`).
     ///
-    /// Clipping is caught by comparing the number's ink against the same string
-    /// rendered on its own. That comparison is a **span** — `min…max` of the
-    /// inked columns — and nothing about it is bitmap against bitmap; saying it
-    /// was is what hid the defect below for a review round.
-    ///
-    /// Which is why the 6 pt gap in front of the number is asserted blank, exactly
-    /// as `testTheRateIsNeverCutWhileTheTopicIs` asserts it. The measuring window
-    /// is taken leftwards from the end of the line by the label's *whole* width,
-    /// so a clipped number leaves that window hanging over the gap and into the
-    /// topic, and `span` hands back the union of the two. Measured with
-    /// `fixedSize` removed at 150 pt, before the guard was carried over: the wide
-    /// label's window came out **49.50 pt** against **49.00 pt** of ink rendered
-    /// alone — inside the 0.5 tolerance, so the wide label's own assertion did not
-    /// see the break at all, though only 24.25 pt of that was number and the other
-    /// 25.25 was topic. The test went red on the narrow label, and a regression
-    /// that clipped just the long one — `≥123.45M/h`, ten characters, the one a
-    /// narrow panel reaches first — would have left it green.
+    /// Clipping is caught by comparing the number's ink span (`min…max` of inked
+    /// columns) with the same string rendered alone. The window is taken leftwards from
+    /// the line's end by the label's whole width, so a clipped number leaves the window
+    /// over the gap and into the topic, and `span` returns the union. Hence the 6 pt gap
+    /// in front of the number is asserted blank, as in
+    /// `testTheRateIsNeverCutWhileTheTopicIs`.
     func testTheRateIsWholeAtBothEndsOfThePanelWidthRange() throws {
         let topic = "тема чата, тоже подлиннее строки"
         for width in [Config.default.panelWidth, 150.0] {
@@ -1937,17 +1764,11 @@ final class RowLayoutTests: XCTestCase {
     /// A percentage of the same shape but wider: `412%` against `38%`.
     private static let widerCPU: Double = 412
 
-    /// Is the percentage on the line at this width?
-    ///
-    /// Decided against a **wider percentage**, not against no percentage at all.
-    /// The obvious comparison — the row with one against the row without —
-    /// answers "these two rows differ", which is not the same question: below
-    /// the percentage's floor the row that carries one falls a rung further than
-    /// the row that carries none, so the two differ while neither of them draws
-    /// a percentage. Two figures that differ only in width cannot do that: when
-    /// the label is dropped both rows draw the same thing, and when it is drawn
-    /// the wider one takes more room. The predicate is about the narrow figure —
-    /// the wide one is allowed to have been dropped already.
+    /// Is the percentage on the line at this width? Decided against a wider percentage,
+    /// not against none: below the percentage's floor a row with one falls a rung
+    /// further than a row without, so those differ while neither draws a percentage. Two
+    /// figures differing only in width draw the same when dropped. The predicate is
+    /// about the narrow figure; the wide one may already be dropped.
     private func cpuIsDrawn(width: Double, count: Int, name: String) throws -> Bool {
         let narrow = try renderRow(status: .blocked, count: count, name: name,
                                    topic: nil, cpu: Self.cpu, width: width)
@@ -1969,16 +1790,10 @@ final class RowLayoutTests: XCTestCase {
         return narrow.ink != wide.ink
     }
 
-    /// The percentage stands at the right-hand end of the title line, in the
-    /// same column as the spend on the line below it — which is the whole of
-    /// what "opposite the title, above the token figure" means.
-    ///
-    /// Asserted by measuring the two apart and comparing where each of them
-    /// ends, because a render collapses its columns over the height of the row
-    /// and the two labels would otherwise be one span. Each row is drawn with
-    /// nothing else on its line — no topic under the percentage, no name beside
-    /// the spend — so the ink at the right-hand end is the label and nothing
-    /// else.
+    /// The percentage stands at the right-hand end of the title line, in the same column
+    /// as the spend below it. The two are measured apart (a render collapses columns
+    /// over the row's height), each row drawn with nothing else on its line, so the ink
+    /// at the right-hand end is the label alone.
     func testTheCPUStandsInTheSameColumnAsTheSpendBelowIt() throws {
         let width = Config.default.panelWidth
         let slot = badgeSlot(inRowOfWidth: width)
@@ -2020,38 +1835,17 @@ final class RowLayoutTests: XCTestCase {
         }
     }
 
-    /// The degradation order, which is the decision the ladder encodes: as the
-    /// panel narrows the **percentage** is what goes first, then the count, and
-    /// the name outlives both.
+    /// The degradation order the ladder encodes: as the panel narrows the percentage
+    /// goes first, then the count, and the name outlives both.
     ///
-    /// Swept rather than asserted at two chosen widths, because what is being
-    /// claimed is an order and an order needs both of its boundaries. Measured
-    /// a point at a time (27.08.2026): against the longest real name on this
-    /// machine the percentage is drawn down to 224 pt and the count down to 186,
-    /// and against a one-character name 192 and 154 — 38 pt of panel in either
-    /// case where the row reads `name (agents: 1)` with no percentage, which is
-    /// the state rungs 3 and 4 exist to produce.
+    /// Swept, because an order needs both boundaries. Against the longest name the
+    /// percentage is drawn down to 224 pt and the count to 186; against a one-character
+    /// name 192 and 154. Both names, because only the short one stands on rung 3 (the
+    /// longest reaches 186 through rung 4). The count's floor is the same with or
+    /// without a percentage, since the percentage is always dropped first.
     ///
-    /// **Both names, because the short one is the only place rung 3 shows.** The
-    /// longest name stopped fitting whole above 380 pt, so it never stands on
-    /// rung 3 at all and reaches the same 186 through rung 4; deleting rung 3
-    /// costs it nothing and this test would not notice. A one-character name
-    /// climbs 1 → 3 → 5, and with rung 3 taken out it loses its bracket at 186
-    /// instead of 154 (measured by deletion) — 32 pt of panel, and the failure
-    /// order of §4 broken, the count and the percentage going within 6 pt of
-    /// each other.
-    ///
-    /// The third floor is what pins that down as a property rather than a pair
-    /// of widths: the count's floor is the same on a row that carries a
-    /// percentage as on one that does not, because the percentage is always the
-    /// first thing dropped and so can never cost the count a point of panel.
-    ///
-    /// The assertions are that order, that equality, and the fact that each rung
-    /// is reached inside the sweep — not the exact widths, which move with the
-    /// font metrics of an OS update. Swapping rungs 2 and 3 — dropping the count
-    /// before the percentage — reverses the inequality and fails here. The step
-    /// is 5 pt because the widths themselves are not what is asserted, and the
-    /// sweep renders six rows at each of them.
+    /// The assertions are the order, that equality and each rung being reached, not the
+    /// exact widths, which move with OS font metrics. The 5 pt step is enough for that.
     func testThePercentageGivesWayBeforeTheCountDoes() throws {
         for name in [Self.longestName, "p"] {
             var lastWidthWithCPU: Double?
@@ -2252,15 +2046,10 @@ final class MenuBarIconTests: XCTestCase {
 
     /// One drawn icon, read back as ink.
     private struct Rendered {
-        /// One inked pixel: where it is, what colour it came out, and how
-        /// strongly. Colour is here because the picture stopped being a template
-        /// (§4) — the system no longer decides what any of this looks like, so
-        /// what it looks like is a thing these tests have to ask.
-        ///
-        /// The three components are *straight*, divided back out by the alpha
-        /// they were stored premultiplied under: an antialiased edge is the same
-        /// colour as the middle of a stroke, only fainter, and weighing the
-        /// stored bytes would report every edge as a paler colour of its own.
+        /// One inked pixel: where it is, what colour it came out, and how strongly. The
+        /// picture is not a template (§4), so its colour is something these tests ask.
+        /// The components are straight, divided back out by the premultiplied alpha, so an
+        /// antialiased edge reads as the same colour, only fainter.
         typealias Dot = (x: Double, y: Double,
                          red: Double, green: Double, blue: Double, alpha: Double)
 
@@ -2318,14 +2107,9 @@ final class MenuBarIconTests: XCTestCase {
         /// measured.
         func pixels(in band: ClosedRange<CGFloat>) -> Int { rows(in: band).count }
 
-        /// The bands of rows that carry ink, split wherever half a point of the
-        /// picture is blank.
-        ///
-        /// Found in the rendering rather than taken from the icon's own geometry,
-        /// and that is the whole point of it: a check that only looks inside the
-        /// two declared bands cannot see the number drawn *into* the bar's rows —
-        /// verified by drawing it there, which passed such a check and fails this
-        /// one.
+        /// The bands of rows that carry ink, split wherever half a point of the picture is
+        /// blank. Found in the rendering rather than taken from the icon's geometry: a check
+        /// inside the two declared bands cannot see the number drawn into the bar's rows.
         var inkedBands: [ClosedRange<Double>] {
             var bands: [ClosedRange<Double>] = []
             for row in Set(ink.map(\.y)).sorted() {
@@ -2344,36 +2128,15 @@ final class MenuBarIconTests: XCTestCase {
         MenuBarIcon.barRect.minY...MenuBarIcon.barRect.maxY
     }
 
-    /// The rows where the bar's frame is the only thing that can be drawn: above
-    /// the fill's own bounds and inside the bar's.
+    /// The rows where the bar's frame is the only thing that can be drawn: outside the
+    /// fill's own bounds and inside the bar's. Anything the warning fires on has a full
+    /// capsule under it, so a band holding both would measure the fill as the frame.
     ///
-    /// It exists because the fill's length became the ratio. While it was the
-    /// quota mean, a fixture at a mean of 0 left the whole bar band to the frame
-    /// and the two could be told apart by choosing the figure; now anything the
-    /// warning boundary fires on has a full capsule under it, and a band that
-    /// held both would measure the fill and call it the frame.
-    ///
-    /// The lower edge is measured and not declared. Probed 2026-08-24 at scale 4
-    /// with the predicate `chromaticMean` actually applies — alpha over a half
-    /// and relative chroma over 0.3 — on both plates, at ratios 30, 60 and
-    /// 99.999: the fill is at full strength from y = 16.00 down, reaches y = 16.25
-    /// at alphas up to 0.88 with most of the row clearing the cut, and reaches
-    /// y = 16.50 only at 0.04 to 0.48 on the light plate and 0.04 to 0.24 on the
-    /// dark — where **not one pixel** clears it. From 16.75 up there is no fill
-    /// colour at any alpha, until the frame itself takes one. (An earlier note
-    /// here named a 0.54 row at 16.50 and made the edge turn on it; no row at
-    /// 16.50 came out over half on either plate, and it is not in the data.)
-    ///
-    /// So `barFillBounds.maxY` of 16.5 would do, and the mutation says so rather
-    /// than a comment: moving the edge exactly onto it leaves all 532 tests green
-    /// (2026-08-24). The quarter point is slack, not a boundary — what it buys is
-    /// a band whose lower edge is the first row carrying no fill colour *at all*,
-    /// instead of one that rests on the alpha cut with 0.02 to spare. What the
-    /// edge does have to stay above is the fill itself: widening the band to the
-    /// whole bar reddens three tests (same day) —
-    /// `testOverCapacityIsLoudOnTheFrameAndTheNumberToo`,
-    /// `testTheFrameAndTheNumberAreInkBelowCapacityAndTakeTheRampAbove` and
-    /// `testTheWarningIsNeverQuieterThanTheCalmStateItReplaces`.
+    /// The lower edge is measured at scale 4 with `chromaticMean`'s predicate (alpha
+    /// over a half, relative chroma over 0.3) on both plates: fill colour reaches
+    /// y = 16.25, nothing clears the cut at 16.50, and from 16.75 there is none until the
+    /// frame. The extra quarter point is slack so the band starts on the first row with
+    /// no fill colour at all.
     private static var frameBand: ClosedRange<CGFloat> {
         (MenuBarIcon.barFillBounds.maxY + 0.25)...MenuBarIcon.barRect.maxY
     }
@@ -2388,20 +2151,16 @@ final class MenuBarIconTests: XCTestCase {
 
     private static let scale = 4.0
 
-    /// A burn ratio to colour a bar by, in per cent of the week's refill rate.
-    ///
-    /// One number and a flag, which is all the drawing reads — it used to take a
-    /// pair of token rates and divide them, and the division moved into
-    /// `FleetCapacity` when both sides of the figure became percentage points.
+    /// A burn ratio to colour a bar by, in per cent of the week's refill rate. One
+    /// number and a flag, which is all the drawing reads.
     private func ratio(_ percent: Double,
                        lowerBound: Bool = false) -> UsagePopoverView.HeadlineRatio {
         UsagePopoverView.HeadlineRatio(percent: percent, isLowerBound: lowerBound)
     }
 
-    /// The appearance is always named, never left to the machine: the picture is
-    /// no longer a template, so what colour it comes out is decided by an input —
-    /// and a suite that inherited the appearance of whoever ran it would pass or
-    /// fail by the time of day.
+    /// The appearance is always named: the picture is not a template, so its colour
+    /// depends on this input, and inheriting the runner's appearance would make the
+    /// suite depend on the time of day.
     private func render(_ ratio: UsagePopoverView.HeadlineRatio?,
                         appearance: NSAppearance? = NSAppearance(named: .aqua)) throws -> Rendered {
         let image = MenuBarIcon.image(for: ratio, appearance: try XCTUnwrap(appearance))
@@ -2464,17 +2223,10 @@ final class MenuBarIconTests: XCTestCase {
                        accuracy: 0.001)
     }
 
-    /// And with the number under the bar rather than beside it, that width is the
-    /// number's column and nothing else — which is the whole reason the layout
-    /// changed. Side by side the picture was 57 points wide and took a visible
-    /// slice of the menu bar; stacked it is 27.
-    ///
-    /// The width is laid out here rather than compared against the icon's own
-    /// arithmetic. The check used to read `width == max(barWidth,
-    /// numberColumnWidth)` — the expression the property was written as — so
-    /// replacing that property with anything at all failed nothing. What the
-    /// picture has to be as wide as is the widest string it can ever hold, and
-    /// that is a thing this test can measure for itself.
+    /// With the number under the bar, the picture's width is the number's column and
+    /// nothing else: 27 points. The width is laid out here rather than compared against
+    /// the icon's own arithmetic: the picture must be as wide as the widest string it
+    /// can hold, which this test measures itself.
     func testThePictureIsExactlyTheNumbersColumnWide() throws {
         let widest = ceil(NSAttributedString(string: "\(MenuBarIcon.ceilingPercent)%",
                                              attributes: [.font: MenuBarIcon.font]).size().width)
@@ -2530,23 +2282,14 @@ final class MenuBarIconTests: XCTestCase {
                        accuracy: 0.5)
     }
 
-    /// The number sits flush with the right edge of the picture, so the `%` stays
-    /// in one place while the digits in front of it come and go — and every
-    /// figure the picture can draw fits the width that was measured for it.
+    /// The number sits flush with the right edge of the picture, so the `%` stays in one
+    /// place, and every figure the picture can draw fits the measured width (a ratio has
+    /// no top, so an outgrown figure would lose its leading digit to the image bounds).
     ///
-    /// **The string is asked to fit as well, and that is what the ratio added.**
-    /// While the number was the quota it had a top of 100 and three digits were
-    /// all it could ever want; a ratio has no top, so a figure that outgrew the
-    /// column would be drawn at a negative x and lose its leading digit to the
-    /// image bounds — silently, and in the direction of calm.
-    ///
-    /// It is the laid-out width that is asked, and **not** where the ink starts,
-    /// because where the ink starts cannot tell: measured 2026-08-24, `1000%`
-    /// drawn flush right in this 27 pt picture comes back inked from 0.25 to
-    /// 26.25 — the very same span as `999%` — since what falls off is the leading
-    /// glyph and the one behind it has a left side bearing of its own. The
-    /// bitmaps do differ, and that difference is where
-    /// `testTheFigureIsCappedAtThreeDigitsAndNeverClipped` looks.
+    /// The laid-out width is asked, not where the ink starts: `1000%` drawn flush right
+    /// in this 27 pt picture inks from 0.25 to 26.25, the same span as `999%`. The
+    /// bitmaps differ, and `testTheFigureIsCappedAtThreeDigitsAndNeverClipped` looks
+    /// there.
     func testEveryFigureEndsAtTheSameEdgeAndFitsItsColumn() throws {
         var rightEdges: [Double] = []
         for percent in [0.0, 5, 42, 100, 197, 999, 1000, 1e12] {
@@ -2563,17 +2306,10 @@ final class MenuBarIconTests: XCTestCase {
         }
     }
 
-    /// No reading, no number — and the picture does not fall back to the weekly
-    /// quota the way the popover's headline does.
-    ///
-    /// The two surfaces answer the same question and part here on purpose: the
-    /// popover writes a caption under its lead saying which quantity it is
-    /// showing, and 27 points of menu bar have no room for one. A number that is
-    /// sometimes the ratio and sometimes the quota, with nothing to say which,
-    /// is read as the one the item normally carries — and the wrong reading of
-    /// the two is the calm one. A genuine zero *is* drawn, which is the other
-    /// half of the same rule: "nothing measured" and "spending nothing" have to
-    /// look different.
+    /// No reading, no number, and the picture does not fall back to the weekly quota as
+    /// the popover's headline does: the popover captions which quantity it shows, and 27
+    /// points of menu bar have no room for that. A genuine zero is drawn: "nothing
+    /// measured" and "spending nothing" must look different.
     func testWithoutAReadingNoNumberIsDrawnAtAll() throws {
         let blank = try render(nil)
         XCTAssertTrue(blank.rows(in: MenuBarIcon.numberRows).isEmpty,
@@ -2596,14 +2332,9 @@ final class MenuBarIconTests: XCTestCase {
                       "the menu bar fell back to the quota, in a picture with no room to say so")
     }
 
-    /// The number is the spend ratio and not the week's mean — the whole of this
-    /// round, asked of the drawing.
-    ///
-    /// Both figures are in the snapshot and they differ, so a picture drawing
-    /// either one can be told from a picture drawing the other. Compared against
-    /// separate renderings of the two rather than against a string, because what
-    /// changed is what lands on the menu bar: the ink of `126%` is the assertion
-    /// and the ink of `47%` is the control.
+    /// The number is the spend ratio and not the week's mean. Both figures are in the
+    /// snapshot and differ; compared against separate renderings of the two, so the ink
+    /// of `126%` is the assertion and the ink of `47%` the control.
     func testTheNumberIsTheRatioAndNotTheWeeksMean() throws {
         var snapshot = UsageSnapshot.empty
         snapshot.fleetSevenDayMean = 47.4
@@ -2619,14 +2350,9 @@ final class MenuBarIconTests: XCTestCase {
                        "126%")
     }
 
-    /// The bar says the same thing the number does. Measured as area, because
-    /// the outline spans the whole bar in every state and a span would not tell
-    /// an empty bar from a full one.
-    ///
-    /// **And it stops at the refill rate**, exactly as the popover's lead bar
-    /// does: past that point the length has nothing left to say and the figure
-    /// under it says the rest. A scale stretched to three refills would put the
-    /// point the whole reading turns on a third of the way along.
+    /// The bar says what the number does. Measured as area, because the outline spans
+    /// the whole bar in every state. It stops at the refill rate, as the popover's lead
+    /// bar does: past that the figure under it says the rest.
     func testTheBarFillsWithTheRatioAndStopsAtTheRefillRate() throws {
         let inked = try [nil, ratio(0), ratio(50), ratio(100)]
             .map { try render($0).pixels(in: Self.barBand) }
@@ -2647,20 +2373,11 @@ final class MenuBarIconTests: XCTestCase {
         }
     }
 
-    /// The figure is capped at three digits, and what the cap buys is measured
-    /// rather than argued.
-    ///
-    /// The ratio has no top — a fleet can burn many times what its week refills —
-    /// while the column is a constant, because a status item that resizes itself
-    /// drags every item to its left along with it. Drawn flush right, `1000%` at
-    /// 32.75 pt starts at −5.75 in a 27 pt picture and the leading digit is
-    /// clipped away by the image bounds. What lands is measured and not imagined
-    /// (2026-08-24): the clipped `1000%` is **pixel for pixel the drawing of
-    /// `000%`** — 1947 inked pixels, the same bitmap — against 2085 for `999%`.
-    /// The loudest reading this item has turns into the calmest one it can draw.
-    /// So `999%` is the top of the drawn scale, and it is a floor rather than a
-    /// reading: the accessibility description, which has no width to run out of,
-    /// says what was measured.
+    /// The figure is capped at three digits. The ratio has no top while the column is a
+    /// constant (a status item that resizes drags every item to its left). Drawn flush
+    /// right, a clipped `1000%` is pixel for pixel the drawing of `000%`, so `999%` is
+    /// the top of the drawn scale and a floor rather than a reading; the accessibility
+    /// description says what was measured.
     func testTheFigureIsCappedAtThreeDigitsAndNeverClipped() throws {
         XCTAssertEqual(MenuBarIcon.label(for: ratio(999)).string, "999%")
         XCTAssertEqual(MenuBarIcon.label(for: ratio(1000)).string, "999%")
@@ -2689,28 +2406,16 @@ final class MenuBarIconTests: XCTestCase {
 
     // MARK: - Colour, now that the picture owns it
 
-    /// The fill is a ramp over the load and not a step at capacity, and it is a
-    /// ramp on a light menu bar and on a dark one both.
+    /// The fill is a ramp over the load, not a step at capacity, on a light and a dark
+    /// menu bar.
     ///
-    /// Read off the drawn picture as a hue, because a hue is the thing the ramp
-    /// is made of and a name is what the code already says. Three assertions
-    /// have to hold together, and each covers a way the ramp can be broken while
-    /// the others pass: the ends are **flat** (60 and 70 are one colour, 130 and
-    /// 150 are one colour), the middle is **monotone** (a step would repeat a
-    /// colour, a lookup table of hand-picked values could wander), and every
-    /// sample matches the rule the popover paints with — which is what stops the
-    /// two surfaces drifting into two ramps.
-    ///
-    /// A picture drawn in grey would fail rather than pass: the saturation of
-    /// every sample is asserted, and `chromaticMean` returns `nil` where nothing
-    /// was drawn in a colour of its own at all.
-    ///
-    /// The length and the colour are one quantity now, which is what this round
-    /// changed: the fill is as long as the ratio and coloured by the same ratio,
-    /// so every sample past the anchor is a full capsule in its own colour. It
-    /// used to be the quota's length under the ratio's colour — two readings in
-    /// one shape — and the ramp above the anchor was reachable only because the
-    /// colour was asked separately.
+    /// Read off the drawn picture as a hue. Three assertions hold together: the ends are
+    /// flat (60 and 70 one colour, 130 and 150 one colour), the middle is monotone, and
+    /// every sample matches the rule the popover paints with, so the two surfaces cannot
+    /// drift into two ramps. A grey picture fails: saturation is asserted, and
+    /// `chromaticMean` returns `nil` where nothing has a colour of its own. The fill is
+    /// as long as the ratio and coloured by it, so every sample past the anchor is a
+    /// full capsule.
     func testTheFillIsARampFromBlueThroughGreenToRed() throws {
         for name in [NSAppearance.Name.aqua, .darkAqua] {
             let appearance = try XCTUnwrap(NSAppearance(named: name))
@@ -2739,24 +2444,14 @@ final class MenuBarIconTests: XCTestCase {
                      "a bar with no reading behind it was drawn in a colour that means something")
     }
 
-    /// The one boundary the colour rules keep: the frame and the number are ink
-    /// below capacity and take the ramp above it.
+    /// The one boundary the colour rules keep: the frame and the number are ink below
+    /// capacity and take the ramp above it, on both menu bars. The calm fixture is a
+    /// hair under the boundary so the boundary itself is held; above, the frame is the
+    /// ramp's green at capacity and its red by 130%.
     ///
-    /// Both halves matter and both are measured on both menu bars. Below, the
-    /// picture has to stay calm — a status item that changed colour on every
-    /// reading would be saying nothing with all of them — and the fixture is a
-    /// hair under the boundary rather than well under it, so what is held is the
-    /// boundary. Above, the colour is no longer one red: at capacity the frame is
-    /// the ramp's green and by 130% it is the ramp's red, which is the whole of
-    /// the correction.
-    ///
-    /// **The frame is read off `frameBand` and not off the whole bar**, which the
-    /// fill's new length forced. A fixture at a mean of 0 used to leave the bar
-    /// band to the frame alone; now the length is the ratio, so every sample past
-    /// the anchor has a full capsule in it and the calm sample a hair under the
-    /// anchor is a bar all but full — measuring the band would be measuring the
-    /// fill and calling it the frame. Those rows sit above the fill's own bounds
-    /// and only the stroke reaches them.
+    /// The frame is read off `frameBand`, not the whole bar: a sample near the anchor is
+    /// an almost full capsule, so the whole bar would measure the fill. Only the stroke
+    /// reaches those rows.
     func testTheFrameAndTheNumberAreInkBelowCapacityAndTakeTheRampAbove() throws {
         for name in [NSAppearance.Name.aqua, .darkAqua] {
             let appearance = try XCTUnwrap(NSAppearance(named: name))
@@ -2790,15 +2485,9 @@ final class MenuBarIconTests: XCTestCase {
             // flat end at 150. Falling, and not one fixed red the moment the
             // boundary is crossed.
             for warned in [frames, numbers] {
-                // **The count is asked before anything is indexed**, and it is
-                // asked as a failure rather than as a subscript. The four samples
-                // are `rampSamples` filtered by the anchor, so moving the anchor
-                // changes how many there are — and the anchor is this round's
-                // most important constant, the one thing a mutation run has to be
-                // able to examine. Indexed straight, an anchor at 112 leaves
-                // three elements and takes the whole process down with
-                // `Index out of range`, killing every suite after this one
-                // instead of reddening.
+                // The count is asserted before anything is indexed. The samples are `rampSamples`
+                // filtered by the anchor, so moving the anchor changes their number, and indexing
+                // straight would crash the process with `Index out of range` instead of failing.
                 guard warned.count == 4 else {
                     XCTFail("""
                         the ramp above the anchor is \(warned.count) samples and this reads four: \
@@ -2846,26 +2535,11 @@ final class MenuBarIconTests: XCTestCase {
         return hue(of: (srgb.redComponent, srgb.greenComponent, srgb.blueComponent))
     }
 
-    /// Past the refill rate the warning is on the frame and on the number, not
-    /// on the fill alone — and what that is worth changed with this round.
-    ///
-    /// It used to be worth the warning existing at all. The fill's length was the
-    /// quota mean, so at a mean near zero there was nothing to colour — measured
-    /// at a load of 300%, the red ink was 0.00 pt² at a mean of 0, 0.25 at 1% and
-    /// 2.12 at 3% — and that is the fleet just after its windows turn over, which
-    /// is exactly when a 300% burn is worth knowing. With the length now the
-    /// ratio itself, anything the boundary fires on has a full capsule under it,
-    /// so the frame and the number are no longer the only marks: they are what
-    /// separates 105% from 900%, both of which fill the bar to the same end.
-    ///
-    /// Asked of the frame's band and of the number's rows **separately**, and
-    /// that separation is the test. Over the whole picture at once it could not
-    /// fail for either half on its own: a red number satisfied it with a
-    /// colourless frame and a red frame satisfied it with a colourless number.
-    /// Both mutations were run and both were green — `warningColor` forced to
-    /// `nil`, and the number's label asked for without a colour, which makes the
-    /// whole on-demand colouring path deletable. Re-run 2026-08-24 against the
-    /// ratio: both still redden this test.
+    /// Past the refill rate the warning is on the frame and the number, not the fill
+    /// alone: anything the boundary fires on has a full capsule, so the frame and the
+    /// number are what separate 105% from 900%.
+    /// Asked of the frame's band and the number's rows separately: over the whole
+    /// picture a red number would pass with a colourless frame, and the reverse.
     func testOverCapacityIsLoudOnTheFrameAndTheNumberToo() throws {
         let alarming = try render(ratio(300))
         let frame = try XCTUnwrap(alarming.chromaticMean(in: Self.frameBand), """
@@ -2893,21 +2567,12 @@ final class MenuBarIconTests: XCTestCase {
                         "the fixture has no fill at all, so the two nils above prove nothing")
     }
 
-    /// A band of the picture as it lands on the plate underneath: the pixels the
-    /// drawing covers most fully, composited over that plate, and how legible the
-    /// result is against it.
-    ///
-    /// **The most fully covered pixels rather than a fixed alpha**, because the
-    /// two things this test compares are drawn at two different opacities — the
-    /// calm frame at 0.55 of `labelColor`'s own 0.847, the warning at full
-    /// strength — and a threshold that fitted one would find nothing of the
-    /// other. Wherever a stroke is nominally drawn, its interior is where its
-    /// alpha peaks; the pixels around that peak are the stroke and the rest is
-    /// its antialiasing.
-    ///
-    /// The compositing is the point of the whole helper. The picture is drawn on
-    /// transparency and the menu bar is what shows through it, so the colour a
-    /// reader sees is neither the straight colour nor the stored one.
+    /// A band of the picture as it lands on the plate underneath: the most fully covered
+    /// pixels, composited over that plate, and their contrast against it.
+    /// The most covered pixels rather than a fixed alpha, because the calm frame is drawn
+    /// at 0.55 of `labelColor`'s 0.847 and the warning at full strength; a stroke's
+    /// interior is where its alpha peaks. Compositing matters because the picture is
+    /// drawn on transparency over the menu bar.
     private func onPlate(_ picture: Rendered, in band: ClosedRange<CGFloat>,
                          on plate: UsagePopoverView.RampBackground,
                          colouredOnly: Bool = false)
@@ -2933,74 +2598,29 @@ final class MenuBarIconTests: XCTestCase {
         return (mixed.red, mixed.green, mixed.blue, wcagContrast(mixed, against: plate.grey))
     }
 
-    /// The whole legibility of the status item, measured off the drawing on both
-    /// plates at nine loads — and the rule that came out of it.
+    /// The legibility of the status item, measured off the drawing on both plates at
+    /// nine loads. A warning may never be less legible than the calm state it replaces.
     ///
-    /// **A warning may never be less legible than the calm state it replaces**,
-    /// and this is where that is a measurement rather than a sentence. What was
-    /// on screen before did the opposite, and it was rendered to be sure of it —
-    /// the old ceiling and the old softened frame put back for one run
-    /// (2026-08-18, light menu bar plate rgb 0.883): crossing capacity took the
-    /// number from ink at 11.61 to 1 down to 1.62, and the frame from 4.41 to
-    /// 1.35, with the worst of the band at 115% reading 1.89 and 1.41. The
-    /// picture faded exactly where it was supposed to light up, in the band this
-    /// fleet lives in.
+    /// Three things are asked on both plates, each able to fail on its own:
     ///
-    /// Three things are asked, on **both** plates, and each of them can fail on
-    /// its own:
+    /// 1. Every mark the ramp paints (fill, frame, number) clears `contrastFloor(on:)`
+    ///    for its plate, measured on the rendering, since the frame's own opacity is
+    ///    part of the answer and the rule knows nothing about it.
+    /// 2. The warning frame is at least as legible as the calm frame. By construction:
+    ///    the floor is the calm frame's own contrast where that is larger (calm frame
+    ///    4.41 against a floor of 4.50 on light, 4.67 against 4.69 on dark). On the dark
+    ///    plate the hot end is the equality case (`contrastFloor(.dark)` is the analytic
+    ///    calm frame, 4.6924); the rendering keeps it off the knife edge, because the
+    ///    calm stroke at `calmFrameOpacity` loses more to partial coverage. Making both
+    ///    strokes equally opaque would leave the comparison resting on rounding.
+    /// 3. Every warning mark is chromatic, so a floor met by driving the ramp to black
+    ///    or white fails.
     ///
-    /// 1. Every mark the ramp paints — fill, frame, number — clears
-    ///    `contrastFloor(on:)` for the plate it is drawn on. That is the floor
-    ///    doing its work, and it is asked of the *rendering* because the rule is
-    ///    about what lands on the menu bar: the frame's own opacity is part of the
-    ///    answer and the rule knows nothing about it.
-    /// 2. The warning **frame** is at least as legible as the calm frame it
-    ///    replaces. This is the ordering the review asked for, and it now holds by
-    ///    construction rather than by arithmetic luck: the floor *is* the calm
-    ///    frame's own contrast where that is the larger number. Measured, the calm
-    ///    frame is 4.41 on the light plate against a floor of 4.50, and 4.67 on
-    ///    the dark plate against a floor of 4.69.
-    ///
-    ///    **By construction as `≥`, and on the dark plate the hot end is the
-    ///    equality case** — `contrastFloor(.dark)` is the analytic calm frame
-    ///    exactly, 4.6924, and `legible` stops the moment it reaches the floor, so
-    ///    from 124.9% up the warning aims at the very number it must not fall
-    ///    under. What keeps this assertion off its knife edge is the rendering,
-    ///    not the rule: the warning frame comes off the bitmap at 4.69 and the
-    ///    calm one at 4.67, because the calm stroke is drawn at
-    ///    `calmFrameOpacity` and loses more to partial coverage than an opaque
-    ///    stroke does. A change that made the two strokes equally opaque would
-    ///    take that 0.02 away and leave the comparison resting on rounding.
-    /// 3. The colour is carried at all: every warning mark is chromatic, so a
-    ///    floor met by driving the ramp to black on a light plate — or to white on
-    ///    a dark one — would fail here rather than pass by being maximally
-    ///    legible.
-    ///
-    /// **The guard that used to run all three on the light plate only is gone**,
-    /// and it was hiding the whole defect: on the dark plate the ramp was left
-    /// raw, so crossing capacity took the frame from the calm 4.67 down to 3.20 —
-    /// the very fading this rule exists to forbid, surviving on half the surfaces
-    /// because no assertion looked there.
-    ///
-    /// **What is deliberately not asserted is the same ordering for the number**,
-    /// and the reason is arithmetic rather than taste: the calm number is ink at
-    /// full strength — 11.61 to 1 on the light plate, 8.57 on the dark one — and
-    /// no colour that keeps a hue reaches either. On the light plate the red
-    /// measures 4.45 and driving it further means driving it to black, which is
-    /// ink again; on the dark plate matching 8.57 asks the red for a saturation of
-    /// 0.17, which is a pink and fails assertion 3 above. The floor is what is
-    /// achievable; the drop is the price of a coloured number, and it is on the
-    /// record here rather than hidden.
-    ///
-    /// **And legibility is not monotone across the warning band on a dark plate**,
-    /// which is the one thing the fix could not buy. Measured: 5.36 at 100%, 6.83
-    /// at 110%, 8.19 at 115%, 6.56 at 120%, 4.69 at 130% and above. The hump is
-    /// the hue itself — a fully lit yellow is simply brighter against 0.2274 than
-    /// a red can be made without ceasing to be red — so the band's worst load is
-    /// its second-least legible mark. What the floor guarantees is the comparison
-    /// that matters: no point of the band is quieter than the calm state it
-    /// replaces. On the light plate the question does not arise, the whole ramp
-    /// being pinned at the floor.
+    /// The same ordering is not asserted for the number: the calm number is full-strength
+    /// ink (11.61 on light, 8.57 on dark) and no colour that keeps a hue reaches either.
+    /// On a dark plate legibility is not monotone across the warning band (5.36 at 100%,
+    /// 8.19 at 115%, 4.69 from 130%): a lit yellow is brighter than a red can be. On the
+    /// light plate the whole ramp is pinned at the floor.
     func testTheWarningIsNeverQuieterThanTheCalmStateItReplaces() throws {
         var table = ["", "plate  load  mark    rgb as drawn            contrast"]
         for name in [NSAppearance.Name.aqua, .darkAqua] {
@@ -3077,20 +2697,10 @@ final class MenuBarIconTests: XCTestCase {
         print(table.joined(separator: "\n"))
     }
 
-    /// A fill too narrow to see is not drawn — and the reading still reaches the
-    /// reader, because it is printed under the bar.
-    ///
-    /// The threshold is one constant on one arithmetic (`MenuBarIcon.fillWidth`
-    /// against `minimumVisibleFillWidth`), and it decides one thing: whether a
-    /// shape a quarter of a point wide goes on screen as its own antialiasing. It
-    /// used to decide a second thing as well — whether the description was
-    /// allowed to name the ratio — because the ratio reached the picture as
-    /// colour and nothing else, and a fill nobody can see carried nothing. The
-    /// number is that ratio now, so `showsRatio` is gone and the description
-    /// names the figure at every one of these widths.
-    ///
-    /// Measured rather than reasoned, at every figure either side of the
-    /// threshold.
+    /// A fill too narrow to see is not drawn, and the reading still reaches the reader
+    /// because it is printed under the bar. The threshold (`MenuBarIcon.fillWidth`
+    /// against `minimumVisibleFillWidth`) decides only whether a sliver goes on screen;
+    /// the description names the figure at every one of these widths.
     func testAFillTooNarrowToSeeIsNotDrawnAtAll() throws {
         for percent in [0.0, 1, 2, 3, 4, 5] {
             let figure = ratio(percent)
@@ -3113,23 +2723,14 @@ final class MenuBarIconTests: XCTestCase {
                                     MenuBarIcon.minimumVisibleFillWidth)
     }
 
-    /// The picture is resolved against the status item button's appearance, and
-    /// the application's only while there is no button.
-    ///
-    /// They are not the same appearance: measured 2026-08-18,
-    /// `NSApp.effectiveAppearance` was `NSAppearanceNameDarkAqua` while the
-    /// status item's button was `NSAppearanceNameVibrantDark`, and forcing
-    /// `NSApp.appearance` to `aqua` left the button where it was — the menu bar
-    /// follows the wallpaper, not the system theme. Drawn against the app's, the
-    /// ink is `labelColor` resolved in `aqua`, which is black, on a dark menu bar.
-    ///
-    /// Held through the drawing rather than as a name, for the reason the
-    /// luminance test next door gives: what matters is that the ink came out
-    /// light on a dark surface, and a name is what the code already says. The
-    /// divergence in *kind* cannot be reproduced on this machine today (it needs
-    /// a light theme under a dark desktop picture), so a view with an appearance
-    /// of its own stands in for the button — which is exactly the property the
-    /// rule turns on.
+    /// The picture is resolved against the status item button's appearance, and the
+    /// application's only while there is no button. They differ: the menu bar follows
+    /// the wallpaper, not the system theme (`NSApp.effectiveAppearance` can be
+    /// `DarkAqua` while the button is `VibrantDark`). Drawn against the app's, the ink
+    /// could be black on a dark menu bar.
+    /// Held through the drawing, as the luminance test next door is. The real divergence
+    /// needs a light theme under a dark desktop picture, so a view with its own
+    /// appearance stands in for the button.
     func testThePictureTakesItsAppearanceFromTheButtonWhenThereIsOne() throws {
         let light = try XCTUnwrap(NSAppearance(named: .aqua))
         let button = NSButton()
@@ -3170,16 +2771,11 @@ final class MenuBarIconTests: XCTestCase {
         }
     }
 
-    /// Everything that is not the fill has to resolve against the menu bar it is
-    /// drawn on, or it disappears when the bar goes dark. That was the system's
-    /// job while the picture was a template; it is this file's job now.
-    ///
-    /// Measured as luminance rather than asserted from the colour's name: what
-    /// matters is that the ink is dark on a light bar and light on a dark one,
-    /// which is the property `NSColor.black` fails and `labelColor` has. The
-    /// number and the frame are asked separately because they are two different
-    /// mechanisms — the number's colour is baked into attributed strings laid out
-    /// once at type initialisation and can only resolve late, while the frame's
+    /// Everything that is not the fill must resolve against the menu bar it is drawn on,
+    /// or it disappears when the bar goes dark; the picture is not a template, so this
+    /// file checks it. Measured as luminance: `NSColor.black` fails and `labelColor`
+    /// passes. The number and the frame are asked separately: the number's colour is
+    /// baked into attributed strings laid out once at type initialisation, the frame's
     /// is built inside the drawing block.
     func testTheNumberAndTheFrameFollowTheAppearanceTheyAreDrawnAgainst() throws {
         let dark = NSAppearance(named: .darkAqua)
@@ -3208,12 +2804,9 @@ final class MenuBarIconTests: XCTestCase {
             """)
     }
 
-    /// What the picture says, for a reader who cannot see it — and it no longer
-    /// says "weekly quota", because the picture no longer draws one.
-    ///
-    /// Two things are in here that the drawing cannot carry, and both are the
-    /// same fact about a description having no width: the `≥` of a ratio that is
-    /// only a floor, and a figure the column would have had to cap.
+    /// What the picture says for a reader who cannot see it. It carries two things the
+    /// drawing cannot, both because a description has no width: the `≥` of a ratio that
+    /// is only a floor, and a figure the column would have capped.
     func testTheDescriptionCarriesTheRatioAndNamesItRight() {
         XCTAssertEqual(MenuBarIcon.describe(nil), "Weekly burn: no data")
         XCTAssertEqual(MenuBarIcon.describe(ratio(126)), "126% of the weekly refill rate")
@@ -3233,16 +2826,9 @@ final class MenuBarIconTests: XCTestCase {
         XCTAssertEqual(MenuBarIcon.describe(ratio(1240)), "1240% of the weekly refill rate")
     }
 
-    /// And it names the same reading the picture draws, at every figure either
-    /// side of the one boundary in the colour rules.
-    ///
-    /// It used to have to agree with the *colour*, through `showsRatio`: the
-    /// ratio reached the drawing as a shade and nothing else, so a description
-    /// that named it over an uncoloured picture told the two readers two
-    /// different things — measured with the gateway down over a stored 60%, the
-    /// picture had not a coloured pixel in it while VoiceOver read out a number.
-    /// The number is the ratio now, so the agreement is about digits: whatever
-    /// the picture prints, the description contains, capping aside.
+    /// And it names the same reading the picture draws, at every figure either side of
+    /// the colour boundary: whatever the picture prints, the description contains,
+    /// capping aside.
     func testTheDescriptionAndThePictureNameOneNumber() throws {
         for percent in [0.0, 1, 60, 99.999, 100, 130, 300, 999] {
             let figure = ratio(percent)
@@ -3260,16 +2846,10 @@ final class MenuBarIconTests: XCTestCase {
         XCTAssertTrue(try render(nil).rows(in: MenuBarIcon.numberRows).isEmpty)
     }
 
-    /// What the owner of the picture redraws on, and what it refuses to draw at
-    /// all.
-    ///
-    /// **It used to be a pair**, and the redraw had to watch both halves: a live
-    /// token rate arriving every minute over an allowance arriving every ten, so
-    /// a picture deduped on one of them held a stale ramp over a fleet that had
-    /// gone past what it may spend. Both sides of the figure are now measured in
-    /// the same pass out of the same series, so there is one thing to watch — and
-    /// the `≥` beside it, which moves without the number and changes what the
-    /// picture is allowed to claim.
+    /// What the owner of the picture redraws on, and what it refuses to draw at all.
+    /// Both sides of the figure come from the same pass and series, so there is one
+    /// number to watch, plus the `≥` beside it, which moves without the number and
+    /// changes what the picture may claim.
     func testThePictureIsRedrawnWhenTheFigureMoves() throws {
         var snapshot = UsageSnapshot.empty
         snapshot.fleetBurn = UsagePopoverLabelTests.burn(126)
@@ -3328,16 +2908,11 @@ final class HideSafetyTests: XCTestCase {
                                                   menuOpening: false, popoverOpen: true))
     }
 
-    /// The fourth state is the only one that is not about what is on screen but
-    /// about what is one instruction away from it.
-    ///
-    /// Putting the status menu up begins by closing the popover, and that close
-    /// hands the keyboard back: with the menu asked for but not yet tracked,
-    /// nothing answered no, and the hide landed in the gap — cancelling a
-    /// tracking that had not started, so the menu collapsed under the pointer
-    /// that asked for it. The order of the two lines is not a defence; it holds
-    /// only while AppKit delivers the close synchronously, which is nobody's
-    /// promise.
+    /// The fourth state is about what is one instruction away from the screen. Putting
+    /// the status menu up begins by closing the popover, and that close hands the
+    /// keyboard back: with the menu asked for but not yet tracked, the hide would cancel
+    /// a tracking that had not started and collapse the menu under the pointer. Line
+    /// order is no defence; it holds only while AppKit delivers the close synchronously.
     func testAMenuOnItsWayUpCountsAsAMenuAlreadyUp() {
         XCTAssertFalse(PanelController.canHideApp(modal: false, menuTrackingDepth: 0,
                                                   menuOpening: true, popoverOpen: false))
@@ -3347,21 +2922,12 @@ final class HideSafetyTests: XCTestCase {
                                                  menuOpening: false, popoverOpen: false))
     }
 
-    /// The rule above is a pure function and was held as one; the pair of calls
-    /// that puts it into that state was held by nothing. Both halves were probed
-    /// by breaking them, and either break went green through the whole suite as
-    /// it then stood.
-    ///
-    /// The clearing half is the dangerous one, and it is the one state of
-    /// `canHideApp` with no way back: the tracking count is reconciled with
-    /// reality before every retry and a modal is asked of the system anew, but a
-    /// flag left set answers "no, do not hide" for the rest of the run. The
-    /// keyboard is then never handed back again — §4's "typing into nowhere",
-    /// silently and permanently — while the retry timer goes on waking the
-    /// process five times a second forever.
-    ///
-    /// No AppKit state of any kind is needed for it, which is the other half of
-    /// why it went unheld: it looked like it would.
+    /// The rule above is a pure function; this holds the pair of calls that sets and
+    /// clears the flag. The clearing half is the dangerous one: the tracking count is
+    /// reconciled before every retry and the modal re-asked, but a flag left set answers
+    /// "do not hide" for the rest of the run, so the keyboard is never handed back
+    /// (§4's "typing into nowhere") and the retry timer wakes the process five times a
+    /// second forever. No AppKit state is needed to test it.
     func testTheMenuFlagIsBothSetAndCleared() {
         let controller = PanelController(config: .default, store: SnapshotStore(config: .default))
         XCTAssertFalse(controller.menuOpening, "a fresh controller is already standing in for a menu")
@@ -3390,16 +2956,11 @@ final class StatusItemClickTests: XCTestCase {
                       "the second half of the press that closed it opened it again")
     }
 
-    /// And what the window measures is not the length of that press. On the
-    /// measured path the dismissing press never reaches the action at all (see
-    /// `toggleUsagePopover`), so the mark it leaves is spent by the *next*
-    /// click — which makes the interval bounded here the pause between two
-    /// clicks, and the window's price a deliberate second click swallowed.
-    ///
-    /// An ordinary double click on the status item is `down#1 → up#2`, 200–350
-    /// ms end to end. At the 0.4 s this window used to be, the whole of that
-    /// range was inside it: the popover closed on the first click and did not
-    /// come back on the second.
+    /// What the window measures is not the length of that press. On the measured path
+    /// the dismissing press never reaches the action (see `toggleUsagePopover`), so its
+    /// mark is spent by the next click: the window bounds the pause between two clicks,
+    /// and its price is a deliberate second click swallowed. An ordinary double click on
+    /// the status item is `down#1 → up#2`, 200–350 ms end to end.
     func testADeliberateDoubleClickIsAnswered() {
         var dismissal = PopoverDismissal()
         dismissal.popoverClosed(at: closed, midPress: true)
@@ -3433,16 +2994,10 @@ final class StatusItemClickTests: XCTestCase {
                        "a dismissal by Esc swallowed the click after it")
     }
 
-    /// And it does more than arm nothing: it disarms. A close with no button
-    /// down clears a mark an earlier press left, rather than leaving it to be
-    /// spent by a click that has nothing to do with it.
-    ///
-    /// Unreachable in practice, and pinned all the same. Two closes with no
-    /// click between them need the popover reopened in between, and reopening it
-    /// *is* a click — the one that spends the mark. But the type takes the state
-    /// directly, so holding the `: nil` half costs three lines, and every other
-    /// clause of this rule is held by name rather than by a comment saying it
-    /// cannot happen.
+    /// It also disarms: a close with no button down clears a mark an earlier press left.
+    /// Unreachable in practice (reopening the popover is the click that spends the
+    /// mark), but the type takes the state directly, so the `: nil` half is held by name
+    /// like every other clause.
     func testACloseThatWasNotAPressClearsAMarkAlreadyArmed() {
         var dismissal = PopoverDismissal()
         dismissal.popoverClosed(at: closed, midPress: true)
@@ -3451,15 +3006,10 @@ final class StatusItemClickTests: XCTestCase {
                        "a mark left by an earlier press outlived the close that should have cleared it")
     }
 
-    /// The window is the backstop for a second half that never arrives, and both
-    /// its sides are the constant's.
-    ///
-    /// A millisecond off either edge rather than on it: a `Date` this far from
-    /// its epoch resolves to a fraction of a microsecond, so the difference of
-    /// two of them a nominal window apart comes back a hair short of it (0.4 s
-    /// measured as 0.39999997, while that was the constant) — the exact boundary
-    /// is not a thing a test can stand on, and standing on it made this
-    /// assertion fail while the rule was right.
+    /// The window is the backstop for a second half that never arrives, and both its
+    /// sides are the constant's. A millisecond off each edge: a `Date` this far from its
+    /// epoch resolves to a fraction of a microsecond, so two dates a nominal window apart
+    /// differ by a hair less than it.
     func testBothSidesOfTheWindow() {
         let window = PopoverDismissal.suppressionWindow
         var inside = PopoverDismissal()
@@ -3470,12 +3020,9 @@ final class StatusItemClickTests: XCTestCase {
         outside.popoverClosed(at: closed, midPress: true)
         XCTAssertFalse(outside.shouldIgnoreClick(at: closed.addingTimeInterval(window + 0.001)))
 
-        // And the constant is bounded on the side the measurement moved it to.
-        // What it bounds is the pause between two clicks, so its cost is a
-        // second click swallowed — and an ordinary double click on the icon has
-        // its two ends 200–350 ms apart. At the 0.4 s it used to be, all of
-        // that was inside; the band left has to be narrower than the gesture it
-        // can eat.
+        // The constant bounds the pause between two clicks, so its cost is a second click
+        // swallowed; an ordinary double click on the icon has its ends 200–350 ms apart, so
+        // the window must be narrower than that.
         XCTAssertLessThan(window, 0.35, "an ordinary double click is swallowed whole")
         // Not nothing, either: the case it stands for is a press whose action
         // does arrive, and a window shorter than a brisk press catches none.
@@ -3493,16 +3040,12 @@ final class StatusItemClickTests: XCTestCase {
 /// anyone the keyboard. Every step below is a call the app makes in that order.
 final class ActivationDebtTests: XCTestCase {
 
-    /// The sequence the popover's activation used to be lost in, and the reason
-    /// the debt is one account rather than one flag per activator.
-    ///
-    /// Reachable by hand in seconds: click the status item (the app activates
-    /// for the popover), take the pointer to the left edge (the panel comes up),
-    /// dismiss the popover with Esc. The popover's own hand-back declines —
-    /// rightly, the panel is on screen — and the panel's hand-back used to know
-    /// nothing about an activation it had not performed itself. The panel then
-    /// slid away and left the app frontmost with no window at all: §4's defect,
-    /// the one where the user's typing goes nowhere until they click something.
+    /// The sequence that loses the popover's activation, and why the debt is one account
+    /// rather than one flag per activator. Click the status item (the app activates for
+    /// the popover), take the pointer to the left edge (the panel comes up), dismiss the
+    /// popover with Esc. The popover's hand-back declines because the panel is on screen;
+    /// the panel's hand-back must then cover the popover's activation too, or the app is
+    /// left frontmost with no window (§4: typing goes nowhere).
     func testAnActivationForThePopoverIsHandedBackWhenThePanelGoesAway() {
         var debt = ActivationDebt()
         debt.activated()
@@ -3544,13 +3087,11 @@ final class ActivationDebtTests: XCTestCase {
     }
 }
 
-/// The **week's** total: what it says, and what it says when it does not know.
-///
-/// It is no longer the row's second number — that is the rate, and `RowRateTests`
-/// asks about it (§2.9). The week is drawn in two places now, the tooltip's
-/// `Over 7 days` summary and the spend column of `--dump`, and this class covers
-/// both plus the tooltip's hour-against-week arrangement. The layout of the row
-/// itself is `RowLayoutTests`.
+/// The week's total: what it says, and what it says when it does not know. The
+/// row's second number is the rate (`RowRateTests`, §2.9). The week is drawn in the
+/// tooltip's `Over 7 days` summary and the spend column of `--dump`; this class
+/// covers both plus the tooltip's hour-against-week arrangement. The row's layout is
+/// `RowLayoutTests`.
 @MainActor
 final class RowSpendTests: XCTestCase {
 
@@ -3644,17 +3185,11 @@ final class RowSpendTests: XCTestCase {
         XCTAssertTrue(partial.contains("Tokens over the last hour (input-equivalent): ≥540k"), partial)
     }
 
-    /// A week with no hour under it — an ordinary project nobody has touched in
-    /// the last 3600 s — says the week and nothing else. The row's right-hand side
-    /// is blank there, and the week is still worth saying.
-    ///
-    /// The summary line wears `≥` on the same terms the breakdown's total does,
-    /// and it is asked here because nowhere else asks it: every other fixture in
-    /// this file hands the week all four counters, so the week's `≥` could have
-    /// been dropped in the move to the tooltip without a single test noticing.
-    /// The mark says a counter was never named, and the four are billed at
-    /// different rates — a floor printed as an exact figure is the one thing the
-    /// week's line cannot do.
+    /// A week with no hour under it (a project untouched in the last 3600 s) says the
+    /// week and nothing else; the row's right-hand side is blank.
+    /// The summary line wears `≥` on the same terms as the breakdown's total, asked here
+    /// because every other fixture hands the week all four counters. The counters are
+    /// billed at different rates, so a floor must not print as an exact figure.
     func testAWeekWithoutAnHourIsOneSummaryLineAndNoBreakdown() {
         let text = SwitcherRowView.tooltipText(for: row(TokenCounts(input: 1_000_000, output: 200_000,
                                                                     cacheCreation: 400_000,
@@ -3695,19 +3230,12 @@ final class RowSpendTests: XCTestCase {
         XCTAssertFalse(SwitcherRowView.tooltipText(for: row(blank, hourly: blank)).contains("Tokens"))
     }
 
-    /// The two spend columns of `--dump`'s `Projects` table, held to the widest
-    /// cell each of them claims to fit.
-    ///
-    /// Both columns in one test because the two widths are one decision: they are
-    /// set to the same magnitude — four digits of millions with the `>=` a lower
-    /// bound wears — and the rate's two extra characters buy `/h` rather than a
-    /// digit (`ConsoleDump.spendColumnWidth` carries the measurement and the
-    /// reasoning).
-    ///
-    /// The second half is the one worth having: one digit more does **not** fit,
-    /// and `column` pads rather than cuts, so the cell that overflows is not
-    /// truncated — every column to its right shifts on that row alone. Without it
-    /// the first half is green for any width at or above the cell.
+    /// The two spend columns of `--dump`'s `Projects` table, held to the widest cell
+    /// each claims to fit. Both in one test because the widths are one decision: four
+    /// digits of millions with a lower bound's `>=`, the rate's two extra characters
+    /// buying `/h` (`ConsoleDump.spendColumnWidth` carries the reasoning).
+    /// The second half checks that one digit more does not fit: `column` pads rather than
+    /// cuts, so without it the first half passes for any width at or above the cell.
     func testTheSpendColumnsAreAsWideAsTheWidestCellTheyClaimToFit() {
         let ceiling = TokenCounts(input: 9_999_990_000, output: nil,
                                   cacheCreation: nil, cacheRead: nil)
@@ -3728,39 +3256,16 @@ final class RowSpendTests: XCTestCase {
                              ConsoleDump.rateColumnWidth)
     }
 
-    /// And the table is held to those widths, which the test above does not do.
+    /// The table is held to those widths: two rows whose spend cells differ in width put
+    /// everything after the column at the same offset (a column that gives way takes
+    /// the rest of the line with it). The second half stops a wider literal from
+    /// passing: a cell one character over shifts the rest by exactly one.
     ///
-    /// It pins the constant to the cell; nothing pinned the composed line to the
-    /// constant. Writing `8` at the call site instead of `spendColumnWidth` — the
-    /// width the second review found too narrow for the reachable `>=123.45M` —
-    /// left every test green while shifting every column right of the spend cell
-    /// on the one row that fills it.
-    ///
-    /// So the property the widths exist for is what is asked: two rows whose spend
-    /// cells differ in width put everything after the column at the **same
-    /// offset**. Everything after it, rather than the next cell alone, because a
-    /// column that gives way takes the whole rest of the line with it.
-    ///
-    /// The second half is what stops a *wider* literal from passing. A cell one
-    /// character over the declared width shifts the rest by exactly one — `column`
-    /// pads rather than cuts, which is the edge the test above names — so a column
-    /// written wider than its constant is caught by the overflowing cell no longer
-    /// overflowing.
-    ///
-    /// **The two spend columns, and only those, which is why the name says so.**
-    /// The offsets are compared against a row whose spend cells are both `-`, so
-    /// what this catches is a column whose width differs between the rows compared;
-    /// widening `nameCell(for:width:)`, the indicator, the workspace word or the CPU
-    /// cell uniformly moves the baseline with everything else and both halves stay
-    /// green. Two columns here can overflow non-uniformly, and only one of them
-    /// is guarded. The name is the guarded one: its cell is held to exactly 34
-    /// by `testTheDumpCellKeepsTheCountWholeInsideItsColumn`. The CPU cell is
-    /// the other, and nothing holds it at all — `cpuLabel` writes
-    /// `"≥" + "%.0f%%"`, so a row reading `≥1000%` is six characters in a
-    /// column declared 5, and `column` pads rather than cuts. Reaching it takes
-    /// ten cores attributed to one session, which is why it is written down
-    /// here rather than fixed in passing: the width and the fixture that would
-    /// pin it are a change of their own.
+    /// Only the two spend columns: offsets are compared against a row whose spend cells
+    /// are both `-`, so a uniformly wider column elsewhere moves the baseline too. The
+    /// name cell is held to 34 by `testTheDumpCellKeepsTheCountWholeInsideItsColumn`.
+    /// The CPU cell is held by nothing: `cpuLabel` writes `"≥" + "%.0f%%"`, so `≥1000%`
+    /// is six characters in a column declared 5 (it takes ten cores on one session).
     func testTheSpendColumnsHoldTheTableToTheWidthTheyDeclare() throws {
         // Everything after both spend columns. `row` carries no project, so the
         // activity cell is the same fixed sentence on every line here, which is
@@ -3853,26 +3358,13 @@ final class RowRateTests: XCTestCase {
                        "900/h")
     }
 
-    /// **The wording is the only thing that names the window, so it is pinned to
-    /// the constant here.**
-    ///
-    /// Nothing divides anything (§2.9): the figure is whatever the gateway
-    /// reported over `UsageStore.hourWindowSeconds`, and `/h` is the whole of the
-    /// arithmetic. Move the constant to two hours and every surface prints twice
-    /// the rate under the old label, with no arithmetic anywhere to go red —
-    /// `testTheHourlyFigureIsAskedOverExactlyOneSlidingHour` holds the *request*,
-    /// and the four label literals are invisible to it.
-    ///
-    /// What is new here is the pairing, not either half: the panel's suffix and
-    /// the dump's are asserted by `testTheRateSaysItIsPerHour`, and the tooltip's
-    /// sentence by `testTheTooltipBreaksTheHoursNumberIntoTheFourCounters`. This
-    /// test is where the value and the wording are one statement, so that moving
-    /// the constant produces a failure that names the strings to move with it.
-    ///
-    /// Three of the four are reachable and asserted below. The fourth is the
-    /// `usage 1h:` label inside `ConsoleDump.printText`, which is private and
-    /// prints a whole snapshot of the machine it runs on; it is named in the
-    /// message instead.
+    /// The wording is the only thing that names the window, so it is pinned to the
+    /// constant here. Nothing divides anything (§2.9): the figure is what the gateway
+    /// reported over `UsageStore.hourWindowSeconds`, and `/h` is the whole arithmetic.
+    /// `testTheHourlyFigureIsAskedOverExactlyOneSlidingHour` holds the request; this
+    /// ties the value to the wording, so moving the constant names the strings to move.
+    /// Three of the four labels are asserted below. The fourth, `usage 1h:` inside the
+    /// private `ConsoleDump.printText`, is named in the message instead.
     func testTheLabelsNameTheWindowTheFigureIsMeasuredOver() {
         XCTAssertEqual(UsageStore.hourWindowSeconds, 3600, """
             the window stopped being an hour and four labels still say it is: "/h" in \
@@ -3929,41 +3421,28 @@ final class RowRateTests: XCTestCase {
     }
 }
 
-/// A rotation that draws nothing and warns about nothing: it names one account no
-/// row here is about, and says the gateway can still route to it.
-///
-/// Two properties, both load-bearing for a picture measured in ink bands. Naming
-/// nobody the popover draws keeps every checkbox in these tests inert and every
-/// switched-off note unwritten, so the rows are the rows the chart tests are
-/// about. And naming somebody **eligible** keeps the orange line off the list:
-/// since the warning learned to light up on a pass, a rotation of zero routable
-/// accounts is a fleet with nowhere to send a request, so the obvious-looking
-/// `{"accounts": []}` would put a warning under every picture measured here — a
-/// stub's silence read as a verdict about the fleet. A rotation request that
-/// *fails* writes a line of blame instead, which is the same problem by the other
-/// road, so this answers.
+/// A rotation that draws nothing and warns about nothing: one account no row here is
+/// about, which the gateway can still route to. Naming nobody the popover draws
+/// keeps every checkbox inert and every switched-off note unwritten. Naming somebody
+/// eligible keeps the orange line off: `{"accounts": []}` would be zero routable
+/// accounts and put a warning under every picture, and a failing request would write
+/// a line of blame instead.
 private let quietRotation = """
 {"accounts": [{"label": "elsewhere", "eligible": true, "disabled": false, \
 "disabled_until": null, "disabled_reason": ""}]}
 """
 
-/// A gateway that answers each account it knows with one flat line at the level
-/// it is handed, ten samples a minute apart.
+/// A gateway that answers each account it knows with one flat line at the level it
+/// is handed, ten samples a minute apart. Flat, so where ink lands is a fact about
+/// the chart. Shared by `UsageHistoryTests` (weighs the plot's ink) and
+/// `UsagePopoverPaintTests` (reads its colour).
 ///
-/// Flat, so where ink lands in the picture is a fact about the chart rather than
-/// about the fixture. Shared by the two classes that draw one: `UsageHistoryTests`
-/// weighs the ink of the plot, `UsagePopoverPaintTests` reads its colour.
+/// `silentOnUnknown`: off, an unnamed account answers a flat zero; on, its request
+/// fails, which is how an account is named by the quota poll and missing from the
+/// chart.
 ///
-/// `silentOnUnknown` is the difference between the two. Off, an account nobody
-/// named a level for answers a flat zero, which is what a test about where a line
-/// sits wants for the accounts it is not asking about. On, the request for it
-/// fails — and that is how an account comes to be named by the quota poll and
-/// missing from the chart, one of the two states the colours are told apart in.
-///
-/// `rotation` is the second question a pass asks — `/gw/status`, which the row's
-/// checkbox is drawn from. Its default is `quietRotation`, for the reason written
-/// there: a picture measured in ink bands must not be measuring this stub's
-/// opinion of the fleet.
+/// `rotation` answers `/gw/status`, which the row's checkbox is drawn from; it
+/// defaults to `quietRotation` (see there).
 private func flatHistoryClient(readings: [String: Double],
                                silentOnUnknown: Bool = false,
                                rotation: String = quietRotation) -> UsageClient {
@@ -4017,20 +3496,11 @@ final class UsageHistoryTests: XCTestCase {
         }
     }
 
-    /// One suite for the whole class, wiped around every test.
-    ///
-    /// A suite name is a file in the user's preferences, and a fresh name per
-    /// test would leave one behind on every run — the machine these tests are
-    /// written on is somebody's working machine. Wiping the domain is what makes
-    /// each test start clean.
-    ///
-    /// It does not make the run leave nothing behind, and the promise was
-    /// trimmed to what it actually keeps: `removePersistentDomain` empties the
-    /// domain, and `~/Library/Preferences/<suite>.plist` stays as an empty
-    /// 42-byte file. Deleting the file here would be writing behind `cfprefsd`'s
-    /// back, which holds the domain in memory and may write it out again after
-    /// the last test — so one empty file per machine is the cost, and no value
-    /// of ours survives in it.
+    /// One suite for the whole class, wiped around every test. A suite name is a file in
+    /// the user's preferences, so a fresh name per test would leave one behind per run.
+    /// `removePersistentDomain` empties the domain but
+    /// `~/Library/Preferences/<suite>.plist` stays as an empty 42-byte file; deleting it
+    /// would write behind `cfprefsd`, which may write it out again.
     private static let suiteName = "xyz.vvzvlad.vscode-switcher.tests"
 
     override func setUp() {
@@ -4063,24 +3533,10 @@ final class UsageHistoryTests: XCTestCase {
         }
     }
 
-    /// Answers every history request from the fixture, the rotation from its own,
-    /// and counts them all.
-    ///
-    /// Two fixtures rather than one because a pass asks two different questions
-    /// and a stub that answers them alike cannot answer both. `GatewayStatus`
-    /// decodes `accounts` strictly (`UsageModel`), and the history body has no
-    /// such key, so a client that served the history to `/gw/status` too would
-    /// throw on every pass: `rotationFailure` set, `switches` left `nil`, and
-    /// "the gateway did not answer" the only rotation outcome this client can
-    /// produce. Every state on the other side of that — a fleet named, a fleet
-    /// answered empty, a switch that moves — would be unreachable here.
-    ///
-    /// An earlier note gave a different reason: that the history body decodes as
-    /// a `GatewayStatus` naming no accounts, so one fixture would say "answered,
-    /// nobody in the fleet" and blur the line between that and an answer nobody
-    /// gave. That was true of the lenient `accounts` decoding and is not true of
-    /// the strict one — the body no longer decodes at all — but the decision it
-    /// justified is still the right one, so only the reason is rewritten.
+    /// Answers every history request from the fixture, the rotation from its own, and
+    /// counts them all. Two fixtures because `GatewayStatus` decodes `accounts` strictly
+    /// (`UsageModel`) and the history body has no such key: served to `/gw/status` it
+    /// would throw on every pass, leaving `rotationFailure` the only reachable outcome.
     private func client(_ counter: RequestCounter, gateway: Gateway = Gateway()) -> UsageClient {
         UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
             counter.record(request.url)
@@ -4110,25 +3566,16 @@ final class UsageHistoryTests: XCTestCase {
         UserDefaults(suiteName: Self.suiteName) ?? .standard
     }
 
-    /// The whole reason this schedule is separate from `UsageStore`'s: a closed
-    /// popover costs nothing. Not "almost nothing" — no request at all from
-    /// anything the timer or the view model drives, which is every entry poked
-    /// below: `fetch`, a change of the account list, and a change of period.
+    /// The reason this schedule is separate from `UsageStore`'s: a closed popover makes
+    /// no request at all from anything the timer or the view model drives (`fetch`, a
+    /// change of the account list, a change of period).
     ///
-    /// **`setAccount` is the one entry that is not swept, and it is an exception
-    /// on purpose rather than a hole.** It sends its request with no `isOpen`
-    /// guard, and adding one would be a branch that cannot execute: its only
-    /// caller is the binding inside `rotationSwitch`, a control that exists only
-    /// on a popover that is up. It is also the one request here that is *meant* to
-    /// outlive a close — the operator asked for it, a popover closes on any click
-    /// anywhere on the screen, and that is why `close` cancels `fetchTask` and
-    /// leaves `switchTasks` alone (`testASwitchAlreadySentOutlivesTheClose`).
-    ///
-    /// Poked *after* an open, on purpose. A model that has never been opened
-    /// knows no accounts, so it asks for nothing however broken its guard is:
-    /// the first version of this test passed with the guard deleted. The
-    /// accounts have to be in hand for the guard to be the only thing stopping
-    /// the requests.
+    /// `setAccount` is not swept on purpose: its only caller is the binding inside
+    /// `rotationSwitch`, which exists only on an open popover, and it is the one request
+    /// meant to outlive a close (`close` cancels `fetchTask` and leaves `switchTasks`,
+    /// see `testASwitchAlreadySentOutlivesTheClose`).
+    /// Poked after an open, so the accounts are in hand and the guard is the only thing
+    /// stopping the requests.
     func testAClosedPopoverAsksForNothing() async {
         let counter = RequestCounter()
         let history = model(counter, defaults: freshDefaults())
@@ -4174,43 +3621,16 @@ final class UsageHistoryTests: XCTestCase {
                        HistoryPeriod.hour.seconds, accuracy: 5)
     }
 
-    /// And the rotation is applied the moment `/gw/status` answers, with the
-    /// histories still in the air.
+    /// The rotation is applied the moment `/gw/status` answers, with the histories still
+    /// in the air, so the checkboxes do not jump once the popover is open. A bare
+    /// `/gw/status` is much smaller and faster than a day pass (`fetch`'s docblock has
+    /// the measurements).
     ///
-    /// This is the second half of the 2026-09-06 complaint: it does not show up
-    /// straight away, and the list jumps once the popover is already open. Both
-    /// answers used to be awaited together and applied as one value, so every
-    /// checkbox stood clear and disabled and no note existed until the **last**
-    /// history landed, and then
-    /// the row changed under the pointer. The gap is the whole difference in size
-    /// between the two: measured against the live gateway the same day on an idle
-    /// machine (load average 4.05), ten day passes took 0.052–0.251 s (median
-    /// 0.063) against ten bare `/gw/status` at 0.014–0.018 s (median 0.017) —
-    /// 6210 bytes of status against 178 313 of pass. `fetch`'s own docblock carries
-    /// the second run, under load, and what the pair of them says.
-    ///
-    /// Asked by holding the histories open-ended and letting the status answer at
-    /// once, which states the claim exactly: the checkboxes are drawn off an answer
-    /// that arrived while the rest of the pass had not. The wait for it is **timed
-    /// rather than open**, for `testLoadDoesNotNeedTheMainThread`'s reason — the
-    /// regression this guards is a rotation that waits for the histories, and an
-    /// open wait on it inside a held gate is a run that never returns rather than
-    /// a test that fails.
-    ///
-    /// Two controls, and neither is spare. `series` empty proves the gate really
-    /// was holding the histories rather than the fixture being empty, and the same
-    /// two read after the gate opens prove the gate was the only thing holding them
-    /// — without that half a stub that answered no history at all would pass.
-    ///
-    /// Mutation, 2026-09-06 against a suite of 674 and re-run the same day against
-    /// 675 when the test below arrived: awaiting the histories first
-    /// and applying both halves together — which is how `fetch` was written until
-    /// that day — reddens this test and nothing else, on its first two assertions,
-    /// `switches` still `nil` after the five-second deadline. The two controls stand
-    /// through it, as they must: the mutation moves when the rotation lands, not
-    /// whether the gate holds. And the test below stands through it as well, which
-    /// is why the re-run: it cancels a pass mid-air on this same path, and a
-    /// mutation there could plausibly have reached it.
+    /// The histories are held open-ended and the status answers at once. The wait is
+    /// timed, for `testLoadDoesNotNeedTheMainThread`'s reason: a rotation that waited for
+    /// the histories would otherwise hang the run. The controls: `series` empty proves
+    /// the gate held the histories, and reading them after the gate opens proves it was
+    /// the only thing holding them.
     func testTheRotationIsDrawnBeforeTheHistoriesHaveLanded() async throws {
         let counter = RequestCounter()
         let histories = Gate()
@@ -4246,81 +3666,25 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertNotNil(history.fetchedAt, "the pass never dated itself")
     }
 
-    /// And a pass cancelled before its rotation landed applies neither half of
-    /// itself.
+    /// A pass cancelled before its rotation landed applies neither half of itself.
     ///
-    /// The promise `fetch` makes out loud since the two halves began landing
-    /// apart, and until this test **nothing held it**: it is written as one guard
-    /// asked twice, and taking either copy off reddened nothing in a suite of 674.
-    /// Both are reachable and each costs its own thing. The rotation half draws
-    /// the checkboxes, so a cancelled pass applying it puts the fleet as it stood
-    /// a period ago back under the pointer; the history half writes
-    /// `seriesPeriod`, so the same pass applying that leaves a `1d` chart under
-    /// the `7d` tab — the picture lying about its own axis `apply` refuses one
-    /// line further down.
+    /// `fetch` guards both halves with the same check. The rotation half draws the
+    /// checkboxes, so applying a cancelled one puts an old fleet under the pointer; the
+    /// history half writes `seriesPeriod`, so applying it leaves a `1d` chart under the
+    /// `7d` tab.
     ///
-    /// The arrangement is the one a change of period makes on its own:
-    /// `period.didSet` calls `fetch`, and `fetch` cancels the pass in flight
-    /// before starting the next. So the first pass is cancelled with its answer
-    /// already in hand — `firstStatus` holds it at a gate and hands it the fleet
-    /// as it stood, while the second pass is held by nothing and lands whole —
-    /// and then the gate opens and the cancelled one wakes with news a period old.
-    /// That is the shape the guard is written against: the request is done, only
-    /// the hop back to the main actor is left, which is where the cancelling
-    /// `fetch` fits.
+    /// A change of period sets this up: `period.didSet` calls `fetch`, which cancels the
+    /// pass in flight before starting the next. `firstStatus` holds the first pass at a
+    /// gate with its answer in hand, the second lands whole, then the gate opens and the
+    /// cancelled one wakes with stale news; only the hop back to the main actor is
+    /// left, which is where the cancelling `fetch` fits. Period rather than labels
+    /// because the mark it leaves is one field: `apply` writes the period into
+    /// `seriesPeriod` on any non-empty answer.
     ///
-    /// A change of period rather than any of the other five occasions a pass is
-    /// started on, and not because it is the only one that cancels: the cancel is
-    /// `fetch`'s own, standing between its `isOpen` guard and the new task, so
-    /// all six pass through it — those of them that start at all, since under a
-    /// shut popover `fetch` leaves on that same `isOpen` guard and never reaches
-    /// the cancel. What makes the history half observable at all is
-    /// the two passes asking **different questions** — two passes over one window
-    /// and one set of accounts land identical lines, and a misapplied one leaves
-    /// no mark on them — and **three** of the six can. Two are made to by a guard
-    /// of their own: a change of period (`period != oldValue`), and a change of
-    /// the account list under an open popover (`update(labels:)`, off the view's
-    /// `onChange` on what the summary poll named, `labels != self.labels`). The
-    /// third only may, and is easy to leave out for exactly that reason: `open`
-    /// assigns `self.labels` under no guard at all, so a close, a change of the
-    /// fleet, and a reopen put two passes over different account sets in the air
-    /// — the older one held off by this same guard, `close` having cancelled it
-    /// and left `open`'s `fetch` a nil `fetchTask` to cancel. The window is not
-    /// `UsageClient.timeoutSeconds`, which is the ceiling on a pass **nobody
-    /// cancelled**: `close` cancels this one, and what is left of it is the hop
-    /// back to the main actor — 0.13–2.76 ms of it, against 42.7–50.5 ms
-    /// uncancelled, probed with plain GETs against the live gateway 2026-09-06
-    /// 22:12Z at load average 7.33. Nobody has observed the arrangement, and it
-    /// is named as a structural hole rather than a reachable one: `open` is the
-    /// only writer of `self.labels` with no guard, but the sole way back in is a
-    /// user's second click, orders past those milliseconds on its own — and past
-    /// them again when the close caught the button still down and armed
-    /// `PopoverDismissal.suppressionWindow` (0.25 s). The remaining three — the
-    /// repair after a failed
-    /// switch, `settle`, and `tick` — ask over the labels and the period of the
-    /// pass they replace, every time.
-    ///
-    /// The period is the one taken because the mark it leaves is a single field.
-    /// `apply` writes the period it was handed into `seriesPeriod` on any
-    /// non-empty answer, so the claim below is one equality against a scalar; a
-    /// change of labels leaves its mark in `series`, written in that same branch,
-    /// and asking it means comparing the contents of an array instead.
-    ///
-    /// The stale body has to *say* something else, or a pass that applied it and
-    /// a pass that applied nothing leave the same model behind. It says it where
-    /// the assertion looks — `acc2` switched off, where the fresh answer has it in
-    /// the rotation — and it keeps the routable count at one, as
-    /// `UsageFixtures.status` has it, so the orange line is not a second thing
-    /// being claimed here. (Which account holds that one routable slot does move,
-    /// and nothing here asks.)
-    ///
-    /// Mutations, 2026-09-06 against a suite of 675. Dropping `!Task.isCancelled`
-    /// from the rotation half fails the `switches` assertion alone (`acc2` reads
-    /// switched off, off the body the cancelled pass carried) and reddens no other
-    /// test; dropping it from the history half fails the `seriesPeriod` assertion
-    /// alone (`1d` under the `7d` tab) and likewise reddens nothing else. The two
-    /// assertions before the gate opens are the control: without them the pair
-    /// after it would pass just as well against a second pass that never landed.
+    /// The stale body says something different where the assertion looks (`acc2`
+    /// switched off) and keeps the routable count at one, as `UsageFixtures.status`
+    /// does, so the orange line is not part of the claim. The two assertions before the
+    /// gate opens are the control.
     func testAPassCancelledBeforeItsRotationLandedAppliesNeitherHalf() async throws {
         let counter = RequestCounter()
         let held = Gate()
@@ -4404,29 +3768,15 @@ final class UsageHistoryTests: XCTestCase {
                        "the period did not outlive the model")
     }
 
-    /// The pass must not need the main thread — the same rule as
-    /// `UsageStore.poll` (§6) and the same trap under it: everything `load`
-    /// touches is declared on a `@MainActor` class, so one read of a `static let`
-    /// that lost its `nonisolated`, or the loss of `nonisolated` on `load`
-    /// itself, silently moves the whole thing onto the main thread. There is no
-    /// diagnostic for it under `-strict-concurrency=complete`; it was found in
-    /// the store by sampling a `--dump` that never returned.
+    /// The pass must not need the main thread, as with `UsageStore.poll` (§6):
+    /// everything `load` touches is on a `@MainActor` class, so reading a `static let`
+    /// that lost its `nonisolated`, or `load` losing its own, silently moves the work to
+    /// the main thread, with no diagnostic under `-strict-concurrency=complete`. Here
+    /// that would freeze an open popover for up to several five-second requests.
     ///
-    /// Here it would be quieter still: two to five HTTP requests, each up to five
-    /// seconds, run from a popover that is open at that very moment — the app
-    /// would simply stop redrawing while the user looked at it.
-    ///
-    /// A timed wait rather than an open one, so a regression is a failed test
-    /// and not a run that hangs. Checked by breaking: reading
-    /// `UsageHistoryModel.refreshSeconds` (a `static let` on the `@MainActor`
-    /// class) inside `load` fails it after the timeout instead of passing in
-    /// milliseconds.
-    ///
-    /// **Both halves of a pass, because they are two calls now.** The rotation
-    /// used to be started from inside `load` and rode its `nonisolated` for free;
-    /// since 2026-09-06 `fetch` starts it beside the histories so that the
-    /// checkboxes land without waiting for them, which is a second entry point
-    /// with the same trap under it and no diagnostic over it.
+    /// A timed wait, so a regression fails instead of hanging. Both halves of a pass,
+    /// because `fetch` starts the rotation beside the histories: two entry points with
+    /// the same trap.
     func testLoadDoesNotNeedTheMainThread() {
         let counter = RequestCounter()
         let client = client(counter)
@@ -4465,14 +3815,10 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertTrue(AccountSeries.make(label: "acc1", points: try points([nil, nil])).isEmpty)
     }
 
-    /// A pass that finished and a pass that brought lines are two facts, and the
-    /// chart is entitled to be told which one happened.
-    ///
-    /// One stamp for both said "the answer is in" after a pass in which every
-    /// account failed, and the chart then announced that the period held no
-    /// data — a statement the gateway had not made and could not have, having
-    /// made none. The schedule still needs the other fact, or a first pass that
-    /// failed would stop the refresh dead for as long as the popover stays open.
+    /// A pass that finished and a pass that brought lines are two facts. One stamp for
+    /// both would make the chart claim the period held no data after a pass in which
+    /// every account failed; the schedule still needs the "finished" fact, or a failed
+    /// first pass would stop the refresh while the popover stays open.
     func testAPassNobodyAnsweredIsNotAnAnswer() async throws {
         let counter = RequestCounter()
         let gateway = Gateway()
@@ -4577,21 +3923,11 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertNil(history.seriesPeriod)
     }
 
-    /// And on the pass that *succeeds*, the same lines are just as wrong for the
-    /// seconds before it lands.
-    ///
-    /// `period.didSet` only refetches; it does not touch the series, and the
-    /// answer is up to five seconds away through the tunnel. So between the tap
-    /// on `30d` and the lines for it there is a whole chart of `1d` data sitting
-    /// under the `30d` tab — the same picture lying about its own axis that
-    /// `apply` refuses to keep one moment later, shown for as long as the
-    /// gateway takes. The drawing site has to ask `seriesPeriod`, which is the
-    /// only thing that knows.
-    ///
-    /// Held at the request the view makes rather than through the view itself:
-    /// what the chart draws is a `Charts` tree with no ink of its own to count,
-    /// so what is checked is the pair the view branches on and the words it puts
-    /// up instead.
+    /// On the pass that succeeds, the old lines are just as wrong until it lands.
+    /// `period.didSet` only refetches and does not touch the series, and the answer can
+    /// take up to five seconds, so the drawing site must ask `seriesPeriod`.
+    /// Held at what the view branches on rather than the view: a `Charts` tree has no
+    /// ink of its own to count.
     func testTheLinesOfTheOldPeriodAreNotDrawnUnderTheNewOne() async throws {
         let counter = RequestCounter()
         let gateway = Gateway()
@@ -4621,14 +3957,10 @@ final class UsageHistoryTests: XCTestCase {
                        "Loading…",
                        "the chart answered for a period nobody has asked the gateway about yet")
 
-        // And the footer must not date lines that are not on screen. The stamp in
-        // hand is the previous window's and has not moved; told from it alone, the
-        // footer dated a chart the plot above it had replaced with "Loading…".
-        // Asked of the model rather than of hand-made arguments, because what is
-        // under test here is that the state is reachable at all — it is, on every
-        // change of period. Asked far enough in the future for an answer to be
-        // audible: inside `footerStaleSeconds` the footer is silent for the
-        // ordinary reason and would pass with the rule broken.
+        // The footer must not date lines that are not on screen: the stamp in hand is the
+        // previous window's. Asked of the model because the state is reachable on every
+        // change of period, and far enough in the future to be audible: inside
+        // `footerStaleSeconds` the footer is silent anyway.
         XCTAssertNotNil(history.fetchedAt, "the model left no stamp for the footer to misuse")
         XCTAssertNil(UsagePopoverView.footerAgeLabel(quotaFetchedAt: nil,
                                                      quotaFailed: false,
@@ -4676,38 +4008,21 @@ final class UsageHistoryTests: XCTestCase {
                              "the lines never came back once they answered the new period")
     }
 
-    /// A popover nobody is looking at draws no chart at all.
+    /// A popover nobody is looking at draws no chart.
     ///
     /// `NSPopover` keeps its content view controller for the life of the process
-    /// — `AppDelegate` assigns it once beside `popover.behavior` and never writes
-    /// it again — so this `body` is rebuilt on every publication of
-    /// `usage.snapshot` — once a minute for ever after the first open — and the
-    /// chart was being rebuilt with it behind a shut popover, thousands of marks
-    /// for a picture nobody can see.
+    /// (`AppDelegate` assigns it once), so this `body` is rebuilt on every publication of
+    /// `usage.snapshot`, once a minute; without the guard the chart is rebuilt behind a
+    /// shut popover. Asked with the lines in hand, so the chart really would be drawn.
     ///
-    /// Asked with the lines already in hand, for the reason
-    /// `testAClosedPopoverAsksForNothing` records about the other end of the same
-    /// promise: a model that has fetched nothing draws nothing however broken the
-    /// guard is, so the state has to be one where the chart really would be drawn.
+    /// `ImageRenderer` returns the previous rendering for content that draws nothing, so
+    /// counting ink of the shut plot asks nothing. The picture is taken over an opaque
+    /// ground and compared with the ground alone: `XCTAssertNotEqual` for the chart,
+    /// `XCTAssertEqual` for the blank that stands in for it.
     ///
-    /// **Counting the ink of the shut plot would not have asked anything**, and
-    /// the reason is a property of `ImageRenderer` worth writing down: content
-    /// that draws nothing at all comes back as the *previous* rendering. Measured
-    /// 2026-09-15 — a blank rendered first is 0 inked pixels, the same blank
-    /// after a line of text comes back with that text's 104, and the shut plot
-    /// came back with 2877 pixels of a picture that was not its own — the same
-    /// 2877 a bare `Color.clear` gave beside it. So the picture is taken over an
-    /// opaque ground, where every rendering is painted in full, and the question
-    /// becomes whether it differs from the ground alone: `XCTAssertNotEqual` for
-    /// the chart, `XCTAssertEqual` for the blank that stands in for it.
-    ///
-    /// The last assertion is the cost of that stand-in, and what it holds is not
-    /// the blank: the height of the slot comes from `chart` (`.frame(height:
-    /// 130)`), so the picture is the same size whatever the branch draws, and
-    /// the one mutation that reddens the assertion is the removal of that frame
-    /// — in the caller rather than here. That is also why it is measured on the
-    /// whole view: `plot` is handed a box by `plotBytes` itself and could not
-    /// move if it tried.
+    /// The last assertion holds the slot's height, which comes from `chart`
+    /// (`.frame(height: 130)`); it is measured on the whole view because `plot` is given
+    /// its box by `plotBytes`.
     func testAShutPopoverDrawsNoChart() async throws {
         let counter = RequestCounter()
         let history = model(counter, defaults: freshDefaults())
@@ -4720,14 +4035,10 @@ final class UsageHistoryTests: XCTestCase {
         await history.fetchTask?.value
         let view = UsagePopoverView(usage: usage, history: history)
 
-        // The two questions the chart branch itself asks, asked here in the same
-        // words: a fixture that drifted into empty lines or into a period the
-        // answer does not match would take the "no data" branch, and the
-        // assertions below would then be measuring that branch rather than the
-        // chart. `allSatisfy` rather than `series.isEmpty`, because those are
-        // different questions in exactly the state `apply` documents — an
-        // account that answered with nothing but holes is an entry that is there
-        // and empty, and a non-empty list of such entries draws no lines at all.
+        // The two questions the chart branch asks, in the same words, so the fixture cannot
+        // drift into the "no data" branch. `allSatisfy` rather than `series.isEmpty`: an
+        // account that answered only holes is present and empty, and a list of those draws
+        // no lines.
         XCTAssertFalse(history.series.allSatisfy(\.isEmpty), "the fixture left no lines to draw")
         XCTAssertEqual(history.seriesPeriod, history.period,
                        "the lines in hand answer another period, so no chart is drawn anyway")
@@ -4786,33 +4097,20 @@ final class UsageHistoryTests: XCTestCase {
         return try rendered(UsagePopoverView(usage: usage, history: history).plot, band: band)
     }
 
-    /// The band the mean of 100 and 20 runs through, and nothing else does.
-    ///
-    /// Measured off the rendering rather than reasoned about, and re-measured
-    /// after the legend was hidden (§4) — the two rows it used to take went back
-    /// to the plot and moved every line in this picture. With the y scale pinned
-    /// to 0…100 the plot area now runs from 0% of the picture's height (the 100
-    /// grid line) to 84% (the 0 one) and the x labels take the rest, so 60% of the
-    /// quota lands at 34%. The row profile, in 2% steps: 1190 and 2368 inked in
-    /// the two steps from 32%, against 10 and 4 with the mean line moved out of
-    /// the band. The account lines are at 0% and 68%, the 50 grid line at 42% —
-    /// none of them is inside.
+    /// The band the mean of 100 and 20 runs through, and nothing else does. Measured off
+    /// the rendering: with the y scale pinned to 0…100 the plot runs from 0% of the
+    /// picture's height (the 100 grid line) to 84% (the 0 one), so 60% lands at 34%.
+    /// The account lines are at 0% and 68% and the 50 grid line at 42%, none inside.
     private static let meanBand = 0.32...0.36
 
     /// The band the lower of the two accounts (20) runs through: 1780 inked
     /// against 6 with that account moved up to 100.
     private static let accountBand = 0.67...0.70
 
-    /// The mean line is on the chart, and it is drawn where the mean is.
-    ///
-    /// Read off a bitmap, the way the row's ladder is measured (§4): a `Charts`
-    /// tree has no ink of its own to inspect, and "the line is in the view
-    /// hierarchy" is not the claim — the claim is that it is visible. Two flat
-    /// accounts at 100 and 20 put their own lines at the top and the middle of
-    /// the plot and their mean between them, in a band nothing else crosses;
-    /// moving both accounts to 100 takes the mean out of that band with the rest
-    /// of the picture unchanged, and what is left is the difference the mean
-    /// line makes.
+    /// The mean line is on the chart, where the mean is. Read off a bitmap (§4), since a
+    /// `Charts` tree has no ink to inspect and the claim is visibility. Accounts at 100
+    /// and 20 put the mean in a band nothing else crosses; moving both to 100 takes it
+    /// out with the rest unchanged, leaving the difference the mean line makes.
     func testTheMeanLineIsDrawnWhereTheMeanIs() async throws {
         let apart = try await plotInk(flat: ["acc1": 100, "acc2": 20], band: Self.meanBand)
         let together = try await plotInk(flat: ["acc1": 100, "acc2": 100], band: Self.meanBand)
@@ -4824,22 +4122,12 @@ final class UsageHistoryTests: XCTestCase {
                           + "about the mean line at all (\(together.inked) inked)")
     }
 
-    /// And it is the one line drawn at full strength: wider than the accounts
-    /// and not dimmed, so the eye lands on it first.
-    ///
-    /// The same picture, one band lower: the mean's band against the band the
-    /// second account's own line runs through. Weighed by coverage rather than
-    /// counted as ink, because both halves of "heavier" have to be in the
-    /// measurement — a line at 55% alpha covers exactly as many pixels as one at
-    /// full strength, so counting pixels alone would hold the width and let the
-    /// dimming go.
-    ///
-    /// The threshold is set between the three measurements, not guessed:
-    /// re-measured in the taller plot the hidden legend left (§4), 2494.3 of
-    /// coverage against 650.5, which is 3.83 times. With the mean's width taken
-    /// back down to an account's, 1.54; with the accounts undimmed and the width
-    /// kept, 2.11. Both halves fail it, which is what makes both of them
-    /// load-bearing rather than one plus a decoration.
+    /// It is the one line drawn at full strength: wider than the accounts and not
+    /// dimmed. Weighed by coverage rather than counted pixels, because a line at 55%
+    /// alpha covers as many pixels as one at full strength.
+    /// The threshold sits between measurements: 3.83 times as drawn, 1.54 with the
+    /// mean's width reduced to an account's, 2.11 with the accounts undimmed. Both halves
+    /// fail it.
     func testTheMeanIsHeavierThanTheLinesItIsTheMeanOf() async throws {
         let readings = ["acc1": 100.0, "acc2": 20.0]
         let mean = try await plotInk(flat: readings, band: Self.meanBand)
@@ -4853,19 +4141,11 @@ final class UsageHistoryTests: XCTestCase {
                              + "(\(mean.coverage) against \(account.coverage))")
     }
 
-    /// An account that did not answer the history request must not shift the
-    /// colours of the ones that did.
-    ///
-    /// The colours are handed out twice over — to the lines here and to the dots
-    /// beside the account names upstairs — from two lists that are the same list
-    /// only while every account answers. Keyed on its own list, each side counted
-    /// from a different place: with the middle account silent, `acc3`'s line took
-    /// `acc2`'s colour while the dot beside its name kept its own, and the dot
-    /// then pointed at somebody else's line.
-    ///
-    /// Asked of the scale rather than of a picture, because that is the whole
-    /// mechanism: `styleRange` is where a line's colour is decided, and
-    /// `accountColor` is what the dots are drawn with.
+    /// An account that did not answer the history request must not shift the colours of
+    /// those that did. Colours go to the lines here and to the dots beside the account
+    /// names, from two lists that match only while every account answers; each must be
+    /// keyed on the poll's list. Asked of the scale: `styleRange` decides a line's
+    /// colour, `accountColor` the dots'.
     func testAnAccountThatDidNotAnswerDoesNotShiftTheOtherColours() {
         let named = ["acc1", "acc2", "acc3"]
         let answered = [AccountSeries(label: "acc1", segments: []),
@@ -4930,16 +4210,10 @@ final class UsageHistoryTests: XCTestCase {
             }
         }
 
-        /// Returns once a request has **reached** the gate, whether or not it is
-        /// let through.
-        ///
-        /// Which is the half that makes a race deterministic rather than likely:
-        /// a test that clicks "while a pass is in the air" has to know the pass
-        /// really is in the air, and the only moment that says so is the transport
-        /// being entered. Started from `open`, the pass is a `Task` on the main
-        /// actor whose body has not run yet, so a click sent straight after it can
-        /// perfectly well be stamped first — and then the pass is genuinely the
-        /// newer news and is *supposed* to win.
+        /// Returns once a request has reached the gate, whether or not it is let through.
+        /// That makes a race deterministic: started from `open`, the pass is a main-actor
+        /// `Task` whose body has not run, so a click sent right after can be stamped first,
+        /// and then the pass is legitimately newer and should win.
         func arrival() async {
             await withCheckedContinuation { continuation in
                 lock.lock()
@@ -4950,17 +4224,10 @@ final class UsageHistoryTests: XCTestCase {
             }
         }
 
-        /// Answers `true` to the first caller and `false` to every one after it.
-        ///
-        /// Which is how a test puts **two** passes in the air and still knows the
-        /// order they land in: `wait` holds everybody who reaches it, `open`
-        /// releases them all at once, and which of the released two gets back to
-        /// the main actor first is the executor's business. Holding only the first
-        /// leaves the second free to land whole while the first is still at the
-        /// gate, and then the gate decides the order rather than observing it.
-        ///
-        /// Synchronous and under the same lock as the rest, so "first" is settled
-        /// once however the two callers arrive.
+        /// Answers `true` to the first caller and `false` to every one after it. Lets a test
+        /// put two passes in the air and know the order they land in: `open` releases
+        /// everyone at once and the executor picks the order, so only the first is held.
+        /// Synchronous under the same lock, so "first" is settled once.
         func claimFirst() -> Bool {
             lock.lock()
             defer { lock.unlock() }
@@ -4971,28 +4238,18 @@ final class UsageHistoryTests: XCTestCase {
     }
 
     /// A gateway that answers the three questions separately: histories from the
-    /// fixture, the rotation from `status`, and a switch from `switchAnswer` —
-    /// each of which may be `nil`, which is that endpoint failing while the
-    /// others go on answering.
+    /// fixture, the rotation from `status`, a switch from `switchAnswer`; `nil` makes
+    /// that endpoint fail while the others answer.
     ///
-    /// The switch and the rotation may be held in a gate, and never both at once:
-    /// what those two gates buy is an order between a pass and a click, and a test
-    /// holding both has stopped being able to state one.
+    /// The switch and the rotation may each be held in a gate, never both: the gates
+    /// order a pass against a click. `historyGate` orders the two halves of one pass and
+    /// composes with either.
     ///
-    /// `historyGate` is a different axis and composes with either: it orders the
-    /// two halves of one pass against each other, which is what a pass that draws
-    /// the rotation without waiting for the histories has to be asked.
-    ///
-    /// `firstStatus` is a third: the **first** `/gw/status` of the run is held in
-    /// its own gate and answered with its own body, and every later one is
-    /// answered from `status` and held by nothing. Which is what a test with two
-    /// passes in the air needs and `statusGate` cannot give it — that one holds
-    /// both, and the order two released passes land in is the executor's. The body
-    /// differs because a stale pass that wrote what was already there and one that
-    /// wrote nothing leave the same model behind. And this path deliberately does
-    /// **not** check for cancellation: what it stands for is the answer being in
-    /// hand already when the cancel arrives, so that only the hop back to the main
-    /// actor is left — which is the case `fetch`'s guards are written against.
+    /// `firstStatus` holds the first `/gw/status` in its own gate with its own body;
+    /// later ones answer from `status` ungated, for tests with two passes in the air
+    /// (`statusGate` holds both). The body differs so a stale write is visible. This path
+    /// does not check for cancellation: it stands for the answer already in hand when
+    /// the cancel arrives, the case `fetch`'s guards are written against.
     private func rotationClient(_ counter: RequestCounter,
                                 status: String? = UsageFixtures.status,
                                 switchAnswer: String? = UsageFixtures.switchAnswer,
@@ -5041,17 +4298,10 @@ final class UsageHistoryTests: XCTestCase {
         counter.urls.filter { $0.path.hasPrefix("/gw/accounts/") }
     }
 
-    /// A second click on a switch already in the air sends nothing.
-    ///
-    /// Which is not tidiness: the second click of a double click asks for the
-    /// opposite, and with both requests out at once the account ends up wherever
-    /// the network happened to deliver them — the operator's own two clicks
-    /// deciding nothing. The guard is the label being in flight, so the state it
-    /// is asked in is the state it exists for.
-    ///
-    /// The control half is the third click, after the answer has landed: without
-    /// it the test would pass just as well against a model that never sends a
-    /// second request at all.
+    /// A second click on a switch already in the air sends nothing: the second click of
+    /// a double click asks for the opposite, and with both requests out the network
+    /// would decide. The guard is the label being in flight. The third click, after the
+    /// answer lands, is the control.
     func testASecondClickOnASwitchAlreadyInTheAirSendsNothing() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(client: rotationClient(counter), defaults: freshDefaults())
@@ -5131,14 +4381,9 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertNotNil(history.rotationFailure, "and it was kept without a word about its age")
     }
 
-    /// A rotation body with a hole where one account's switch should be takes the
-    /// **whole** fleet to "unknown", rather than that one account to "in".
-    ///
-    /// The cost of the lenient reading is not one wrong row: `disabled` is what
-    /// the box draws, so a missing one drew every box in the fleet ticked and
-    /// armed, and a click on any of them sent a request about a state nobody had
-    /// reported. Refusing the body is the state this app already knows how to
-    /// draw — clear, inert, and blamed in the line underneath.
+    /// A rotation body missing one account's switch takes the whole fleet to "unknown",
+    /// not that account to "in": a missing `disabled` read as on would tick and arm every
+    /// box. Refusing it draws boxes clear, inert, and blamed in the line underneath.
     func testARotationBodyMissingASwitchLeavesEveryBoxUnknown() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(
@@ -5154,16 +4399,10 @@ final class UsageHistoryTests: XCTestCase {
                        "a box nobody reported on was left clickable")
     }
 
-    /// And a rotation body with a hole where the **routing flag** goes raises no
-    /// warning: it says "this app cannot say", not "there is nowhere to route".
-    ///
-    /// The lenient `?? false` was written when a zero count could only ever take
-    /// the fleet line down, and that stopped being true in the round that made the
-    /// count the verdict. Read leniently, this body — two accounts, neither
-    /// switched off, both reported — comes out as a fleet with nowhere left to
-    /// route and paints the loudest line on the surface out of a hole. The blame
-    /// and the inert boxes are the honest reading of the same silence, and this app
-    /// already draws them.
+    /// A rotation body missing the routing flag raises no warning: it means "this app
+    /// cannot say", not "nowhere to route". Read as `?? false`, two accounts nobody
+    /// switched off would paint the loudest line on the surface. The blame and inert
+    /// boxes are the honest reading.
     func testARotationWithNoRoutingFlagRaisesNoWarningAtAll() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(
@@ -5181,18 +4420,11 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertNotNil(history.rotationFailure, "and nothing said why the boxes went inert")
     }
 
-    /// A switch answer with no count in it blames the click and raises nothing.
-    ///
-    /// The same hole as next door on the worse path: this decoder runs on the
-    /// operator's own click, so the lenient `?? 0` puts the orange line up in the
-    /// very second they are looking at the checkbox they pressed — a false alarm
-    /// with the pointer still on the control that seems to have caused it. The
-    /// blame per label is what a click that would not go through leaves, and the
-    /// tick does not move, both of which this surface draws already.
-    ///
-    /// The pass either side of the click answers `status`, where one account is
-    /// routable, so the fleet has nothing to warn about at any point in this test —
-    /// which is what makes the assertion a question about the hole.
+    /// A switch answer with no count blames the click and raises nothing. This decoder
+    /// runs on the operator's click, so `?? 0` would raise the orange line under the
+    /// pointer. The per-label blame is what a failed click leaves, and the tick does not
+    /// move. The passes either side answer `status`, with one routable account, so there
+    /// is nothing to warn about at any point.
     func testASwitchAnswerWithNoCountBlamesTheClickAndWarnsAboutNothing() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(
@@ -5219,19 +4451,12 @@ final class UsageHistoryTests: XCTestCase {
         await history.fetchTask?.value
     }
 
-    /// The state after a switch is the gateway's answer, and nothing else.
-    ///
-    /// Asked with an answer that **contradicts** the request — a disable answered
-    /// with `disabled: false` — because that is the only fixture that can tell
-    /// the two designs apart. Storing what was asked for looks right against
-    /// every answer that agrees, and the day the gateway refuses a switch (the
-    /// last usable account, an operator's rule, a race with another client) the
-    /// row would show the click rather than the fleet.
-    ///
-    /// The contradiction is in `disabled` and in nothing else, and the count it is
-    /// sent with is the contract's for this fleet at this moment — the derivation
-    /// is written where the fixture is, beside the other switch answers, so that
-    /// `testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent` can reach it.
+    /// The state after a switch is the gateway's answer and nothing else. Asked with an
+    /// answer that contradicts the request, the only fixture that tells storing the
+    /// answer from storing the request; a gateway refusing a switch would otherwise show
+    /// the click rather than the fleet. The fixture's derivation is beside the other
+    /// switch answers, where
+    /// `testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent` reaches it.
     func testTheStateAfterASwitchIsTheOneTheGatewaySentBack() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(
@@ -5252,19 +4477,10 @@ final class UsageHistoryTests: XCTestCase {
                        "the answer about one account rewrote the others")
     }
 
-    /// A switch the gateway would not take changes nothing, says why, and goes on
-    /// saying it after a pass that went perfectly well.
-    ///
-    /// The first half follows from the state coming out of the answer: there is no
-    /// answer, so there is nothing to write, and the row still says what the fleet
-    /// last said.
-    ///
-    /// The second half is why the blame is kept per label rather than in the field
-    /// the pass writes. A failed click has **no other mark on this surface at
-    /// all** — by design the tick does not move — so the sentence naming it is the
-    /// whole of the event, and a pass that succeeded used to overwrite it with
-    /// `nil` on its way past. The operator was then left with a box in its old
-    /// position and nothing anywhere saying their click had not worked.
+    /// A switch the gateway would not take changes nothing, says why, and keeps saying it
+    /// after a successful pass. The blame is kept per label rather than in the field the
+    /// pass writes: a failed click has no other mark (the tick does not move), so a pass
+    /// must not clear it.
     func testABlameForAClickOutlivesAPassThatWentFine() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(client: rotationClient(counter, switchAnswer: nil),
@@ -5300,15 +4516,10 @@ final class UsageHistoryTests: XCTestCase {
         await history.fetchTask?.value
     }
 
-    /// A switch that failed asks the gateway what actually happened.
-    ///
-    /// "Nothing changed" is true of a refused connection and **not** of a timeout,
-    /// and `UsageClient.timeoutSeconds` is five: giving up on the answer is not the
-    /// gateway giving up on the request, so a switch that timed out may well have
-    /// been applied. Leaving the tick where it was then shows the state from before
-    /// a switch that landed — confidently, with no mark of doubt on the box itself —
-    /// and the operator's next click undoes what they wanted. One extra pass is the
-    /// cheaper of the two.
+    /// A switch that failed asks the gateway what actually happened. A timeout
+    /// (`UsageClient.timeoutSeconds` is five) does not mean the gateway dropped the
+    /// request, so the switch may have been applied; keeping the old tick would invite a
+    /// click that undoes it. One extra pass is cheaper.
     func testASwitchThatFailedAsksTheRotationAgain() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(client: rotationClient(counter, switchAnswer: nil),
@@ -5327,21 +4538,13 @@ final class UsageHistoryTests: XCTestCase {
                        "the failed switch left the tick standing as a confirmed state")
     }
 
-    /// What the switch cost the fleet is shown, not counted and dropped.
-    ///
-    /// The gateway answers a switch that leaves nothing usable with a zero count,
-    /// which is the one thing on this path the operator cannot work out from the
-    /// checkboxes. What goes on screen is this app's own wording of that verdict:
-    /// the sentence beside the count says `fleet`, which §4 keeps off every string
-    /// a person reads, and being a constant it says nothing the count does not.
-    ///
-    /// The second click is the pair the contract sends the other way round —
-    /// `eligible_accounts: 1` with `warning: null`, because `_switch_payload`
-    /// writes the sentence as `None if eligible else "…"` — and the line has to go
-    /// on that count. Both bodies here are ones the gateway can actually send: the
-    /// pair never comes apart, and
-    /// `testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent` is what holds
-    /// them to it.
+    /// What the switch cost the fleet is shown. A zero count is the one thing the
+    /// operator cannot work out from the checkboxes; the screen shows this app's wording
+    /// (the gateway's sentence says `fleet`, which §4 keeps off displayed strings).
+    /// The second click is the reverse pair, `eligible_accounts: 1` with `warning: null`
+    /// (`_switch_payload` writes `None if eligible else "…"`), and the line goes with it.
+    /// `testEverySwitchAnswerFixtureOnThisListIsABodyTheGatewayCouldHaveSent` holds both
+    /// bodies to that pairing.
     func testAFleetWithNothingLeftInItSaysSoAndStopsSayingIt() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
@@ -5382,17 +4585,10 @@ final class UsageHistoryTests: XCTestCase {
                      "the count said there is somewhere to route and the line stayed up")
     }
 
-    /// A switch already on its way outlives the popover closing.
-    ///
-    /// The operator asked for it, and a popover going away is not a change of
-    /// mind — it is what happens on the very next click anywhere else on the
-    /// screen. `fetchTask` is cancelled there and this one is not, which is why
-    /// they are two fields rather than one.
-    ///
-    /// The gate is what makes the difference visible: the request waits until
-    /// this test lets it through and then asks whether it was cancelled, so a
-    /// `close` that reached it comes back as a failure rather than as a slightly
-    /// later success.
+    /// A switch already on its way outlives the popover closing: a close happens on any
+    /// click elsewhere and is not a change of mind. `fetchTask` is cancelled there and
+    /// this one is not, hence two fields. The gate makes the difference visible: the
+    /// request checks cancellation when let through, so a `close` that reached it fails.
     func testASwitchAlreadySentOutlivesTheClose() async {
         let counter = RequestCounter()
         let gate = Gate()
@@ -5413,34 +4609,17 @@ final class UsageHistoryTests: XCTestCase {
 
     /// A pass that left before the click may not undo it.
     ///
-    /// `open` fires a pass at once and a switch is one short POST against a pass's
-    /// `/gw/status` plus a history per account, so a click in the first fractions
-    /// of a second is answered *first* and the pass lands on top of it with the
-    /// state from before the click. The tick goes back where it was and stays there
-    /// until the next pass, up to a minute — and what that reads as is not a
-    /// flicker but "the click did nothing", so the operator clicks again and undoes
-    /// by hand what they had already done.
+    /// `open` fires a pass at once, and a switch is one short POST against a pass's
+    /// `/gw/status` plus a history per account, so an early click is answered first and
+    /// the pass lands on top with the pre-click state. The tick would go back for up to
+    /// a minute and read as "the click did nothing". What carries this is the ratio (four
+    /// requests of some 208 KB against one small one), not an absolute;
+    /// `UsageHistoryModel.applyRotation` has the measurements.
     ///
-    /// What carries that is the **ratio**, four requests of some 208 KB against one
-    /// small one, and not an absolute — which moves with the window the pass asks
-    /// for as well as with the fleet's stored history and the machine's load, so the
-    /// window is named: a pass asks for `period.seconds` and the period defaults to
-    /// `HistoryPeriod.day`. Probe of 2026-09-06 07:25Z, plain GETs, load average 5.6
-    /// falling to 5.4 over the run: ten day passes back to back, issued in parallel
-    /// exactly as the client issues them, took 0.052–0.083 s, against 0.011–0.017 s
-    /// for ten bare `/gw/status` calls in the same run; the day histories are 86289
-    /// / 9438 / 110764 bytes to the status body's 6222, 212713 in all. The figures
-    /// that stood here before were the **48 h** window's — `UsageStore`'s, never
-    /// this popover's. The POST is not timed at all (no live `disable`/`enable` may
-    /// be fired while the fleet is being operated from the CLI); its side of the
-    /// comparison is its shape. `UsageHistoryModel.applyRotation` carries the same
-    /// numbers and the other two windows beside them.
-    ///
-    /// The gate holds `/gw/status` and the test waits for it to be **reached**
-    /// before clicking. Without that wait the ordering is genuinely undecided —
-    /// the pass is a `Task` on the main actor whose body has not run yet, so its
-    /// request can be sent after the click, and then the pass is the newer news
-    /// and is supposed to win.
+    /// The gate holds `/gw/status` and the test waits for it to be reached before
+    /// clicking; without that wait the order is undecided: the pass is a `Task` on the
+    /// main actor whose body has not run yet, so its request can be sent after the click,
+    /// and then the pass is the newer news and is supposed to win.
     func testAPassThatLeftBeforeTheClickDoesNotPutTheTickBack() async {
         let counter = RequestCounter()
         let statusGate = Gate()
@@ -5467,17 +4646,13 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertNotNil(history.switches?["main"], "the pass never reached the model")
     }
 
-    /// And a label with a click still in the air is left alone too.
+    /// A label with a click still in the air is left alone too. It has no answer yet to
+    /// be newer than the pass, but letting a pass write the pre-click state under it says
+    /// the same wrong thing for the length of the round trip.
     ///
-    /// It has no answer yet to be newer than the pass, so the stamp cannot hold it
-    /// — but the operator is watching that box, and letting a pass write the
-    /// pre-click state under it says the same wrong thing for the length of the
-    /// round trip.
-    ///
-    /// The second pass answers something **else** about `acc2`, because a pass
-    /// that overwrote the row with what was already there and one that left it
-    /// alone draw the very same picture. `acc3` moving the other way is the
-    /// control that the pass landed at all.
+    /// The second pass answers something else about `acc2`, since overwriting the row
+    /// with the same value and leaving it alone look identical. `acc3` moving the other
+    /// way is the control that the pass landed.
     func testAPassLeavesAloneALabelWithAClickStillInTheAir() async {
         let counter = RequestCounter()
         let gate = Gate()
@@ -5525,19 +4700,12 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(history.switches?["acc2"]?.disabled, true)
     }
 
-    /// A pass that found somewhere to route takes the warning down.
+    /// A pass that found somewhere to route takes the warning down. The warning is about
+    /// the fleet, and the fleet moves without this app (an account put back from the
+    /// command line, a quota window that reset).
     ///
-    /// The warning is about the fleet — "is there anywhere left to send a
-    /// request" — and the fleet moves without this app: an account put back from
-    /// the command line, or a quota window that reset, ends the state the sentence
-    /// warns about. While only a switch answer could clear it, the orange line
-    /// stood from the click that raised it until the app was restarted, on every
-    /// opening of the popover, with nothing beside it to say how old it was.
-    ///
-    /// It is also the control on the hold next door: the pass here asks *after*
-    /// the click was answered, so it is the newer news and is supposed to win. A
-    /// hold that kept the line up on every pass following any click at all would
-    /// pass that test and fail this one.
+    /// It is also the control on the hold next door: this pass is asked after the click
+    /// was answered, so it is newer and should win.
     func testAPassThatFoundSomewhereToRouteTakesTheWarningDown() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(
@@ -5561,26 +4729,15 @@ final class UsageHistoryTests: XCTestCase {
             """)
     }
 
-    /// **The count is the verdict and the sentence is only its wording**, so a
-    /// pass raises the line as well as taking it down.
+    /// The count is the verdict and the sentence only its wording, so a pass raises the
+    /// line as well as taking it down. The gateway computes `routableAccounts` and
+    /// `eligible_accounts` with the same `is_eligible`, so the pass's count is as good as
+    /// the switch's, and a fleet emptied from the command line or by backoff is reported
+    /// too.
     ///
-    /// A fleet with nowhere to route used to say nothing at all unless this very
-    /// session of this very app had been the one to empty it: somebody's
-    /// `claude-gw disable` from the command line, every account in backoff at
-    /// once, or a restart after one's own click all left the popover silent while
-    /// every client request came back 429. The two counts are one measurement at
-    /// two moments — the gateway computes `routableAccounts` and
-    /// `eligible_accounts` with the same `is_eligible` — so the pass's count is
-    /// as good an answer as the switch's.
-    ///
-    /// The fixture is a fleet **nobody has switched off**, which is the price of
-    /// this and is paid on purpose: `eligible` folds the five-hour window in with
-    /// the operator's switch, so the line appears with every checkbox ticked when
-    /// the windows have merely filled. That is the state the sentence describes.
-    ///
-    /// Two mutations die here and they are the two halves of the finding. Not
-    /// raising on a pass leaves the first assertion `nil`; going back to "the
-    /// sentence raises and the count takes down" clears on the same pass, because
+    /// The fixture is a fleet nobody has switched off: `eligible` folds the five-hour
+    /// window in with the operator's switch, so the line appears with every box ticked
+    /// when the windows have filled. That is the state the sentence describes.
     /// `/gw/status` sends no sentence at all.
     func testTheCountRaisesTheWarningWithNoSentenceAnywhere() async {
         let counter = RequestCounter()
@@ -5622,21 +4779,14 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertNil(history.fleetWarning, "a count above zero left the line standing")
     }
 
-    /// And a pass that left before the operator's own click may not take the
-    /// warning down either.
+    /// A pass that left before the operator's click may not take the warning down
+    /// either. A tick put back wrongly is repaired by the next pass; a warning taken down
+    /// wrongly comes back only with another click. The scene: the minute pass is in the
+    /// air, the operator switches the last usable account off, the POST answers first
+    /// with the sentence, and the pass lands with the pre-click fleet.
     ///
-    /// The same race the tick is held against, in the half of `applyRotation`
-    /// where the rule was written down and then not applied — and the cost is the
-    /// worse of the two. A tick put back wrongly is repaired by the next pass a
-    /// minute later; a warning taken down wrongly can be put back by nothing but
-    /// another click, so it is gone until the operator happens to throw a switch
-    /// again. The scene is real: the popover is open, the minute pass is in the
-    /// air, the operator switches the last usable account off, the short POST
-    /// answers first with the sentence, and tens of milliseconds later the pass
-    /// lands carrying the fleet from before the click.
-    ///
-    /// The gate holds `/gw/status` and the test waits for it to be **reached**, so
-    /// the pass really did leave first rather than probably.
+    /// The gate holds `/gw/status` and the test waits for it to be reached, so the pass
+    /// really did leave first.
     func testAPassThatLeftBeforeTheClickDoesNotTakeTheWarningDown() async throws {
         let counter = RequestCounter()
         let statusGate = Gate()
@@ -5667,56 +4817,26 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(history.switches?["acc3"]?.disabled, true, "the pass never reached the model")
     }
 
-    /// And two clicks of the operator's own, answered in the other order from the
-    /// one they were asked in: the count that stands is the one asked for **last**.
+    /// Two clicks answered in the opposite order to the one they were asked in: the
+    /// count that stands is the one asked for last.
     ///
-    /// `setAccount` guards one label at a time, deliberately — a second click on a
-    /// *different* account while the first is in the air is a thing an operator
-    /// does, and there is nothing to stop it. But the count is the fleet's and
-    /// moves with every switch, so two answers carry two readings of one quantity
-    /// and the wire decides nothing about which of them measured it later. Both
-    /// accounts routable, `acc2` switched off (its answer counts 1, `main` being
-    /// what is left), `main` switched off without waiting (its answer counts 0,
-    /// and the sentence with it); `main`'s answer lands first and the orange line
-    /// goes up, `acc2`'s lands second and — unordered — takes it back down. Every client request is then
-    /// answered 429 with nothing on screen saying so until the next pass, up to
-    /// `UsageHistoryModel.refreshSeconds` later. It is the expensive direction of
-    /// the two, for the reason `applyRotation` gives about the pass: a tick put
-    /// back wrongly is repaired by the next pass, a warning taken down wrongly by
-    /// nothing but another click.
+    /// `setAccount` guards one label at a time, so a click on a different account while
+    /// the first is in the air goes out. The count is the fleet's and moves with every
+    /// switch, so two answers are two readings of one quantity. Here `acc2` off (count
+    /// 1), then `main` off (count 0, with the sentence); `main`'s answer lands first and
+    /// raises the line, and `acc2`'s, unordered, would take it back down, leaving every
+    /// request answered 429 with nothing on screen until the next pass.
     ///
-    /// A gate **per label** is what makes the order a fact rather than a
-    /// likelihood: each answer waits until this test lets that label through, so
-    /// "asked first, answered last" is the arrangement and not the weather. The
-    /// per-label writes are ordered by nothing and are meant not to be — an answer
-    /// is authoritative about its own account whatever the fleet count is doing,
-    /// which is what the last assertion reads.
+    /// A gate per label makes the order a fact. The per-label writes are deliberately not
+    /// ordered: an answer is authoritative about its own account, which the last
+    /// assertion reads.
     ///
-    /// **The settling pass this ends on is answered with the fleet the two clicks
-    /// left behind** — it is asked once both switches have landed, so an
-    /// always-routable body is one the gateway could not have sent, and a test
-    /// reading a switch off such a pass reads the fixture rather than the gateway
-    /// (`UsageFixtures.statusWithBothRoutableAccountsSwitchedOff`, where that rule is
-    /// written down). **No assertion here reads what that pass answered**, which is
-    /// why putting it right moved no number — and each of the six is covered, in
-    /// three groups. The opening one is made before either click, when the only pass
-    /// ever asked is the sitting's own. The middle two are safe by something
-    /// stronger than timing: the first reads `inFlight`, which no pass writes, and
-    /// the second reads the count `main`'s own answer put up at a moment when the
-    /// settling pass does not exist at all — `settle` is `inFlight.isEmpty &&
-    /// clicksOverlapped`, `acc2` is still in the air, and so `main`'s task asks for
-    /// no pass (checked with a throwaway probe beside it: `inFlight` is `["acc2"]`
-    /// there and exactly one `/gw/status` request has been recorded, the sitting's
-    /// own). And the three at the end are read in the same actor turn as the `await`
-    /// on `acc2`'s task, before the pass started inside it can land. That is
-    /// a fact about today's assertions rather than a licence — an assertion added
-    /// here that does read the tick or the orange line off that pass then reads the
-    /// gateway, which is the whole of what this body buys.
-    ///
-    /// Mutation, 2026-09-06: drop the ask-instant guard from `applyRoutable` and
-    /// this is the one test of 668 that reddens — re-run the same day over the scene
-    /// above, once the settling pass had stopped being answered with the fleet from
-    /// before the two clicks, and it is still the one and only, now of 671.
+    /// The settling pass this ends on is answered with the fleet the two clicks left
+    /// behind (`UsageFixtures.statusWithBothRoutableAccountsSwitchedOff`), though no
+    /// assertion here reads it: the middle two read `inFlight` and a count put up before
+    /// the settling pass exists, and the last three run in the same actor turn as the
+    /// `await` on `acc2`'s task, before that pass can land. An assertion added here that
+    /// reads the tick or the line off that pass reads the gateway.
     func testTheCountThatStandsIsTheOneAskedForLast() async throws {
         let counter = RequestCounter()
         let acc2Gate = Gate()
@@ -5785,80 +4905,28 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(history.switches?["main"]?.disabled, true)
     }
 
-    /// And the count is settled by **asking**, once the last click of two that
-    /// overlapped has landed.
+    /// The count is settled by asking, once the last of two overlapping clicks has
+    /// landed.
     ///
-    /// The guard above orders two answers by the moment this app asked for them,
-    /// which is the nearest thing this side has to the order the gateway measured
-    /// in — and only the nearest. The gateway counts inside the handler that writes
-    /// the switch, with no suspension between the two, so each answer is consistent
-    /// in itself; which of two handlers ran first was settled by two connections
-    /// arriving at one single-threaded loop. Processed out of send order, the true
-    /// final count is in the answer to the *earlier* question, and the ask-instant
-    /// refuses it either way round. So what closes the class is not an ordering rule
-    /// but an observation: one pass, asked when nothing is in the air any more, and
-    /// the gateway counts the fleet once for everybody.
+    /// The ask-instant guard orders answers by when this app asked, which is only the
+    /// nearest thing to the order the gateway measured in: which of two handlers ran
+    /// first was decided by two connections reaching one single-threaded loop. So the
+    /// class is closed by an observation: one pass, asked when nothing is in the air.
     ///
-    /// **And not before.** While another click is out, `isStale` refuses whatever
-    /// count a pass brings back, so a pass fired then is 208 KB spent to be ignored
-    /// — and the click still out there brings its own settling pass when it lands.
+    /// Not before: while another click is out, `isStale` refuses whatever count a pass
+    /// brings back, and that click brings its own settling pass. Not for a click that
+    /// went out alone either (`testALoneClickIsSettledByItsOwnAnswer`): `fetch` cancels
+    /// the pass in flight, so settling after every click would put `isStale`'s ordering
+    /// half out of reach.
     ///
-    /// **And not for a click that went out alone**, which is the other half of the
-    /// gate and lives in `testALoneClickIsSettledByItsOwnAnswer` next door: two
-    /// POSTs in the air at once is the whole of what the ask-instant cannot order,
-    /// and `fetch` cancels the pass in flight, so settling after every click would
-    /// take `isStale`'s ordering half out of reach altogether. Both clicks here
-    /// overlap, which is what puts this test on the settling side of that gate.
+    /// Counted in `/gw/status` requests, one per pass. A gate per label holds `main`
+    /// while `acc2` is let through, so "a click still in the air" is asked in the right
+    /// arrangement. Each assertion awaits `fetchTask` first, because a pass fired here is
+    /// a `Task` whose request may not have reached the counter yet.
     ///
-    /// Counted in `/gw/status` requests, which is one per pass and the one thing on
-    /// this path nothing else sends. A gate per label makes the middle state a fact
-    /// rather than a likelihood: `acc2` is let through while `main` is still held,
-    /// so the assertion about "a click still in the air" is asked in the one
-    /// arrangement it is about. Each assertion is made after awaiting `fetchTask`,
-    /// because a pass fired here would be a `Task` whose request has not necessarily
-    /// reached the counter yet — without that wait the "no pass" half would pass
-    /// under its own mutation about half the time.
-    ///
-    /// **And the settling pass is answered with the fleet the burst left behind**,
-    /// for the reason recorded next door and at
-    /// `UsageFixtures.statusWithBothRoutableAccountsSwitchedOff`: it is asked once
-    /// both switches have landed, so an always-routable body is one the gateway
-    /// could not have sent. **No assertion here reads that body either**, which is
-    /// why putting it right moved no number: this test counts `/gw/status` requests
-    /// and reads `inFlight`, and neither of those asks what a pass answered. An
-    /// assertion added here that does read the tick or the count off that pass then
-    /// reads the gateway rather than the fixture.
-    ///
-    /// Mutations, re-run 2026-09-06 against a suite of 671 — this test,
-    /// `testALoneClickIsSettledByItsOwnAnswer` and
-    /// `testABurstsOverlapIsNotChargedToTheNextLoneClick`, the last of
-    /// which reddens under both of these and did not exist when they were first run
-    /// at 670. (Every record that says 668 — one above this line, three below it and
-    /// one in `UsageTests` — is older still, from the same morning, before any of
-    /// the three. Counted as records, not as mentions: the one at
-    /// `testNoStringOnScreenNamesTheMetricByItsInternalWord` says 668 three times
-    /// and is a single sitting.) Both were run again the same day over that
-    /// third test's reworked scene: its stub now answers the settling pass with the
-    /// fleet the burst had just written, and it has gained a control on that pass, so
-    /// which of its assertions move had to be measured rather than carried over.
-    /// Deleting the settling `fetch()` reddens the last assertion here at 1 pass
-    /// against 2, and in the third test its settling control and its final count,
-    /// both at 1 against 2 — 2 tests, 3 assertions, nothing else in the suite.
-    /// Dropping only the `inFlight.isEmpty` half of `settle` reddens the middle
-    /// assertion here at 2 against 1 — a pass asked with `main` still out — and then
-    /// the last one too, at 3 against 2, because the extra pass is still counted when
-    /// the burst ends; the third test reddens on those same two of its three counts
-    /// for the same reason, both at 3 against 2, so 2 tests and 4 assertions. Its
-    /// `disabled` control stands through both, and through the other two mutations of
-    /// that machine as well: it falls only to its own, which is recorded with it. The
-    /// third mutation of `settle` belongs to the other half of the gate and is
-    /// recorded next door. The deletion and the dropped half were then run a third
-    /// time, over the scene **this**
-    /// test now sets — its settling pass answered with the fleet the burst had
-    /// written, as the third test's already was — and every count above came back
-    /// unchanged, which is what a change that moves only what a body says is allowed
-    /// to do. Allowed, not guaranteed: it was measured because the scene moved, not
-    /// carried over because the reasoning said it could not.
+    /// The settling pass is answered with the fleet the burst left behind
+    /// (`UsageFixtures.statusWithBothRoutableAccountsSwitchedOff`); no assertion here
+    /// reads that body.
     func testTheCountIsSettledByAPassOnceTheLastClickHasLanded() async {
         let counter = RequestCounter()
         let acc2Gate = Gate()
@@ -5925,47 +4993,18 @@ final class UsageHistoryTests: XCTestCase {
             """)
     }
 
-    /// And a click that went out **alone** is settled by its own answer: no pass.
+    /// A click that went out alone is settled by its own answer: no pass. The settling
+    /// pass exists for two POSTs in the air at once. A lone POST meets only a pass's
+    /// count, and those are ordered in both directions already: `isStale` refuses a pass
+    /// asked before this answer's confirmation, and `applyRoutable` refuses a count asked
+    /// earlier than the one on screen.
     ///
-    /// The settling pass next door exists for the one arrangement the ask-instant
-    /// cannot order — two POSTs in the air at once, whose handlers the gateway may
-    /// have run in either order. A lone POST is never ordered against another POST.
-    /// The only other count it can meet is a pass's, and those two are ordered
-    /// correctly in both directions already: `isStale` refuses a pass whose
-    /// ask-instant is older than this answer's confirmation, and `applyRoutable`
-    /// refuses a count asked for earlier than the one already on screen.
+    /// A pass here would also cost more than bytes: `fetch` cancels `fetchTask`, so
+    /// settling after every click destroys the pass `isStale`'s second half is written to
+    /// refuse, and that half could never fire (the two
+    /// `testAPassThatLeftBeforeTheClick…` tests would lose their subject).
     ///
-    /// So a pass here would be paid for nothing — and not only in bytes. `fetch`
-    /// cancels `fetchTask`, so a settling pass after **every** click destroys
-    /// whatever pass is in the air, and that pass is precisely what `isStale`'s
-    /// second half is written to refuse. Settle after every click and no pass asked
-    /// before a confirmation can ever land, while a pass asked after one is younger
-    /// than it by construction: the half stops being able to fire at all. That is
-    /// what the two `testAPassThatLeftBeforeTheClick…` tests read as when it is
-    /// tried — their subject becomes unreachable rather than wrong.
-    ///
-    /// Counted in `/gw/status` requests, one per pass. `fetchTask` is awaited before
-    /// the count for the reason given next door: a pass fired here would be a `Task`
-    /// whose request has not necessarily reached the counter yet.
-    ///
-    /// Mutation, re-run 2026-09-06 against a suite of 671 and again the same day over
-    /// the reworked scene of the fourth test below: dropping the `clicksOverlapped`
-    /// half of `settle`, so that every click settles, reddens **four** tests. This one
-    /// by name, at 2 passes against 1; both
-    /// `testAPassThatLeftBeforeTheClickDoesNotPutTheTickBack` — the tick reading
-    /// `false` where the click put `true` — and `…DoesNotTakeTheWarningDown`, whose
-    /// warning comes back `nil`, the pair of them having had their pass cancelled by
-    /// the settling one and replaced by a pass asked after the click, which is then
-    /// admitted and writes the pre-click fixture; and
-    /// `testABurstsOverlapIsNotChargedToTheNextLoneClick` on its final count **alone**,
-    /// at 3 against 2 — that one is the fourth, added after the **three** this record
-    /// used to say, and the count is the whole of what its arrival changed. Alone is
-    /// the half of it worth measuring twice: the settling control that test has since
-    /// gained stays green here, where the neighbour's two mutations both redden it, so
-    /// the shape of the failure inside that test is what separates this half of the
-    /// gate from the other. The `testAPassThatLeftBeforeTheClick…` pair reddening is
-    /// the price stated above, measured: the guard is not weakened by the mutation, it
-    /// is left with nothing to refuse.
+    /// Counted in `/gw/status` requests; `fetchTask` is awaited first, as next door.
     func testALoneClickIsSettledByItsOwnAnswer() async {
         let counter = RequestCounter()
         func passes() -> Int { counter.urls.filter { $0.path == "/gw/status" }.count }
@@ -5992,89 +5031,29 @@ final class UsageHistoryTests: XCTestCase {
             """)
     }
 
-    /// And "sent on its own" is a fact about **this** click, not about the sitting:
-    /// a burst that overlapped is charged to itself and to nothing after it.
+    /// "Sent on its own" is a fact about this click, not about the sitting: a burst that
+    /// overlapped is charged to itself and to nothing after it.
     ///
-    /// `clicksOverlapped` is recorded when the second click of a burst goes out —
-    /// by the time the answers come back `inFlight` has emptied and the overlap has
-    /// left no trace — so it is a flag with a life of its own, and the only place it
-    /// goes out again is the line beside the one that reads it. Delete that line and
-    /// the sitting's first overlapping burst arms it for good: every lone click
-    /// afterwards takes the settling path, which is not merely a wasted pass.
-    /// `fetch` begins with `fetchTask?.cancel()`, so each of those clicks destroys
-    /// whatever pass is in the air — and a pass asked before a confirmation is
-    /// exactly what `isStale`'s second half is written to refuse. That is the
-    /// mechanism `testALoneClickIsSettledByItsOwnAnswer` next door keeps out of the
-    /// code; without this test it walks back in through the one arrangement neither
-    /// of the two covers, because that one ends when the burst lands and this one
-    /// starts from a model that never had a burst.
+    /// `clicksOverlapped` is set when the second click of a burst goes out and reset only
+    /// beside the line that reads it. Without the reset the first overlapping burst arms
+    /// it for good, and every later lone click takes the settling path, cancelling
+    /// whatever pass is in the air.
     ///
-    /// So the burst here is the neighbour's, and the third click is a *later* lone
-    /// one in the same sitting: `acc2` and `main` both switched off with both POSTs
-    /// in the air at once, the settling pass awaited, and then `main` put back on
-    /// its own.
+    /// The burst here is the neighbour's (`acc2` and `main` off with both POSTs in the
+    /// air, the settling pass awaited), then `main` put back on its own. Every body is
+    /// one the gateway could have sent at that moment; the count runs 2, 1, 0, 0, 1:
+    /// `statusWithTwoRoutableAccounts` (`acc3` parked), `switchAnswer`,
+    /// `switchAnswerWithWarning`, `statusWithBothRoutableAccountsSwitchedOff`, and
+    /// `switchAnswerPuttingTheAccountBack`.
     ///
-    /// **Every body is one the gateway could have sent at that moment**, and the
-    /// count runs 2, 1, 0, 0, 1 across the five answers.
-    /// `statusWithTwoRoutableAccounts` opens the sitting — `acc2` and `main`
-    /// routable, `acc3` parked from the evening before, so 2. Taking `acc2` out
-    /// leaves 1 (`switchAnswer`), and `main` after it leaves 0
-    /// (`switchAnswerWithWarning`). The settling pass then reads the accounts table
-    /// those two POSTs have just written to, so what it gets is
-    /// `statusWithBothRoutableAccountsSwitchedOff`: both of them off, counting 0,
-    /// agreeing with the answer that took the last one out. Putting `main` back
-    /// gives 1 again (`switchAnswerPuttingTheAccountBack`).
+    /// That settling body is what makes the second control meaningful: `main` stands at
+    /// `disabled: true` when the lone click goes out, so only that click's own answer
+    /// puts it back. A failed click goes through `setAccount`'s failure branch, which
+    /// calls `fetch()` unconditionally, so the control fails along with the final count.
     ///
-    /// **That agreement is the whole of what the second control can read.** With
-    /// `statusWithTwoRoutableAccounts` answering the settling pass — which is what
-    /// stood here — `main` is back to `disabled: false` before the lone click is
-    /// ever sent: `inFlight` is empty by then and both confirmations are older than
-    /// that pass's `askedAt`, since it is asked from inside the last switch task
-    /// after that task wrote its own, so `holds` refuses both labels and
-    /// `applyRotation` overwrites the dictionary with the pass's body whole. The
-    /// control then read `false` whether the lone click's answer landed, failed, or
-    /// was never sent — while a *failed* click takes `setAccount`'s failure branch,
-    /// where `fetch()` is called unconditionally, which is precisely the 3 passes
-    /// against 2 the final assertion is written to catch. With the settling pass
-    /// answering for the fleet it was actually asked of, `main` stands at
-    /// `disabled: true` when the lone click goes out, and nothing but that click's
-    /// own answer puts it back.
-    ///
-    /// No gate holds either half of the burst: `setAccount` is synchronous up to
-    /// `inFlight.insert`, and the two calls stand side by side with nothing that
-    /// suspends between them, so both are in the air before either can be answered.
-    /// Counted in `/gw/status` requests, one per pass, and each count is taken after
-    /// awaiting `fetchTask` — a pass fired here would be a `Task` whose request has
-    /// not necessarily reached the counter yet.
-    ///
-    /// Mutations, 2026-09-06, against a suite of 671, every one of them run over the
-    /// scene above rather than inferred from the one it replaced — the settling pass
-    /// stopped being answered with the fleet from before the burst in the same round
-    /// that wrote this record. Deleting the reset — the `if inFlight.isEmpty {
-    /// clicksOverlapped = false }` of `setAccount` — still reddens this test and
-    /// nothing else in the suite, at 3 passes against 2, and both controls stay
-    /// green: the burst settles once as it should, and that click's answer lands —
-    /// it is only charged for a pass it did not ask for.
-    ///
-    /// And the control's own, which is what says it can fail and what it fails for:
-    /// have the stub throw for the lone `enable` instead of answering it, and the
-    /// control reddens on `main` still reading `disabled: true` — the settling
-    /// pass's — with the final assertion reddening after it at 3 against 2, because
-    /// the failure branch fetches unconditionally. Two failures in line order, and
-    /// the pair of them is what separates the two cases: a control that stands
-    /// while the count is wrong means the lone click was charged for the burst, and
-    /// one that falls means its own answer never landed. Against the body that
-    /// stood here before, the same thrown `enable` reddens the final assertion
-    /// **alone** — 1 failure, not 2 — which is exactly the reading the control was
-    /// meant to rule out; measured, not remembered, by putting that always-routable
-    /// `/gw/status` answer back under the same thrown `enable`, with everything else
-    /// of today's scene left standing.
-    ///
-    /// No mutation of the settling machine moves that control: it stands under all
-    /// four of them — the `fetch()` deleted, either half of `settle` dropped, the
-    /// reset deleted — and falls only to the stub above it. Which is what a control
-    /// is for, and it is measured across the four rather than assumed from the one
-    /// it was written beside.
+    /// No gate holds the burst: `setAccount` is synchronous up to `inFlight.insert`, so
+    /// both are in the air before either is answered. Counts are taken after awaiting
+    /// `fetchTask`.
     func testABurstsOverlapIsNotChargedToTheNextLoneClick() async {
         let counter = RequestCounter()
         func passes() -> Int { counter.urls.filter { $0.path == "/gw/status" }.count }
@@ -6141,19 +5120,12 @@ final class UsageHistoryTests: XCTestCase {
             """)
     }
 
-    /// A failed click's blame does not follow the operator into the next sitting.
+    /// A failed click's blame does not follow the operator into the next sitting. It is
+    /// cleared otherwise only by the next click on that label, so it would keep reporting
+    /// an old failure as current (§2.4).
     ///
-    /// It is cleared by the next click on the same label and by nothing else, so
-    /// an hour after a dead WireGuard came back — the gateway answering, every
-    /// checkbox live — the grey line still read "acc2: unreachable" as though it
-    /// had just happened. A fact about the past shown as the present (§2.4), with
-    /// the operator's own control beside it.
-    ///
-    /// `open` and not `close`, which the message survives on purpose: a popover
-    /// closes on any click anywhere on the screen, including one that never came
-    /// near it. And nothing is lost by clearing on the way in, because `open`
-    /// fires a pass in the next line — what the blame stands for is a tick that
-    /// may no longer be the fleet's, and the pass is what settles that.
+    /// Cleared on `open`, not `close`: a popover closes on any click anywhere, and `open`
+    /// fires a pass in the next line, which settles what the blame stands for.
     func testAFailedClicksBlameDoesNotSurviveIntoTheNextSitting() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(client: rotationClient(counter, switchAnswer: nil),
@@ -6179,22 +5151,13 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertNil(UsagePopoverView.switchBlame(history.switchFailures))
     }
 
-    /// And neither do the fleet's own two, for the same reason and with the same
-    /// remedy one line below them.
+    /// Neither do the fleet's own two messages, for the same reason and with the same
+    /// remedy: after a shut popover they stand for a tick that may be an hour old.
     ///
-    /// Nothing runs while the popover is shut, so on the way back in all three of
-    /// these lines stand for a tick that may be an hour old — the orange one
-    /// loudest of all, with no age drawn anywhere near it. The `open` that clears
-    /// them fires a pass in its next line, which is exactly the thing that settles
-    /// what they stand for.
-    ///
-    /// Both are put up first, and it takes two passes to do it: a pass that
-    /// answers a fleet with nowhere to route raises the warning, and a pass that
-    /// cannot ask writes the blame while **keeping** the warning — an answer
-    /// replaces what is held, a pass that got none leaves it alone. The assertions
-    /// after the reopen are made before the new pass has run: `open` starts it as a
-    /// `Task` on this actor, so nothing has landed yet and what is read is what the
-    /// operator sees on the way in.
+    /// Both are put up first in two passes: one answers a fleet with nowhere to route,
+    /// the next cannot ask and writes the blame while keeping the warning. The
+    /// assertions after the reopen run before the new pass: `open` starts it as a `Task`
+    /// on this actor.
     func testTheFleetsOwnTwoMessagesDoNotSurviveIntoTheNextSitting() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(client: UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
@@ -6239,52 +5202,18 @@ final class UsageHistoryTests: XCTestCase {
         await history.fetchTask?.value
     }
 
-    /// Neither does the rotation itself, and it is the one of the four that binds
-    /// hardest.
+    /// Neither does the rotation itself, which matters most because it is a control. An
+    /// hour-old reading survives a shut popover (`close` leaves it, `NSPopover` keeps the
+    /// view controller), so the boxes would be drawn from it, ticked and clickable. A
+    /// click on a stale tick changes the fleet: `disableAccount` sends no body, which the
+    /// gateway's `_parse_disable_body` reads as `DISABLED_NO_DEADLINE`, so a timed parking
+    /// becomes an indefinite switch-off.
     ///
-    /// The other three are messages about a moment; this one is a **control**. An
-    /// hour-old reading survives a shut popover — `close` leaves it alone and
-    /// `NSPopover` keeps the content view controller — so on the way back in the
-    /// boxes would be drawn from it, ticked as current and clickable, with the two
-    /// lines that might have explained their age cleared in the statements just
-    /// above. §2.4's rule about a confidently wrong reading weighs more on a
-    /// control than on a number, because acting on one changes the fleet:
-    /// `disableAccount` sends no body, and the gateway's `_parse_disable_body`
-    /// reads no body, an empty body and `{}` alike as `DISABLED_NO_DEADLINE`, so a
-    /// click on a stale tick turns somebody's timed parking of an account into an
-    /// indefinite switch-off.
-    ///
-    /// Asked of the **model**, not of the paint, and that is not a shortcut: a
-    /// checkbox comes out of `ImageRenderer` as the same 784 inked pixels in all
-    /// four of its states, so no rendering on this surface can tell a cleared
-    /// rotation from a stale one. `switchAppearance` and `switchHelp` are asked
-    /// beside it because they are what `nil` costs on screen — a clear box nobody
-    /// may click, and a tooltip that says the gateway did not say.
-    ///
-    /// The pass afterwards is the control: cleared and then filled in again is the
-    /// state the operator meets, and without it the test would pass just as well
-    /// against a model that never learned a rotation at all.
-    ///
-    /// Mutation, 2026-09-06: leave the rotation alone in `open` — delete the two
-    /// lines that carry the labels in flight over and take everything else to
-    /// `nil` — and this test reddens, on all four of its assertions. It is not the
-    /// only one: `testAClickStillInTheAirKeepsItsRowAcrossTheReopen` next door
-    /// reddens with it, 2 of 668, because that mutation removes both halves of the
-    /// rule at once. The half this test owns is separated by the other mutation,
-    /// `switches = nil` written back unconditionally, which leaves this one green
-    /// and reddens only next door.
-    ///
-    /// And a third, run 2026-09-06 against a suite of 670: `switches = heldOver`
-    /// with no ternary, so that an empty carry-over stands as `[:]` — "the gateway
-    /// said nobody" written where this app was told nothing. It reddens the first
-    /// assertion here and four more tests, five in all, every one of them on an
-    /// `XCTAssertNil` reading `"[:]"`: `testARotationNobodyAnsweredIsNotAnEmpty`
-    /// `Fleet`, `testARotationBodyMissingASwitchLeavesEveryBoxUnknown`,
-    /// `testARotationWithNoRoutingFlagRaisesNoWarningAtAll` and, on the paint side,
-    /// `testTheReasonTheSwitchesWentInertIsDrawnWithNoAccountsToDrawItUnder`. They
-    /// all reach it the same way: `open` on a model that has never learned a
-    /// rotation carries nothing over, and the ternary is the only thing that keeps
-    /// that from becoming an answer.
+    /// Asked of the model: a checkbox renders as the same 784 inked pixels in all four
+    /// states. `switchAppearance` and `switchHelp` show what `nil` costs on screen. The
+    /// pass afterwards is the control, without which a model that never learned a
+    /// rotation would pass. An empty carry-over must stay `nil`, not `[:]` ("the gateway
+    /// said nobody").
     func testTheRotationItselfDoesNotSurviveIntoTheNextSitting() async {
         let counter = RequestCounter()
         let history = UsageHistoryModel(client: rotationClient(counter), defaults: freshDefaults())
@@ -6314,45 +5243,20 @@ final class UsageHistoryTests: XCTestCase {
                        "the pass `open` fires never filled the rotation back in")
     }
 
-    /// With one exception, and it is the label the operator is waiting on: a click
-    /// still in the air carries its reading across the reopen, and the new
-    /// sitting's first pass may not write under it.
+    /// Except the label the operator is waiting on: a click still in the air carries its
+    /// reading across the reopen, and the new sitting's first pass may not write under
+    /// it.
     ///
-    /// `close` does not cancel a switch already sent — the operator asked for it —
-    /// so a POST can be in the air for as long as `UsageClient.timeoutSeconds`
-    /// behind a shut popover, and the popover can be opened again inside that. The
-    /// hold `applyRotation` puts on an in-flight label works by laying the value
-    /// this app **already has** over the pass's, so with the rotation wiped there
-    /// was nothing to lay and the first half of `holds` did nothing at all: the
-    /// pass `open` fires answers in a fraction of a second, well before the POST,
-    /// and the box the operator is at that moment switching was drawn from the
-    /// gateway's pre-click reading. Inert, so no wrong click could come of it —
-    /// and confidently wrong all the same, which is the thing the whole control is
-    /// built not to be (§2.4).
+    /// `close` does not cancel a sent switch, so a POST can be in the air behind a shut
+    /// popover for up to `UsageClient.timeoutSeconds`. The hold in `applyRotation` lays
+    /// the value this app already has over the pass's, so a wiped rotation would leave
+    /// nothing to lay, and the box would show the pre-click reading.
     ///
-    /// **How this differs from `testAPassLeavesAloneALabelWithAClickStillInTheAir`,
-    /// which the same hold is supposed to cover:** there the successful pass runs
-    /// *before* the click and the popover never closes, so the rotation is
-    /// populated when the second pass lands and the hold has something to lay.
-    /// That is why it went on passing with the wipe in place. Here the close and
-    /// the reopen fall between the click and the pass, which is the only order in
-    /// which the dictionary is empty underneath a label in flight.
-    ///
-    /// The scene: `acc3` was parked for 22 hours from the command line the evening
-    /// before (`status`), the operator clicks to put it back, closes the popover
-    /// by clicking elsewhere and opens it again — and by then the parking has
-    /// expired on its own, so the pass has something **else** to say about `acc3`.
-    /// Without that difference a pass that rewrote the row with what was already
-    /// there and one that left it alone would draw the very same picture.
-    ///
-    /// Asked of `switchAppearance` rather than of the paint, for the reason
-    /// `testTheRotationItselfDoesNotSurviveIntoTheNextSitting` gives: the checkbox
-    /// renders as the same blank plate in all four of its states.
-    ///
-    /// Mutation, 2026-09-06: go back to wiping the rotation unconditionally
-    /// (`switches = nil`) and this is the one test of 668 that reddens — on the
-    /// carry-over assertion and on the tick under the click alike, which is the
-    /// pair that says the rule is worth something rather than only present.
+    /// Unlike `testAPassLeavesAloneALabelWithAClickStillInTheAir`, the close and reopen
+    /// fall between the click and the pass, the only order in which the dictionary is
+    /// empty under a label in flight. `acc3`'s 22-hour parking has expired by the reopen,
+    /// so the pass has something else to say about it. Asked of `switchAppearance` for
+    /// the reason the previous test gives.
     func testAClickStillInTheAirKeepsItsRowAcrossTheReopen() async {
         let counter = RequestCounter()
         let gate = Gate()
@@ -6426,29 +5330,14 @@ final class UsageHistoryTests: XCTestCase {
                       "the row stayed inert after its own answer landed")
     }
 
-    /// The three stamps that decide whether a pass is older news than the operator
-    /// run on a clock that cannot step backwards.
+    /// The three stamps that decide whether a pass is older than the operator's click run
+    /// on a clock that cannot step backwards. They are only compared, never drawn, and
+    /// the wall clock does step back (NTP, wake from sleep), which would stamp an answer
+    /// in the future and block every later pass from refreshing the label.
     ///
-    /// None of them is ever drawn — they exist only to be compared with each other
-    /// — and the wall clock does step back: an NTP correction, a wake from sleep. A
-    /// step back just after a switch answer leaves that answer stamped in the
-    /// future, and from then on every pass looks older than it, so the gateway
-    /// stops being allowed to refresh the label until the clock catches up.
-    ///
-    /// Asked of `Rotation.askedAt`, which reaches the other two for free.
-    /// `holds` compares `switchConfirmedAt[label]` with this very field, and
-    /// `applyRoutable(_:askedAt:)` takes a `ContinuousClock.Instant` and is handed
-    /// this field by a pass and `setAccount`'s own local by a click — so the
-    /// compiler will not let any of the three be drawn from a different clock than
-    /// the rest. What a mutation back to `Date()` therefore has to change is this
-    /// type, and this is where it is read.
-    ///
-    /// **One question, and one is enough.** An `XCTAssertFalse(askedAt is Date)`
-    /// stood under the assertion below and was deleted: a value cannot be both
-    /// types, so it could only fail where the first has already failed — a check
-    /// that cannot answer "no" on its own, carrying the louder message of the two
-    /// and reading to the next person like a working control. What it said is
-    /// worth keeping, so it is said here and in the message that is left.
+    /// Asked of `Rotation.askedAt`, which covers the other two: `holds` compares
+    /// `switchConfirmedAt[label]` with it, and `applyRoutable(_:askedAt:)` takes a
+    /// `ContinuousClock.Instant`, so the compiler keeps all three on one clock.
     func testTheStampsThatDecideAStalePassCannotStepBackwards() throws {
         let rotation = UsageHistoryModel.Rotation(state: nil, routable: nil, failure: nil,
                                                   askedAt: UsageHistoryModel.stamp())
@@ -6461,17 +5350,11 @@ final class UsageHistoryTests: XCTestCase {
             """)
     }
 
-    /// A switch must not need the main thread either.
-    ///
-    /// `load` has been asked this since it existed; `switchAccount` had not, and it
-    /// is the half that runs from a `Task` started inside a `@MainActor` method,
-    /// which inherits the main actor. Only `nonisolated` on the declaration keeps
-    /// the request off it, nothing warns under `-strict-concurrency=complete` when
-    /// that is lost, and what it costs is up to `UsageClient.timeoutSeconds` — five
-    /// seconds — of a popover that is open on screen and has stopped redrawing.
-    ///
-    /// Timed rather than open, so a regression is a red test and not a run that
-    /// never comes back (§6).
+    /// A switch must not need the main thread either. `switchAccount` runs from a `Task`
+    /// started inside a `@MainActor` method, which inherits the main actor; only
+    /// `nonisolated` keeps the request off it, nothing warns when that is lost, and the
+    /// cost is up to five seconds of a frozen open popover. Timed, so a regression fails
+    /// instead of hanging (§6).
     func testSwitchingAnAccountDoesNotNeedTheMainThread() {
         let counter = RequestCounter()
         let client = rotationClient(counter)
@@ -6490,14 +5373,10 @@ final class UsageHistoryTests: XCTestCase {
         try rendered(view).inked
     }
 
-    /// What a rendering put down, over all of the plot or a horizontal band of
-    /// it given as fractions of the height from the top edge.
-    ///
-    /// Two numbers, because the chart says two things with them. `inked` counts
-    /// pixels that carry anything at all, which is where a line is and how wide;
-    /// `coverage` adds up how much of each, which is the only one of the two a
-    /// change of opacity moves — a line at 55% alpha is as "inked" as one at
-    /// 100% and half as heavy.
+    /// What a rendering put down, over the whole plot or a horizontal band given as
+    /// fractions of the height from the top. `inked` counts pixels carrying anything
+    /// (where a line is and how wide); `coverage` sums how much, the only one opacity
+    /// moves: a line at 55% alpha is as inked as one at 100% and half as heavy.
     private func rendered(_ view: some View,
                           band: ClosedRange<Double> = 0...1) throws -> (inked: Int, coverage: Double) {
         let renderer = ImageRenderer(content: view.frame(width: UsagePopoverView.width, height: 130))
@@ -6621,15 +5500,11 @@ final class FleetMeanTests: XCTestCase {
                        "the account's own line stopped breaking at a hole")
     }
 
-    /// The end of the line and the number over it are one quantity, and this is
-    /// what holds them together.
-    ///
-    /// They cannot be one call: the headline is `fleet.seven_day.mean` from
-    /// `/gw/usage`, the line is built from `/gw/usage/{label}/history`. So what
-    /// is held is the rule — the mean of the last known reading of every account
-    /// — computed by the one function both sides of it go through. Two accounts
-    /// here were last sampled before the third, which is what makes carrying the
-    /// difference between agreeing and not.
+    /// The end of the line and the number over it are one quantity. They cannot be one
+    /// call (the headline is `fleet.seven_day.mean` from `/gw/usage`, the line comes from
+    /// `/gw/usage/{label}/history`), so what is held is the rule, the mean of every
+    /// account's last known reading, computed by one function. Two accounts here were
+    /// last sampled before the third, which is what makes carrying matter.
     func testTheLastPointOfTheMeanIsTheHeadlineFigure() throws {
         let accounts = [try samples([(0, 99), (9, 100)]),
                         try samples([(1, 5)]),
@@ -6665,22 +5540,14 @@ final class FleetMeanTests: XCTestCase {
         XCTAssertTrue(FleetSeries.make(from: [holes]).isEmpty)
     }
 
-    /// Two readings stamped the same second are one point on the line, and it is
-    /// the last of them.
+    /// Two readings stamped the same second are one point on the line, the last of them.
+    /// The gateway sends such pairs (its poll and a response-header reading in one
+    /// second), and the marks are keyed on the stamp
+    /// (`ForEach(segment.readings, id: \.timestamp)`), where duplicate ids are outside
+    /// what `ForEach` promises.
     ///
-    /// The gateway sends such pairs — its own poll and the reading off a response
-    /// header landing in the same second — and the marks are keyed on the stamp
-    /// (`ForEach(segment.readings, id: \.timestamp)`), which tells its elements
-    /// apart by that id alone: two marks wearing one id are outside anything
-    /// `ForEach` promises. Measured against the
-    /// live gateway over the 7d window on 2026-09-14, the one the popover stood
-    /// on: 27 groups carrying 29 extra points of 1485 on one account, 16/17 of
-    /// 639 on the next, 26/27 of 1596 on the third, and the longest repeat was
-    /// three.
-    ///
-    /// Only the drawn series. The raw samples keep their repeats, because a step
-    /// of zero length carries spend `FleetCapacity` and `UsageStore` measure
-    /// (§2.7).
+    /// Only the drawn series: the raw samples keep their repeats, because a zero-length
+    /// step still carries spend `FleetCapacity` and `UsageStore` measure (§2.7).
     func testTwoReadingsOnOneSecondAreOnePointOnTheLine() throws {
         let pair = AccountSeries.make(label: "acc1", points: try samples([(0, 10), (0, 12), (1, 20)]))
         XCTAssertEqual(pair.segments.count, 1)
@@ -6776,14 +5643,9 @@ final class SourceLagTests: XCTestCase {
         XCTAssertEqual(try filtered([40, 40, 41, 41, 42, 42]), [40, 40, 41, 41, 42, 42])
     }
 
-    /// And the largest step there is — a week rolling over — survives to the
-    /// sample. A filter that took the corner off this would be lying about the one
-    /// event the chart exists to show.
-    ///
-    /// The window is what makes the whole rule true: it is hard rather than
-    /// sliding, so utilisation inside one only accumulates. The live history holds
-    /// two of these corners, 100 → 0 and 99 → 0, each followed by a `resets_at`
-    /// exactly 7×24 h later (§4).
+    /// The largest step there is, a week rolling over, survives to the sample. The window
+    /// is hard, not sliding, so utilisation inside one only accumulates; a reset is a
+    /// real corner followed by a `resets_at` exactly 7×24 h later (§4).
     func testAQuotaResetIsNotSmoothedAway() throws {
         XCTAssertEqual(try filtered([87, 87, 3, 3]), [87, 87, 3, 3])
         XCTAssertEqual(try filtered([100, 100, 0, 0, 1]), [100, 100, 0, 0, 1])
@@ -6809,16 +5671,10 @@ final class SourceLagTests: XCTestCase {
         XCTAssertEqual(try filtered([10, nil, 40, 39, 39, 40]), [10, nil, 40, 40, 40, 40])
     }
 
-    /// The last reading is never moved, and that is a requirement rather than an
-    /// omission: the freshest figure is the one thing the rule may not invent on
-    /// the gateway's behalf, so the line ends at the reading that arrived (§4).
-    ///
-    /// Under the median this held by itself — the last element was outside the
-    /// window, and a reading with holes after it was declined because the window
-    /// could not reach across a `null`. This rule looks only backwards, so a hole
-    /// on the right stops nothing and the exemption has to be written down. It is:
-    /// the pass ends at the last reading rather than at the last element, and both
-    /// forms are asked here.
+    /// The last reading is never moved: the freshest figure is the one thing the rule may
+    /// not invent, so the line ends at the reading that arrived (§4). The rule looks only
+    /// backwards, so a hole on the right stops nothing and the exemption is explicit: the
+    /// pass ends at the last reading rather than the last element. Both forms are asked.
     func testTheLastReadingIsNeverMoved() throws {
         // A fall at the very end of the array, which is where the exemption costs
         // something: the line ends a point below the level before it, and that is
@@ -6863,27 +5719,17 @@ final class SourceLagTests: XCTestCase {
         XCTAssertEqual(try filtered(alternating), [38, 39, 39, 39, 39, 39])
     }
 
-    /// The rule's properties, asked of a series no `XCTAssertEqual` holds in place.
+    /// The rule's properties, asked of a series no `XCTAssertEqual` pins. The input is
+    /// generated deterministically (a fixed seed through a linear congruential step, no
+    /// `random()` or `Date`): six hundred-odd samples of a climbing level combed by
+    /// falls of one to six samples, with resets and holes, and a trailing-source sample
+    /// last so the tail exemption is in play.
     ///
-    /// Two loops used to stand in the test above — "the result never falls", "the
-    /// filter invented nothing" — over an array pinned by an exact equality on the
-    /// line before them. Green equality, and neither could fail; red equality, and
-    /// they said the same thing a second time: a branch that cannot execute, in
-    /// test form. So the input here is generated instead, and generated
-    /// deterministically — a fixed seed through a linear congruential step, with no
-    /// `random()` and no `Date` anywhere near it, because a test that fails one run
-    /// in ten is not evidence of anything. Six hundred-odd samples of a level that
-    /// climbs, combed by falls of one to six samples, with resets and holes through
-    /// it, and a trailing-source sample deliberately last so the tail exemption is
-    /// in play as well.
-    ///
-    /// Four properties, and every one of them the rule restated: inside a window
-    /// the result never falls; no reading moved by anything but exactly +1 pp; the
-    /// resets came through untouched; the last reading is where it was. Around
-    /// them stand four assertions on the input and the work done, because a rule
-    /// that did nothing at all would satisfy all four properties: the series has
-    /// to hold a comb, at least two resets, at least one of those not into zero,
-    /// and the rule has to have moved a hundred samples of it.
+    /// Four properties restate the rule: inside a window the result never falls; no
+    /// reading moves by anything but exactly +1 pp; resets come through untouched; the
+    /// last reading stays put. Four more assertions check the input and the work done,
+    /// since a rule that did nothing would satisfy all four: the series holds a comb, at
+    /// least two resets, one of them not into zero, and the rule moved a hundred samples.
     func testTheRuleHoldsItsPropertiesOverAGeneratedComb() throws {
         var seed: UInt64 = 0x2026_0817
         func next(_ bound: Int) -> Int {
@@ -7057,29 +5903,15 @@ final class UsagePopoverLabelTests: XCTestCase {
         UsagePopoverView.HeadlineRatio(percent: percent, isLowerBound: lowerBound)
     }
 
-    /// The fleet's burn against its refill, as the poll hands it over. Only
-    /// `percent` and the lower-bound flag reach a surface; the rest is what
-    /// `--dump` prints, and it is built to be **an object production can
-    /// produce** rather than copied off a probe: `refillRate` is the expression
-    /// `burnAgainstRefill` computes for three contributors, `3 x 100 / 168` =
-    /// 1.7857 pp/h, and `burnRate` is derived back from whatever `percent` the
-    /// caller passes, so the three agree by construction.
+    /// The fleet's burn against its refill, as the poll hands it over. Only `percent` and
+    /// the lower-bound flag reach a surface; the rest is what `--dump` prints. Built to
+    /// be an object production can produce: `refillRate` is what `burnAgainstRefill`
+    /// computes for three contributors, `3 x 100 / 168` = 1.7857 pp/h, and `burnRate` is
+    /// derived from the `percent` passed, so the three agree by construction. The depth
+    /// is a plausible fixture value, not a measurement.
     ///
-    /// **The docblock used to describe a different pair of numbers than the code
-    /// beside it builds**, and both halves were wrong. It called these "the live
-    /// figures of 2026-09-05 02:50Z — three accounts over 48 h, 0.6714 pp/h
-    /// burned against the 0.5952 pp/h three weeks refill": that pair is **per
-    /// account** — 0.5952 is `100 / 168`, one account's share — while
-    /// `FleetBurn.refillRate` is by its own docstring the fleet's. And
-    /// `measuredHours: 47.9` was never that probe's either: at 02:50Z the spans
-    /// were 48.0 / 34.0 / 48.0 h and the field holds the shortest, 34.0. Of the
-    /// citation only `percent = 112.8` belonged to 02:50Z, and `percent` is a
-    /// parameter here. So the depth below is a plausible fixture depth and is not
-    /// claimed as a measurement.
-    ///
-    /// `static` and internal because the menu bar's own tests build the same
-    /// fixture: the two surfaces read one rule, so they had better be handed one
-    /// figure rather than two that can drift.
+    /// `static` and internal because the menu bar's tests build the same fixture: both
+    /// surfaces read one rule, so they get one figure.
     static func burn(_ percent: Double,
                      lowerBound: Bool = false) -> FleetCapacity.FleetBurn {
         FleetCapacity.FleetBurn(percent: percent,
@@ -7088,14 +5920,11 @@ final class UsagePopoverLabelTests: XCTestCase {
                                 isLowerBound: lowerBound)
     }
 
-    /// A snapshot the lead block can actually be drawn from: a ratio, and
-    /// histories fresh enough to state it by. Two sources rather than the three
-    /// the lead needed while it was a live rate over an allowance — which is what
-    /// the tests below take away one at a time.
+    /// A snapshot the lead block can be drawn from: a ratio, and histories fresh enough
+    /// to state it by. The tests below take these away one at a time.
     ///
-    /// The live token rate comes along because the block prints it as a
-    /// supporting reading, and it is *not* what the lead is made of: taking it
-    /// away leaves the lead exactly where it was.
+    /// The live token rate comes along because the block prints it as a supporting
+    /// reading; the lead is not made of it, and removing it leaves the lead unchanged.
     private func leading(lowerBound: Bool = false,
                          percent: Double = 126,
                          current: Double? = 23_800_000) -> UsageSnapshot {
@@ -7121,15 +5950,11 @@ final class UsagePopoverLabelTests: XCTestCase {
                        "a fleet at rest has a figure, and it is not a dash")
     }
 
-    /// The lead says what is being spent when it can, and falls back to exactly
-    /// what it said before when it cannot.
-    ///
-    /// Every way the lead can be missing arrives here as one state — the gateway
-    /// silent, no account with enough history, every account pinned at its
-    /// ceiling, a fall the reset schedule cannot explain, histories nobody has
-    /// confirmed for two intervals — and none of them may be turned into a
-    /// number. So the fallback is the old figure, and where there is no old
-    /// figure either it is the dash that has always stood there.
+    /// The lead says what is being spent when it can, and falls back to the mean when it
+    /// cannot. Every way the lead can be missing (gateway silent, no account with enough
+    /// history, every account at its ceiling, an unexplained fall, histories unconfirmed
+    /// for two intervals) arrives as one state, and none may become a number. With no
+    /// mean either, it is the dash.
     func testTheHeadlineFallsBackToTheMeanWhenThereIsNoRatio() {
         var snapshot = UsageSnapshot.empty
         XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot), "—",
@@ -7152,12 +5977,9 @@ final class UsagePopoverLabelTests: XCTestCase {
             """)
     }
 
-    /// **The lead is the burn against the refill, and the caption names what the
-    /// hundred means.** One quantity and one division, which is the change: the
-    /// block used to print a five-minute token rate as its figure and what the
-    /// fleet might sustainably spend as its caption, and the bar underneath was
-    /// the only place the two were ever compared. Now the figure *is* the
-    /// comparison, so the colour over it cannot be describing something else.
+    /// The lead is the burn against the refill, and the caption names what the hundred
+    /// means. One quantity and one division, so the colour over the figure describes the
+    /// figure itself.
     func testTheLeadStatesTheBurnAgainstTheWeeksRefill() throws {
         let snapshot = leading()
         let figure = try XCTUnwrap(UsagePopoverView.headlineRatio(for: snapshot))
@@ -7189,15 +6011,10 @@ final class UsagePopoverLabelTests: XCTestCase {
         XCTAssertEqual(idle.ratio, 0, "a fleet burning nothing draws no bar, and that is a reading")
     }
 
-    /// The lead needs the ratio and nothing else, and the surface says so by
-    /// falling back when it is missing — and by *not* falling back when the
-    /// supporting reading beside it is.
-    ///
-    /// **That second half is the change.** The lead used to be a pair, and the
-    /// live token rate was one of its halves: no `tokens` block from the gateway
-    /// (an older gateway, or statistics turned off) and the whole lead went back
-    /// to the mean. The token rate is a supporting reading now, printed with no
-    /// bar and colouring nothing, so its absence costs the lead nothing at all.
+    /// The lead needs the ratio and nothing else: it falls back when the ratio is missing
+    /// and not when the supporting live token rate is (no `tokens` block from an older
+    /// gateway or with statistics off). That rate is printed with no bar and colours
+    /// nothing.
     func testOnlyTheRatioGoingMissingTakesTheHeadlineBackToTheMean() {
         var noLiveRate = leading(current: nil)
         XCTAssertNotNil(UsagePopoverView.headlineRatio(for: noLiveRate), """
@@ -7229,20 +6046,13 @@ final class UsagePopoverLabelTests: XCTestCase {
         XCTAssertEqual(UsagePopoverView.rateLabel(1_000), "1.0k/h")
     }
 
-    /// A figure whose own half is failing is not a figure this line may state,
-    /// and the fallback is the same one it uses when there has never been one.
+    /// A figure whose own half is failing is not one this line may state, and the
+    /// fallback is the same as when there has never been one. With `/history` failing
+    /// while `/gw/usage` and `/gw/sessions` answer, a frozen figure is wrong in either
+    /// direction: a false alarm over a calmed fleet, or a calm green over one at 200%.
     ///
-    /// Measured with `/gw/usage` and `/gw/sessions` answering while `/history`
-    /// returned HTTP 500: the menu bar dropped its colour and this line went on
-    /// stating a red `≥134%` under `of weekly capacity across accounts`, with
-    /// nothing on screen saying the figure had not been confirmed since the
-    /// outage began. The error is not one-directional, which is the point — a
-    /// frozen 134% over a fleet that has calmed down is a false alarm, and a
-    /// frozen green 80% over one that has gone to 200% is the very failure this
-    /// metric was added to prevent.
-    ///
-    /// The figure, the caption, the bar and the colour all follow the one
-    /// answer, so all four are asked here rather than the string alone.
+    /// The figure, the caption, the bar and the colour all follow the one answer, so all
+    /// four are asked.
     func testAFailingHistoryHalfTakesTheHeadlineBackToTheMean() {
         var snapshot = leading()
         XCTAssertEqual(UsagePopoverView.headlineFigureLabel(for: snapshot), "126%")
@@ -7270,22 +6080,15 @@ final class UsagePopoverLabelTests: XCTestCase {
                        "an endpoint that knows nothing about the histories blanked the lead")
     }
 
-    /// A figure nobody has confirmed for two of its own intervals is not a
-    /// figure either surface may state, and no failure is set when that happens.
+    /// A figure nobody has confirmed for two of its own intervals may not be stated on
+    /// either surface, and no failure is set when that happens. Reachable with
+    /// everything nominally healthy: a `/gw/usage` outage skips the histories half whole
+    /// (`UsageStore.poll` will not measure a fleet whose membership nobody just
+    /// confirmed), so `historiesFailure` stays `nil` and neither stamp moves.
     ///
-    /// The state is reachable with everything nominally healthy: a `/gw/usage`
-    /// outage skips the histories half whole (`UsageStore.poll` will not measure
-    /// a fleet whose membership nobody just confirmed), so `historiesFailure`
-    /// stays `nil`, neither stamp moves, and both surfaces guarded on the blame
-    /// alone.
-    /// Two hours of that presented a two-hour-old figure as current — under a
-    /// caption that says "capacity" here, and as a red frame with nothing to
-    /// clear it up in the menu bar.
-    ///
-    /// Both surfaces are asked, because the point of the rule is that it is one
-    /// rule: the menu bar has no room for the footer's caveat, so a ceiling that
-    /// only this side applied would leave the colour up there outliving its
-    /// reading.
+    /// Both surfaces are asked because it is one rule: the menu bar has no room for the
+    /// footer's caveat, so a ceiling applied only here would leave its colour outliving
+    /// the reading.
     func testAFigureNobodyHasConfirmedForTwoIntervalsIsNotDrawnOnEitherSurface() {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
         let ceiling = UsagePopoverView.historyStaleSeconds
@@ -7319,17 +6122,12 @@ final class UsagePopoverLabelTests: XCTestCase {
         XCTAssertEqual(ceiling, 2 * UsageStore.historyIntervalSeconds)
     }
 
-    /// The headline's colour is the load's colour, and ink when the headline is
-    /// back to being the mean.
+    /// The headline's colour is the load's colour, and ink when the headline falls back
+    /// to the mean. Held here as a rule and in `UsagePopoverPaintTests` as a rendering:
+    /// this half alone would pass for a function the view no longer calls.
     ///
-    /// Held here as a rule and in `UsagePopoverPaintTests` as a rendering — this
-    /// half alone would answer correctly for a function the view had stopped
-    /// calling, which is exactly the state the figure's colour was in: replacing
-    /// the modifier with a flat `Color.primary` passed all 478 tests.
-    ///
-    /// The mean is never given `QuotaBar`'s scale, and that is asked for too: at
-    /// 92% of a window that scale is red, and a red figure over green account
-    /// rows would be two scales for one reading.
+    /// The mean never gets `QuotaBar`'s scale: at 92% of a window that scale is red, and
+    /// a red figure over green account rows would be two scales for one reading.
     func testTheHeadlineFigureTakesTheRatiosColourAndTheMeanTakesNone() {
         var snapshot = UsageSnapshot.empty
         snapshot.fleetSevenDayMean = 92
@@ -7357,32 +6155,21 @@ final class UsagePopoverLabelTests: XCTestCase {
         }
     }
 
-    /// The ramp as a rule: pinned to this project's own colours at its three
-    /// anchors, flat outside them, and falling all the way between.
+    /// The ramp as a rule: pinned to this project's colours at its three anchors, flat
+    /// outside them, and falling all the way between. The anchors are asked against the
+    /// system colours themselves (the family `QuotaBar.color(for:)` uses), so the test
+    /// goes stale if a system colour moves.
     ///
-    /// The anchors are asked against the system colours themselves rather than
-    /// against the four decimals the source writes them as. That is the claim
-    /// worth holding — the ramp is the family `QuotaBar.color(for:)` fills an
-    /// account's bar with, at its ends, rather than a palette invented for it —
-    /// and it is the claim that goes stale on its own if a system colour ever
-    /// moves.
+    /// What survives a plate is the hue, and that is asked of all three. Both plates move
+    /// the rest (light lowers brightness, dark raises it then lowers saturation,
+    /// `legible(_:on:)`). The green at capacity on the dark plate comes through untouched
+    /// (5.36:1 against a floor of 4.69) and is asked whole; the two ends are asked for
+    /// hue and for the values the floor leaves them at: on light, full saturation at
+    /// brightness 0.7955 (blue) and 0.7451 (red); on dark, full brightness at saturation
+    /// 0.6383 and 0.5228.
     ///
-    /// **What survives a plate is the hue, and that is what is asked of all
-    /// three.** Both plates move the rest — the light one lowers brightness, the
-    /// dark one raises it and then lowers saturation (`legible(_:on:)`) — so a
-    /// test that asked for the whole colour would be asking the floor not to
-    /// work. One anchor does come through untouched and it is asked for
-    /// everything: the green at capacity, on the dark plate, where the ramp's own
-    /// colour already measures 5.36 to 1 against a floor of 4.69. The two ends are
-    /// asked for the hue and then for the values the floor leaves them at,
-    /// measured 2026-08-18: on the light plate full saturation at brightness
-    /// 0.7955 (blue) and 0.7451 (red), on the dark plate full brightness at
-    /// saturation 0.6383 and 0.5228.
-    ///
-    /// The shape is held here as well as in the three renderings, and the
-    /// division is the usual one: a rule a view has stopped calling would answer
-    /// correctly for ever, and a rendering cannot say which of a thousand loads
-    /// were sampled.
+    /// The shape is held here as well as in the renderings: a rule a view stopped calling
+    /// answers correctly for ever, and a rendering samples only a few loads.
     func testTheRatioRampIsThisProjectsColoursStretchedBetweenThreeAnchors() throws {
         // Resolved inside the appearance the anchors were measured in, and that
         // is not ceremony: `Color.blue` answers hue 0.5869 in `aqua` and 0.5837
@@ -7433,15 +6220,9 @@ final class UsagePopoverLabelTests: XCTestCase {
                            "on \(plate) the \(name) anchor moved off its measured brightness")
         }
 
-        // The green anchor and the one step this pair still keeps are the same
-        // boundary, asked of the step rather than of the constant it reads: a
-        // menu bar that warned somewhere the ramp is not yet green would be two
-        // boundaries pretending to be one.
-        //
-        // The old form of this line compared the constant with `FleetLoad`'s own
-        // copy of it and became a tautology the day that type went, which is what
-        // a name-for-a-name rename does to an assertion. Asked through
-        // `isOverRefill` there is a rule on the other side of the `==`.
+        // The green anchor and the one step this pair still keeps are the same boundary,
+        // asked of the step (`isOverRefill`) rather than of the constant it reads: a menu
+        // bar warning where the ramp is not yet green would be two boundaries.
         let anchorRatio = UsagePopoverView.HeadlineRatio(
             percent: UsagePopoverView.greenRatioPercent, isLowerBound: false)
         XCTAssertTrue(anchorRatio.isOverRefill,
@@ -7457,14 +6238,10 @@ final class UsagePopoverLabelTests: XCTestCase {
             }
             assertRamp(hues, on: "the rule on \(plate)")
 
-            // And between the anchors the hue is *interpolated*, which is the
-            // whole of how the intermediate colours are arrived at: cyan is where
-            // blue and green meet halfway, yellow and orange are where green and
-            // red do. A table of hand-picked colours could satisfy every
-            // assertion above and still be a set of steps with the corners
-            // rounded off, so the line is asked at every load rather than at the
-            // samples — a quarter of a point of hue is a visible colour, and the
-            // tolerance is a hundredth of that.
+            // Between the anchors the hue is interpolated: cyan is where blue and green meet
+            // halfway, yellow and orange where green and red do. A table of hand-picked colours
+            // could pass every assertion above, so the line is asked at every load; a quarter of
+            // a point of hue is visible, and the tolerance is a hundredth of that.
             let cold = components(of: UsagePopoverView.ratioColor(
                 atPercent: UsagePopoverView.coldRatioPercent, on: plate))
             let green = components(of: UsagePopoverView.ratioColor(
@@ -7487,18 +6264,14 @@ final class UsagePopoverLabelTests: XCTestCase {
             }
         }
 
-        // **The plate never moves the hue**, which is the whole of what one
-        // reading drawn on two surfaces means. It does move the other two, and in
-        // opposite directions, so the pair is asked for the invariant rather than
-        // for equality of the colour.
+        // The plate never moves the hue, which is what one reading on two surfaces means. It
+        // moves the other two in opposite directions, so the pair is asked for the
+        // invariant rather than equality.
         //
-        // The light plate is asked for more than that: there the floor is met by
-        // darkening alone, and a floor that quietly desaturated the yellow band
-        // into khaki would be the very cure this replaced. On the dark plate
-        // desaturation is the only lever left once brightness is spent, and where
-        // it bites is measured rather than assumed — at or below 74.4% and at or
-        // above 124.9% on today's anchors, which is the cold end and the hot end
-        // and nothing in between.
+        // On the light plate the floor is met by darkening alone; desaturating the yellow
+        // band into khaki would be wrong there. On the dark plate desaturation is the only
+        // lever once brightness is spent, and it bites at or below 74.4% and at or above
+        // 124.9% on today's anchors: the two ends and nothing between.
         for percent in stride(from: 0.0, through: 200.0, by: 2.5) {
             let light = components(of: UsagePopoverView.ratioColor(atPercent: percent, on: .light))
             let dark = components(of: UsagePopoverView.ratioColor(atPercent: percent, on: .dark))
@@ -7519,33 +6292,18 @@ final class UsagePopoverLabelTests: XCTestCase {
         }
     }
 
-    /// The floor itself, as a rule: **on every plate** every colour on the ramp
-    /// reaches that plate's floor, and no colour is moved further than it has to
-    /// be.
+    /// The floor itself, as a rule: on every plate every colour on the ramp reaches that
+    /// plate's floor, and none is moved further than it has to be. The colour is left
+    /// alone until it is illegible and then moved exactly as far as the floor, so the
+    /// yellow at 115% is untouched on a dark plate and a darker yellow (not olive) on a
+    /// light one.
     ///
-    /// **This is the rule the review asked for and the reason the ceiling went.**
-    /// The ceiling clamped the ramp to the green anchor's own luminance from
-    /// 76.91% to 123.55% — three quarters of the moving part — and bought contrasts of
-    /// 1.55 to 1.62 to 1 doing it (2026-08-18, against white; the light plate this
-    /// machine actually has is 0.883, which is lower still). What replaces it
-    /// leaves the colour alone until it is *illegible* and then moves it exactly
-    /// as far as the floor, which is why the yellow at 115% survives untouched on
-    /// a dark plate and comes out a darker yellow rather than an olive on a light
-    /// one.
+    /// On the dark plate the adjustment lifts instead of darkening; the second half of
+    /// the test checks the ends are lifted as far as needed and no further, which keeps
+    /// the ramp a colour rather than a wash.
     ///
-    /// **The dark plate used to be exempt and that was the defect.** "Darkening
-    /// cannot raise contrast on a dark plate" is true, and the conclusion drawn
-    /// from it — leave the ramp raw there — left the cold end at 2.83 to 1 and the
-    /// hot end at 3.20 against a calm frame of 4.69. The direction of the
-    /// adjustment follows the plate now, so both ends are lifted instead: the
-    /// second half of this test is what says they were lifted *as far as needed
-    /// and no further*, which is the property that keeps the ramp a colour rather
-    /// than a wash.
-    ///
-    /// The contrast is worked out here rather than asked of the source: the
-    /// linearisation is the thing that was wrong, and a test that borrowed the
-    /// arithmetic under test would have agreed with it in gamma space just as
-    /// happily.
+    /// The contrast is worked out here rather than borrowed from the source, so the test
+    /// does not share the linearisation it is checking.
     func testTheRampMeetsItsContrastFloorOnEveryPlate() {
         for plate in [UsagePopoverView.RampBackground.light, .dark] {
             for percent in stride(from: 0.0, through: 200.0, by: 0.5) {
@@ -7578,21 +6336,14 @@ final class UsagePopoverLabelTests: XCTestCase {
         }
     }
 
-    /// The 115% colour, named by rendering rather than by adjective.
-    ///
-    /// `MenuBarIcon` and §4 both said "at 115% it is yellow" and neither had
-    /// rendered it: under the ceiling it came out `rgb(0.622, 0.678, 0.130)`,
-    /// which is olive. What it is now, measured 2026-08-18: on the dark plate the
-    /// ramp's own `rgb(0.827, 0.902, 0.173)`, a yellow with a green cast at hue
+    /// The 115% colour, named by rendering rather than by adjective. On the dark plate
+    /// it is the ramp's own `rgb(0.827, 0.902, 0.173)`, a yellow with a green cast at hue
     /// 66.2 degrees; on the light plate that colour darkened to the floor,
-    /// `rgb(0.381, 0.415, 0.079)` — the same hue, and dark, which is what a floor
-    /// on a light plate can only produce.
+    /// `rgb(0.381, 0.415, 0.079)`, the same hue and dark.
     ///
-    /// And the load the ramp is *orange* at is a third number, unmoved by either
-    /// plate: hue is interpolated straight from green to red, so it crosses 30
-    /// degrees at 123.61% and the first tenth of a point drawn at or past orange
-    /// is 123.7%. The ceiling never moved that and neither does the floor — what
-    /// the ceiling moved was how dark 115% was drawn.
+    /// The load the ramp turns orange at is unmoved by either plate: hue is interpolated
+    /// straight from green to red, so it crosses 30 degrees at 123.61%, and the first
+    /// tenth of a point at or past orange is 123.7%.
     func testWhatTheRampActuallyIsAtOneHundredAndFifteen() {
         let dark = srgb(of: UsagePopoverView.ratioColor(atPercent: 115, on: .dark))
         XCTAssertEqual(dark.red, 0.827, accuracy: 0.002)
@@ -7642,72 +6393,26 @@ final class UsagePopoverLabelTests: XCTestCase {
         return 0.2126 * srgb.redComponent + 0.7152 * srgb.greenComponent + 0.0722 * srgb.blueComponent
     }
 
-    /// The word this metric is called by inside the app is internal vocabulary
-    /// and appears in no string a person reads (§4). Asked of the strings on the
-    /// list below, which is every string these two surfaces write themselves.
+    /// The internal word for this metric appears in no string a person reads (§4).
+    /// Asked of the strings on the list below, which is every string these two surfaces
+    /// write themselves.
     ///
-    /// **The list is built by hand and cannot be built any other way.** A string
-    /// on screen is whatever some `Text`, `help` or `accessibilityLabel` was
-    /// handed, and there is no reading a SwiftUI body from a test: `some View` is
-    /// opaque, its children are not enumerable, and `ImageRenderer` gives back
-    /// pixels rather than words. So what is swept is the functions the views call,
-    /// and the wire from a view to its function is held by reading it — which is
-    /// the same wire, and the same argument, as `switchAppearance`'s. Two rules
-    /// follow, and they are the price of the arrangement: a new string on either
-    /// surface is covered only once it has been typed in here, and a string is
-    /// only reachable at all if it lives in a named function rather than as a
-    /// literal in a `@ViewBuilder`. `switchAccessibilityLabel` was a literal until
-    /// this sweep asked for it.
+    /// The list is built by hand because it cannot be built otherwise: `some View` is
+    /// opaque and `ImageRenderer` returns pixels. So the functions the views call are
+    /// swept, and the view-to-function wire is held by reading, as with
+    /// `switchAppearance`. Hence a new string is covered only once added here, and only
+    /// if it lives in a named function rather than as a literal in a `@ViewBuilder`.
     ///
-    /// **What is deliberately not swept, and why.** Three strings on this surface
-    /// carry words this app did not write and cannot reword: `switchNote`'s
-    /// `disabled_reason`, `switchBlame`'s transport failures, and `failureText`'s.
-    /// Each of those is swept for the frame this app puts around the text — the
-    /// word `off`, the separators, `as of` — and not for the text itself, which is
-    /// a question decided where the value is taken rather than where it is drawn:
-    /// the one gateway sentence that was a constant, the switch answer's
-    /// `warning`, is decoded and dropped instead of printed
-    /// (`SwitchResult.warning`), and the account labels beside them are names the
-    /// operator chose. Two literals stay in the view as well, the `5h` and `7d`
-    /// of `windowRow`'s titles: they are a digit and a unit, they are the argument
-    /// this function's own callers pass, and pulling them out would buy a sweep of
-    /// four characters that cannot hold a word.
+    /// Not swept: text this app did not write (`switchNote`'s `disabled_reason`,
+    /// `switchBlame`'s transport failures, `failureText`'s). Each is swept for the frame
+    /// around it (`off`, separators, `as of`). The switch answer's `warning` is decoded
+    /// and dropped (`SwitchResult.warning`), and account labels are the operator's. The
+    /// `5h` and `7d` of `windowRow`'s titles stay as literals: a digit and a unit cannot
+    /// hold a word.
     ///
-    /// **And a frame is only swept if the model built it.** Two of those frames are
-    /// written in `UsageHistoryModel` rather than in the view — `"status: \(error)"`
-    /// for a pass that could not ask and `"\(label): \(error)"` for a click that
-    /// would not go through — so handing this sweep a finished literal that looks
-    /// like one would be asking whether the test's own typing says the word. They
-    /// are produced below by running a refusing client through `load` and
-    /// `switchAccount`, which is where those strings are actually made.
-    ///
-    /// **Proved by mutation, in two sittings of 2026-09-06 — and the sitting, not
-    /// the suite size beside it, is what tells the two apart.** The first, on the
-    /// two entries the switch surface put on this list
-    /// (`switchAccessibilityLabel` and `switchNote`), was taken before
-    /// `testTheCountIsSettledByAPassOnceTheLastClickHasLanded` and
-    /// `testALoneClickIsSettledByItsOwnAnswer` existed, which is the whole of why
-    /// its counts read 668. Writing the word into `switchAccessibilityLabel`
-    /// reddens this test and nothing else of the 668 — that one is the whole proof
-    /// of the extraction, because as a literal in the view it was a string no test
-    /// could reach at all. Writing it into `switchNote`'s `off` reddens this one on
-    /// all three of that label's shapes and
-    /// `testASwitchedOffAccountNamesItsDeadlineAndItsReason` beside it, 2 of 668:
-    /// that test pins the wording, this one holds the rule the wording has to
-    /// satisfy, and a wording test is not one — it would go on passing over any
-    /// wording somebody chose to write down.
-    ///
-    /// The second sitting, later the same day and with that pair of settling tests
-    /// in, covers the two entries the headline and the model put on the list:
-    /// `spendRateCaption` and `"status: \(error)"`. The word written into
-    /// `spendRateCaption` reddens this test and nothing else — that caption is the
-    /// third of the headline's three, and it had no test of any kind on it before
-    /// this line. Written into the model's `"status: \(error)"` frame it reddens
-    /// this one and
-    /// `testTheReasonTheSwitchesWentInertIsDrawnWithNoAccountsToDrawItUnder`, 2 of
-    /// 670, the second on both its strings — that one pins the frame's wording where
-    /// it is drawn, this one holds the rule, and the pair divides the same way as
-    /// `switchNote`'s above.
+    /// Two frames are built in `UsageHistoryModel` (`"status: \(error)"` and
+    /// `"\(label): \(error)"`), so they are produced below by running a refusing client
+    /// through `load` and `switchAccount` rather than typed as literals.
     func testNoStringOnScreenNamesTheMetricByItsInternalWord() async {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
         var strings = [UsagePopoverView.headlineCaption,
@@ -7741,12 +6446,8 @@ final class UsagePopoverLabelTests: XCTestCase {
         // are `UsageError` descriptions, which this app does write.
         strings.append(UsagePopoverView.switchBlame(["acc2": "acc2: HTTP 500",
                                                      "main": "main: unreachable: timed out"]) ?? "")
-        // The orange line, and this is the whole of it: `applyRoutable` writes
-        // this string and nothing else, so the sweep covers the surface again.
-        // The gateway's own sentence used to reach that line through a click and
-        // was let through here by a comment — a rule revoked in a comment while
-        // §4 went on stating it. It is decoded and dropped now
-        // (`SwitchResult.warning`).
+        // The orange line: `applyRoutable` writes this string and nothing else. The
+        // gateway's own sentence is decoded and dropped (`SwitchResult.warning`).
         strings.append(UsageHistoryModel.noRouteWarning)
         // The two sections that can be empty, in all three states each: not asked
         // yet, asked and refused, asked and answered with nothing.
@@ -7820,15 +6521,9 @@ final class UsagePopoverLabelTests: XCTestCase {
         }
     }
 
-    /// The reset time always names its smallest unit, and never leaves a floor
-    /// standing on its own.
-    ///
-    /// A bare unit is a floor and therefore a range: `in 1d` covers 24 hours to
-    /// 48, `in 1h` covers 60 minutes to 119. Both were caught on the live screen —
-    /// "19 hours? 26?" of the days, and then `5h … in 1h` in the same popover, "an
-    /// hour and a half? five minutes?". So the lower unit is printed beside the
-    /// higher one and printed even when it is zero, because a bare `in 4h` is
-    /// exactly the ambiguity being removed.
+    /// The reset time always names its smallest unit, and never leaves a floor standing
+    /// on its own. A bare unit is a range: `in 1d` covers 24 to 48 hours, `in 1h` 60 to
+    /// 119 minutes. So the lower unit is printed beside the higher one, even when zero.
     func testTheResetTimeAlwaysNamesItsSmallestUnit() {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
         func label(_ seconds: TimeInterval) -> String {
@@ -7866,16 +6561,14 @@ final class UsagePopoverLabelTests: XCTestCase {
         XCTAssertEqual(UsagePopoverView.resetLabel(nil, now: now), "")
     }
 
-    /// One account's switch, built the only way there is: `AccountSwitch` decodes
-    /// and does nothing else, so a state in a test is a body from the gateway.
+    /// One account's switch, built the only way there is: `AccountSwitch` only decodes,
+    /// so a state in a test is a gateway body.
     ///
-    /// `eligible` is written into every body even though this type has no field
-    /// for it, and that is the point: it is the field next door, it is what the
-    /// gateway folds a quota cool-down and a token backoff into, and a fixture
-    /// that leaves it out cannot tell a reader of `disabled` from a reader of it.
-    /// It defaults to the opposite of `disabled` — the ordinary fleet, where the
-    /// two agree — and `main` on the morning of 2026-09-06 is what it looks like
-    /// when they do not: `rotationState(eligible: false)`.
+    /// `eligible` is written into every body although this type has no field for it: it
+    /// is the field next door, where the gateway folds a quota cool-down and a token
+    /// backoff, and a fixture without it cannot tell a reader of `disabled` from a reader
+    /// of `eligible`. It defaults to the opposite of `disabled`;
+    /// `rotationState(eligible: false)` is the case where they disagree.
     static func rotationState(disabled: Bool = false,
                               eligible: Bool? = nil,
                               until: Int? = nil,
@@ -7887,19 +6580,14 @@ final class UsagePopoverLabelTests: XCTestCase {
             """, as: AccountSwitch.self)
     }
 
-    /// The note beside a switched-off account's name says the two things the
-    /// gateway can add to "off", and says nothing where there is nothing to say.
+    /// The note beside a switched-off account's name says the two things the gateway can
+    /// add to "off", and nothing where there is nothing to say. The deadline is drawn,
+    /// never set: this app's switch sends no body ("until somebody puts it back"), so a
+    /// deadline came from the command line or a gateway rule. It tells an account that
+    /// comes back by itself from one that waits for a person.
     ///
-    /// The deadline is drawn and never set: this app's own switch sends no body,
-    /// which is the gateway's "until somebody puts it back", so a moment here can
-    /// only have come from somewhere else — the command line, or a rule of the
-    /// gateway's own. Showing it is the difference between an account that comes
-    /// back by itself and one that waits for a person.
-    ///
-    /// Written by `resetLabel`, the popover's one countdown, so the wording is
-    /// the wording of every other moment on this surface — and it goes in
-    /// brackets because that countdown has two shapes and the bare one (`resets
-    /// now`) would otherwise run straight into the word before it.
+    /// Written by `resetLabel`, the popover's one countdown, and in brackets because the
+    /// bare shape (`resets now`) would run into the word before it.
     func testASwitchedOffAccountNamesItsDeadlineAndItsReason() throws {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
         func note(_ state: AccountSwitch) -> String { UsagePopoverView.switchNote(state, now: now) }
@@ -7953,19 +6641,11 @@ final class UsagePopoverLabelTests: XCTestCase {
                        "acc2: refused; main: down")
     }
 
-    /// And the box itself draws those same three states: unknown is **not**
-    /// "in the rotation", and a box this app cannot fill in cannot be clicked
-    /// either.
-    ///
-    /// Asked of the function rather than of the picture because the picture
-    /// cannot answer: `ImageRenderer` draws this checkbox as a blank plate —
-    /// ticked, clear, inert and inert-and-ticked all came out as the same 784
-    /// inked pixels, 784 of them chromatic (measured 2026-09-06, scale 2.0, a
-    /// 40×24 frame). So the tick has no ink of its own to compare, "two values
-    /// of the same field" has nothing to widen, and `?? true` in place of
-    /// `?? false` was invisible to every test on this surface until this one.
-    /// What is still held by reading and not by a test is the one line that
-    /// wires the view to this function.
+    /// The box itself draws those same three states: unknown is not "in the rotation",
+    /// and a box this app cannot fill in cannot be clicked. Asked of the function because
+    /// `ImageRenderer` draws this checkbox as a blank plate, the same 784 inked pixels in
+    /// every state. What is held by reading rather than a test is the one line that wires
+    /// the view to this function.
     func testTheBoxIsClearUntilTheGatewaySaysOtherwiseAndInertUntilItAnswersAtAll() throws {
         func look(_ state: AccountSwitch?, busy: Bool = false) -> (ticked: Bool, usable: Bool) {
             UsagePopoverView.switchAppearance(state, busy: busy)
@@ -7982,13 +6662,10 @@ final class UsagePopoverLabelTests: XCTestCase {
         XCTAssertTrue(look(try Self.rotationState(disabled: true)).usable,
                       "switched off is a state to click out of, not a reason to freeze")
 
-        // The live `main` of the morning of 2026-09-06: nobody switched it off and
-        // the gateway will not route to it all the same. The box follows the
-        // operator's switch, because that is the thing a click here can change —
-        // bound to `eligible` it would clear itself when a quota window filled and
-        // then send an `enable` that changes nothing visible. It is the one shape
-        // in which the two flags disagree, so it is the only one that can tell a
-        // reader of either apart.
+        // A live shape: nobody switched `main` off and the gateway still will not route to
+        // it. The box follows the operator's switch, the thing a click can change; bound to
+        // `eligible` it would clear when a quota window filled and then send an `enable`
+        // that changes nothing. The only shape in which the two flags disagree.
         XCTAssertTrue(look(try Self.rotationState(eligible: false)).ticked,
                       "a quota cool-down was drawn as an operator having switched the account off")
         XCTAssertTrue(look(try Self.rotationState(eligible: false)).usable,
@@ -8001,26 +6678,16 @@ final class UsagePopoverLabelTests: XCTestCase {
         XCTAssertFalse(look(nil, busy: true).usable)
     }
 
-    /// And no input at all writes a floor on its own, a unit that overflowed, or a
-    /// leading zero: swept second by second from the reset itself out to two hours
-    /// and then coarsely, a step of 61 seconds, out to forty days.
+    /// No input writes a floor on its own, an overflowed unit, or a leading zero: swept
+    /// second by second from the reset out to two hours, then in 61-second steps out to
+    /// forty days.
     ///
-    /// The dense window is where the seams are — `resets now`, the minutes on their
-    /// own, the carry into `in 1h 0m`, the whole of the first hour written both
-    /// ways — and it starts at zero so that `resets now` is a shape the sweep
-    /// actually reaches. Past two hours nothing changes shape until the day, so the
-    /// coarse step carries the property there instead: second by second all the way
-    /// to three days was 311 thousand calls and the slowest test in the suite, for
-    /// a stretch where every second reads like the one before it. The step is 61
-    /// rather than 60 so that it does not land on the same minute boundary over and
-    /// over.
-    ///
-    /// The assertions above are the seams the rule was written around; this is what
-    /// says there are no others. The defect being removed was not at a seam at all:
-    /// `in 1h` stood for everything from 3541 seconds to 7199 of them, and the old
-    /// test asserted it at two of those points *on purpose*. More boundaries do not
-    /// catch a shape nobody questioned, so the shape is what gets swept — four are
-    /// allowed, and `in Nh` on its own is the shape that was wrong.
+    /// The dense window holds the seams (`resets now`, minutes alone, the carry into
+    /// `in 1h 0m`, the first hour both ways) and starts at zero so `resets now` is
+    /// reached. Past two hours nothing changes shape until the day, so a coarse step
+    /// suffices; 61 rather than 60 so it does not keep landing on one minute boundary.
+    /// The assertions above cover the known seams; this sweep checks the shape
+    /// everywhere else.
     func testNoResetTimeIsAFloorOnItsOwn() {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
         // The label with every figure replaced by `N`: `in 1h 5m` and `in 400h 5m`
@@ -8062,27 +6729,14 @@ final class UsagePopoverLabelTests: XCTestCase {
                        + "leading zero, first of them \(wrong.prefix(3).joined(separator: ", "))")
     }
 
-    /// What `resetLabel` writes is drawn whole in its slot.
+    /// What `resetLabel` writes is drawn whole in its slot. Measured, because a truncated
+    /// `in 5d 0h` reads an hour count as a day count. Two renderings of the same string,
+    /// one in the row's slot and one unconstrained: equal ink means nothing was cut.
     ///
-    /// Measured rather than asserted: a claim about layout with no rendering
-    /// behind it is a guess (§4), and this one has teeth — a truncated `in 5d 0h`
-    /// is an hour count reading as a day count, the very defect the hours were
-    /// added for. Two renderings of the same string, one in the slot the row gives
-    /// it and one with no width at all: equal ink means nothing was cut.
-    ///
-    /// Not "the longest string the function can produce", which is what this said
-    /// while `in 30d 23h` stood at the head of the list: the 30 days are the
-    /// chart's widest period and cap nothing here, and `resetLabel` prints as many
-    /// days as the gateway names. Hence the last probe — a reset 56 years out,
-    /// which is the same call and still inside the slot.
-    ///
-    /// `in 23h 59m` and `in 20h 44m` are on the list because the minutes beside the
-    /// hours are new (§4): the widest string a plausible reset can produce is no
-    /// longer a day count, and a slot measured only against day counts would say
-    /// nothing about the shape that now fills every row under a day. Two of them
-    /// and not one, because this label has no `monospacedDigit` and the width is
-    /// the digits' own: over all 1380 strings of the shape the widest is not the
-    /// latest hour but `in 20h 44m` at 53.75 pt, against `in 23h 59m`'s 53.25.
+    /// `resetLabel` prints as many days as the gateway names, so the last probe is a
+    /// reset 56 years out. `in 23h 59m` and `in 20h 44m` are both listed because the
+    /// label has no `monospacedDigit`: over all 1380 strings of that shape the widest is
+    /// `in 20h 44m` at 53.75 pt, against `in 23h 59m`'s 53.25.
     func testTheResetTimeFitsItsSlotWhole() throws {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
         XCTAssertEqual(UsagePopoverView.resetLabel(now.addingTimeInterval(1_786_800_000), now: now),
@@ -8223,20 +6877,12 @@ final class UsagePopoverLabelTests: XCTestCase {
                        "one of the three halves went quiet and the footer said nothing at all")
     }
 
-    /// The burn ratio is never dated by this footer, and the age it prints is
-    /// the age of what is drawn.
+    /// The burn ratio is never dated by this footer, and the age it prints is the age of
+    /// what is drawn. A ratio older than `historyStaleSeconds` is not shown
+    /// (`historiesAreFresh`), so there is never a ratio on screen to date.
     ///
-    /// This test asserted the opposite, and it enshrined the defect: with a quota
-    /// 20 s old and the histories half failing it expected `as of 5m ago`, the age
-    /// of a histories stamp — over a popover where the same failure had already
-    /// taken the ratio off the screen (`historiesAreFresh`), so every drawn value
-    /// was seconds old and the line overstated them by as much as the process had
-    /// been running. What the fold was reaching for is now impossible instead of
-    /// wrong: a ratio older than `historyStaleSeconds` is not shown, so a ratio
-    /// worth dating is never on screen to date.
-    ///
-    /// The failure still breaks the silence — but over the halves that *are*
-    /// drawn, which is what the second half of this test holds.
+    /// The failure still breaks the silence, over the halves that are drawn, which the
+    /// second half of this test holds.
     func testTheFooterDatesWhatIsDrawnAndTheRatioIsNotIt() {
         let now = Date(timeIntervalSince1970: 1_786_800_000)
         func label(quota: TimeInterval, historiesFailed: Bool = false) -> String? {
@@ -8249,9 +6895,8 @@ final class UsagePopoverLabelTests: XCTestCase {
                                             historiesFailed: historiesFailed,
                                             now: now)
         }
-        // The state that used to print an unbounded overstatement: the histories
-        // half has been failing for two hours, the quota and the chart are 20 s
-        // old, and the only figures on screen are those 20 s old ones.
+        // The histories half has been failing for two hours, the quota and the chart are
+        // 20 s old, and those are the only figures on screen.
         XCTAssertEqual(label(quota: 20, historiesFailed: true), "as of less than a minute ago",
                        "the footer dated the screen by a figure the same failure had removed")
         // The stale-quota case is untouched: the age of a screen is the age of
@@ -8297,17 +6942,10 @@ final class UsagePopoverLabelTests: XCTestCase {
                        "The gateway named no accounts")
     }
 
-    /// The weekly quota is this surface's alone since 2026-08-24, and it is
-    /// rounded in one place (`UsageSnapshot.fleetSevenDayPercent`).
-    ///
-    /// The menu bar drew the same figure until then, under a colour that meant
-    /// something else, and the pair of them needed a rule each: the icon dropped
-    /// a figure whose last pass had failed, because up there is no room to say
-    /// "as of an hour ago". Only the keeping half is left. The popover keeps a
-    /// stale quota because the footer under it gives the age, and because the
-    /// account rows below go on showing their stored percentages — gated the same
-    /// way, the headline was a dash over live numbers, and the dash was the false
-    /// statement of the two.
+    /// The weekly quota is this surface's alone, rounded in one place
+    /// (`UsageSnapshot.fleetSevenDayPercent`). The popover keeps a stale quota because
+    /// the footer gives its age and the account rows below keep showing their stored
+    /// percentages; a dash over live numbers would be the false statement.
     func testTheWeeklyQuotaIsThisSurfacesAloneAndSurvivesAFailedPass() throws {
         var snapshot = UsageSnapshot.empty
         snapshot.fleetSevenDayMean = 58.667
@@ -8463,13 +7101,9 @@ final class UsagePopoverLabelTests: XCTestCase {
 
 }
 
-/// The popover as pixels. Three of its rules are about colour and about what is
-/// drawn at all, and no pure function can be asked any of them.
-///
-/// Each of the three used to hold nothing: removing the colour scale, keying the
-/// dots off the wrong list and drawing the footer's divider unconditionally all
-/// left the suite green. The tests below fail on each, which is checked by making
-/// each change.
+/// The popover as pixels. Three of its rules are about colour and about what is drawn
+/// at all (the colour scale, dots keyed off the poll's list, the footer's divider),
+/// and no pure function can be asked any of them.
 @MainActor
 final class UsagePopoverPaintTests: XCTestCase {
 
@@ -8637,34 +7271,20 @@ final class UsagePopoverPaintTests: XCTestCase {
         return found
     }
 
-    /// Whether a patch is exactly the size of a frame the view asked for.
-    ///
-    /// The size comes from the view, and that is the half that carries the weight:
-    /// a copy of the number here is what failed both colour tests with "the
-    /// popover drew 0 dots" when the dot went from 7 points to 8 — pure
-    /// decoration, and a message about the palette. Asked of the view's own
-    /// constant, plain equality survives that change: measured, a whole number of
-    /// points is a whole number of pixels at this scale, 16 for 8 as 14 for 7.
-    ///
-    /// A pixel of slack stood here for the sample of the bold line, which was 2.5
-    /// points tall and therefore not a whole number of pixels at every scale. The
-    /// sample is gone (§4) and the slack went with it — checked by mutation, the
-    /// class is green with equality — because the one size still asked for is a
-    /// whole number of points. A fractional one would need the slack back, and
-    /// would announce itself as "drew 0 dots".
+    /// Whether a patch is exactly the size of a frame the view asked for. The size comes
+    /// from the view's own constant, not a copy, so changing the dot size does not fail
+    /// the colour tests with "drew 0 dots". Plain equality works because a whole number
+    /// of points is a whole number of pixels at this scale (16 for 8, 14 for 7); a
+    /// fractional size would need slack.
     private func isSized(_ blob: Blob, _ size: CGSize, in canvas: Canvas) -> Bool {
         Double(blob.width) == Double(size.width) * canvas.scale
             && Double(blob.height) == Double(size.height) * canvas.scale
     }
 
-    /// The account dots, in the order they are drawn down the popover.
-    ///
-    /// Found as patches rather than at coordinates worked out from the layout: a
-    /// dot is a `Circle` of `accountDotSize` points filled at full strength, and
-    /// nothing else in the picture is both. The one other opaque colour a
-    /// rendering of this view has in it is the segmented picker's background,
-    /// which comes out as a single patch 292 by 22 points — sorted out by size and
-    /// by nothing finer. The size is the view's own constant, not a copy of it.
+    /// The account dots, in drawing order. Found as patches rather than at coordinates
+    /// from the layout: a dot is a `Circle` of `accountDotSize` points at full strength,
+    /// and nothing else is both. The only other opaque colour is the segmented picker's
+    /// background, one 292 by 22 point patch, excluded by size.
     private func dots(in canvas: Canvas) -> [Blob] {
         let side = UsagePopoverView.accountDotSize
         return blobs(in: canvas) { isChromatic($0) && $0.alpha > 0.9 }
@@ -8672,34 +7292,20 @@ final class UsagePopoverPaintTests: XCTestCase {
             .sorted { $0.box.minY < $1.box.minY }
     }
 
-    /// The hues the account lines are drawn in, one per line.
+    /// The hues the account lines are drawn in, one per line. Read only inside the
+    /// chart's rows: outside the plot the popover draws other hues, including the
+    /// footer's orange warning symbol (drawn exactly when an account failed its history
+    /// request, a fixture below) and the rims of the quota bars. Inside the band the
+    /// lines are alone.
     ///
-    /// Read inside the chart's own rows, and that is the whole difficulty here:
-    /// the popover draws hues outside the plot, and one of them is the very hue a
-    /// test below asserts is *not* among the lines. Measured over the whole picture
-    /// instead, the orange bucket carries 50 px of the footer's warning symbol —
-    /// four times under the threshold, but the symbol is drawn exactly when an
-    /// account failed its history request, which is that test's own fixture. And
-    /// with the accounts' readings known, the ordinary state of a live popover, the
-    /// rims of the bars a reading fills take the same bucket to 258 px, which is
-    /// over it. Inside the band the lines are alone: 1073 and 1072 px against
-    /// nothing else at all. The dots' rims are outside it too, so nothing has to be
-    /// cut out by position any more.
+    /// The upper bound on alpha excludes the segmented picker's background, which is
+    /// inside these rows, opaque and chromatic; an account line carries `accountOpacity`
+    /// and cannot reach that band.
     ///
-    /// The upper bound on alpha stays, and it is not about the dots: the segmented
-    /// picker's background is inside these rows, opaque, and chromatic enough to
-    /// count — 24982 px of it in one group, which is a line the chart never drew.
-    /// An account's line carries `accountOpacity` and cannot reach that band.
-    ///
-    /// The hues are grouped by proximity rather than dropped into a fixed grid of
-    /// buckets, and that is not tidiness either: one line's antialiased pixels
-    /// spread by under 0.01 while the palette's own hues are 0.2 apart, so a grid
-    /// boundary landing inside that spread reports one line as two. It did — in
-    /// dark appearance the blue line sits at 0.5837 and a boundary of the grid was
-    /// at 0.58333, which had `lines.count` come out 3 for two accounts and a
-    /// message about the palette. Grouped by proximity, the same rendering answers
-    /// 2. What is left is thresholded by area, a line being four figures of pixels
-    /// against a stray edge's two.
+    /// Hues are grouped by proximity, not a fixed grid: one line's antialiased pixels
+    /// spread by under 0.01 while the palette's hues are 0.2 apart, so a grid boundary
+    /// inside that spread would report one line as two. What is left is thresholded by
+    /// area, a line being thousands of pixels against a stray edge's few.
     private func lineHues(in canvas: Canvas) throws -> [Double] {
         var hues: [Double] = []
         for y in try plotRows(in: canvas) {
@@ -8737,26 +7343,16 @@ final class UsagePopoverPaintTests: XCTestCase {
         return top..<(rules.count >= 3 ? rules[2] : canvas.height)
     }
 
-    /// The rules across the popover, top to bottom, as rows of the bitmap.
+    /// The rules across the popover, top to bottom, as rows of the bitmap. A `Divider`
+    /// is the only thing one point tall running from padding edge to padding edge, so it
+    /// is measured against the content width, not the picture's; against the picture the
+    /// threshold would sit close to the working point and move with the inset.
     ///
-    /// A `Divider` is the only thing here that is one point tall and runs from one
-    /// padding edge to the other — so it is measured against the width of the
-    /// *content*, not of the picture. Against the picture no rule can ever reach
-    /// more than `(width - 2 * padding) / width`, which is 0.9125 at today's
-    /// figures: a threshold of 0.9 there sat 1.25% from the working point and
-    /// moved with every change of the inset. `padding` 18 brings it to 0.8875 and
-    /// `width` 240 to 0.8833 — checked by making both changes over the old
-    /// threshold, which found no rules at all and failed the footer's test below
-    /// with a message about the footer.
-    ///
-    /// Against the content a rule is 1.000 whatever the inset, and both thresholds
-    /// still sit between the figures: the headline's bar is the same 1.000 but
-    /// 8 pt tall, the segmented picker 22, and the chart's grid lines are thin but
-    /// start after the y axis labels, which leaves them at 0.918…0.949 of the
-    /// content (0.916…0.947 at `padding` 18). The closest anything came to 0.98
-    /// across the three widths measured is that bar's own end row — 0.976 at
-    /// `width` 240, a shorter row losing more of itself to the capsule's curve —
-    /// and it sits inside an 8 pt run, so the height filter has it either way.
+    /// Against the content a rule is 1.000 whatever the inset, and the thresholds sit
+    /// between the figures: the headline bar is also 1.000 but 8 pt tall, the segmented
+    /// picker 22, and the grid lines start after the y axis labels (0.918…0.949 of the
+    /// content). The closest to 0.98 is that bar's end row (0.976 at `width` 240), inside
+    /// an 8 pt run, so the height filter excludes it.
     private func rules(in canvas: Canvas) -> [Int] {
         let content = Double(canvas.width) - 2 * Double(UsagePopoverView.padding) * canvas.scale
         var runs: [(first: Int, last: Int)] = []
@@ -8775,15 +7371,11 @@ final class UsagePopoverPaintTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    /// A landed quota poll naming these accounts, with no reading for either of
-    /// anybody's windows.
-    ///
-    /// No readings on purpose. A known utilisation fills the row's `QuotaBar` in
-    /// green, orange or red — three more hues in a picture whose whole subject is
-    /// which hue went where — while an unknown one leaves the bar as its track,
-    /// which is ink at 12%. Same for the headline: with no fleet mean there is a
-    /// dash over an empty track, and every colour left in the rendering belongs
-    /// either to a dot or to a line.
+    /// A landed quota poll naming these accounts, with no reading for either window. A
+    /// known utilisation fills the row's `QuotaBar` in green, orange or red, three more
+    /// hues in a picture about which hue went where; an unknown one leaves the bar as its
+    /// 12% track. The headline likewise shows a dash over an empty track, so every colour
+    /// left belongs to a dot or a line.
     private func snapshot(labels: [String], fetched: Date = Date()) throws -> UsageSnapshot {
         let body = labels.map {
             "\"\($0)\": {\"five_hour\": {\"known\": false}, \"seven_day\": {\"known\": false}}"
@@ -8812,21 +7404,16 @@ final class UsagePopoverPaintTests: XCTestCase {
         return value
     }
 
-    /// What the lead states in every rendering here: the live fleet's own burn
-    /// against its refill at 2026-09-05 02:50Z, which the surface writes `113%` over
-    /// `of the weekly refill rate`.
+    /// What the lead states in every rendering here: a live burn against refill, which
+    /// the surface writes `113%` over `of the weekly refill rate`.
     private static let leadPercent = 112.8
-    /// And the supporting rate under it, from 2026-08-24: `23.8M/h`.
+    /// And the supporting rate under it: `23.8M/h`.
     private static let currentRate = 23_800_000.0
 
-    /// A store whose quota poll has already landed, naming these accounts.
-    ///
-    /// Seeded through the cache, which is where a store takes its first published
-    /// value from. `UsageStore.apply` is private and stays that way: it releases
-    /// the `pollInFlight` latch as its third act, so a caller from outside the
-    /// pass could let two passes run at once. The only other way a snapshot
-    /// reaches the type is a gateway answering over the network, which is a live
-    /// network for a question about which pixel is which colour.
+    /// A store whose quota poll has already landed, naming these accounts. Seeded through
+    /// the cache, where a store takes its first published value from. `UsageStore.apply`
+    /// stays private: it releases the `pollInFlight` latch, so an outside caller could
+    /// let two passes run at once. The only other route is a live gateway.
     private func store(named labels: [String], fetched: Date = Date()) throws -> UsageStore {
         let cache = UsageCache()
         cache.store(try snapshot(labels: labels, fetched: fetched))
@@ -8856,32 +7443,16 @@ final class UsagePopoverPaintTests: XCTestCase {
 
     // MARK: - The headline's caption on one line
 
-    /// The caption under the big figure is drawn on one line, whatever the figure
-    /// says.
+    /// The caption under the big figure is drawn on one line, whatever the figure says.
+    /// Beside the figure it fitted only while the figure was short (205.5 pt of ink on a
+    /// 292 pt line; `100%` leaves 199.5), so it sits on its own row.
     ///
-    /// Which is what the headline was rebuilt for (§4). Beside the figure the
-    /// caption fitted only while the figure was short: measured, it is 205.5 pt of
-    /// ink on a 292 pt line, `52%` leaves it 219 pt and `100%` leaves 199.5, so the
-    /// wide figure wrapped it — and a wrapped caption is the complaint itself,
-    /// three digits being exactly the reading somebody opens this popover for. On
-    /// its own row it has the whole width.
-    ///
-    /// Measured the way the reset slot is (§4): the same string drawn twice, once
-    /// on its own and once where it lives. The top of the popover is three lines of
-    /// ink — the figure, the caption, the bar — and the middle one has to be as wide
-    /// as the caption drawn free, which is the caption having a line to itself and
-    /// filling it.
-    ///
-    /// The *place* is half the measurement, and it is not spare rigour: putting the
-    /// caption back beside the figure and asking only "is there a band this wide"
-    /// passes at 100%, where the figure and the first wrapped line come out as one
-    /// band of 205.50 pt against the caption's own 205.5 — the same figure to the
-    /// pixel, by coincidence. Held as the middle of three, that layout fails at both
-    /// figures: 239.00, 292.00, 292.00 at the dash, and 205.50, 84.50, 292.00 at
-    /// 100%, where the second band is the tail of the wrapped caption.
-    ///
-    /// Over the widest figure and over none, because the two are what the layout
-    /// has to hold at once.
+    /// Measured like the reset slot (§4): the same string drawn alone and in place. The
+    /// top of the popover is three lines of ink (figure, caption, bar), and the middle
+    /// one must be as wide as the free caption. The position matters: with the caption
+    /// back beside the figure, at 100% the figure plus the first wrapped line happen to
+    /// form one band of exactly 205.50 pt, so only asking "is there a band this wide"
+    /// would pass. Asked over the widest figure and over none.
     func testTheHeadlineCaptionIsDrawnOnOneLine() async throws {
         let content = Double(UsagePopoverView.width - 2 * UsagePopoverView.padding)
 
@@ -8942,26 +7513,15 @@ final class UsagePopoverPaintTests: XCTestCase {
         }
     }
 
-    /// The lead bar is the ramp, drawn: cold blue below 70, green at capacity,
-    /// red at 130 and nothing new past it.
+    /// The lead bar is the ramp, drawn: cold blue below 70, green at capacity, red at 130
+    /// and nothing new past it. Read back off the drawing on the popover, the dark
+    /// surface with room to read a scale.
     ///
-    /// The popover is the third surface the ramp has to work on — a dark one, and
-    /// the one with room to read a scale off — and this is where it is read back
-    /// off the drawing rather than asked of the rule.
-    ///
-    /// The bar is found by its height and nothing finer, which is what makes the
-    /// question answerable at all: the picture's largest patch of opaque colour
-    /// is the segmented picker's background at 292 by 22 points, four times the
-    /// area of a full headline bar, and the account dots are 7 by 7. Exactly
-    /// `headlineBarHeight` tall there is one thing — the supporting reading's bar
-    /// under it is `supportingBarHeight`, and in this fixture there is no mean
-    /// for it to fill anyway.
-    ///
-    /// Green *at* capacity rather than red is the correction itself: the pair of
-    /// loads a thousandth of a point either side of 100 used to come out green
-    /// and red, and they are now one colour to three decimals of hue — which is
-    /// asserted, because "the ramp is continuous" is exactly the claim a step
-    /// would fail.
+    /// The bar is found by height alone: the largest opaque patch is the segmented
+    /// picker at 292 by 22 points and the dots are 7 by 7; only one thing is exactly
+    /// `headlineBarHeight` tall (the supporting bar is `supportingBarHeight`, and empty
+    /// here). Loads a thousandth of a point either side of 100 are one colour to three
+    /// decimals of hue, asserted because a step would fail it.
     func testTheHeadlineBarIsARampAndNotAStep() async throws {
         var drawn: [Double] = []
         for percent in rampSamples {
@@ -8975,33 +7535,23 @@ final class UsagePopoverPaintTests: XCTestCase {
         }
         assertRamp(drawn, on: "the popover")
 
-        // And the boundary that used to be here is gone: either side of capacity
-        // is one colour now.
+        // Either side of capacity is one colour.
         let boundary = UsagePopoverView.greenRatioPercent
         let under = try await headlineBarHue(ratioPercent: boundary - 0.001)
         let at = try await headlineBarHue(ratioPercent: boundary)
         XCTAssertEqual(under, at, accuracy: 0.001, "the bar still steps at capacity")
     }
 
-    /// The popover's half of the legibility evidence: the lead figure and the
-    /// lead bar, measured off the drawing on both plates at nine loads.
+    /// The popover's half of the legibility evidence: the lead figure and bar, measured
+    /// off the drawing on both plates at nine loads; the menu bar's test is the other
+    /// half. This half adds the plumbing: the popover asks the environment which plate it
+    /// is on, and a view that stopped asking would paint the light plate's darkened
+    /// colours on a dark popover while passing every hue assertion. So the whole colour
+    /// is compared.
     ///
-    /// The menu bar's own test is the other half, and the two together are what
-    /// "the ramp is legible where it is drawn" means — one rule, two surfaces,
-    /// two plates each. What this half adds is the **plumbing**: the popover asks
-    /// the environment which plate it is on, and a view that had stopped asking
-    /// would paint the light plate's darkened colours onto a dark popover and
-    /// pass every hue assertion in this class while doing it. So the whole colour
-    /// is compared, not the hue.
-    ///
-    /// The floor is asked on **both** plates, and the guard that used to ask it
-    /// on the light one alone went with the menu bar's — the same hole, on the
-    /// same rule, on the other surface. The middle of the ramp is still untouched
-    /// on the dark plate and that is asserted here as a rendering rather than
-    /// only as a rule: the yellow at 115% comes back `rgb(0.827, 0.902, 0.173)`,
-    /// which is the ramp's own — the colour the old ceiling turned into
-    /// `rgb(0.622, 0.678, 0.130)` on every plate, including the dark ones where
-    /// nothing needed it.
+    /// The floor is asked on both plates. The middle of the ramp stays untouched on the
+    /// dark plate, asserted as a rendering: the yellow at 115% comes back
+    /// `rgb(0.827, 0.902, 0.173)`, the ramp's own.
     func testTheHeadlineIsLegibleOnWhicheverPlateItIsDrawnOn() async throws {
         var table = ["", "plate  load  mark    rgb as drawn            contrast"]
         for scheme in [ColorScheme.light, .dark] {
@@ -9048,18 +7598,11 @@ final class UsagePopoverPaintTests: XCTestCase {
         return Double(hue)
     }
 
-    /// **The lead bar is the burn against the refill, and it stops at the refill
-    /// rate.**
-    ///
-    /// A scale stretched to fit three times the refill would make the refill
-    /// itself — the point the whole reading turns on — a mark a third of the way
-    /// along. So the bar is read off the drawing at half the refill rate, at
-    /// exactly it and at three times it, and the last two have to be the same
-    /// full bar.
-    ///
-    /// Measured rather than reasoned about, because the fill is a claim about
-    /// pixels: the ratio no longer clamps itself, so what holds this is the
-    /// drawing and nothing else.
+    /// The lead bar is the burn against the refill, and it stops at the refill rate. A
+    /// scale stretched to three times the refill would put the refill, the point the
+    /// reading turns on, a third of the way along. Read off the drawing at half, exactly,
+    /// and three times the refill; the last two must be the same full bar. The ratio does
+    /// not clamp itself, so the drawing is what holds this.
     func testTheLeadBarFillsWithTheRatioAndStopsAtTheRefillRate() async throws {
         let content = Double(UsagePopoverView.width - 2 * UsagePopoverView.padding)
         let half = try await headlineBarFill(ratioPercent: 50)
@@ -9122,24 +7665,13 @@ final class UsagePopoverPaintTests: XCTestCase {
         return try XCTUnwrap(bars.first).hue
     }
 
-    /// The figure over that bar is coloured too, and by the same rule.
+    /// The lead figure over that bar is coloured by the same ramp. Asked of the
+    /// rendering because a test of `headlineFigureColor` alone passes once the view stops
+    /// calling it; the rule is asked in `UsagePopoverLabelTests`.
     ///
-    /// It is the one visible quantity this round added that nothing held:
-    /// replacing its `foregroundStyle` with a flat `Color.primary` passed all
-    /// 478 tests (2026-08-17). A test of `headlineFigureColor` alone would not
-    /// have caught it either — a pure function answers correctly for ever once
-    /// the view stops calling it — so the rendering is what is asked here, and
-    /// the rule itself is asked next door in `UsagePopoverLabelTests`.
-    ///
-    /// The lead figure over that bar is coloured too, and by the same ramp.
-    ///
-    /// Three ratios rather than the seven the bar is asked for, because what is
-    /// held here is that the figure and the bar are one rule: the shape of the
-    /// ramp is the bar's test, and this one asks that the string above it goes
-    /// the same way — cold at 60, green at capacity, red at 130.
-    ///
-    /// And with no ratio the figure has to be ink: the quota is a reading on a
-    /// scale this line does not paint.
+    /// Three ratios (cold at 60, green at capacity, red at 130) rather than the bar's
+    /// seven, since what is held is that the figure follows the bar. With no ratio the
+    /// figure is ink: the quota is a reading on a scale this line does not paint.
     func testTheHeadlineFigureIsDrawnInTheRatiosColour() async throws {
         for percent in [60.0, UsagePopoverView.greenRatioPercent, 130.0] {
             let drawn = try await headlineFigureHue(ratioPercent: percent)
@@ -9160,30 +7692,20 @@ final class UsagePopoverPaintTests: XCTestCase {
                        "the quota was painted on some scale of its own (hue \(mean.hue))")
     }
 
-    /// All three readings are on screen at once: the burn ratio leading, the
-    /// weekly quota under it with its own figure, its own words and its own bar,
-    /// and the spend rate under that with a figure and words but no bar.
+    /// All three readings are on screen at once: the burn ratio leading, the weekly quota
+    /// under it with its own figure, words and bar, and the spend rate under that with a
+    /// figure and words but no bar.
     ///
-    /// Which is the correction — the branch that put the ratio in the headline
-    /// took the quota off the screen rather than adding a reading beside it, and
-    /// the owner asked for all of them.
+    /// Measured like the caption's test: every string is drawn alone and the popover's
+    /// lines of ink are compared with those widths. Eight lines above the first rule, in
+    /// order (ratio figure, caption, bar; quota figure, caption, bar; rate figure,
+    /// caption), each asserted, so a dropped or duplicated line fails on count and width.
+    /// A `QuotaBar(fraction: nil)` under the rate would draw an empty track, reading as
+    /// zero, and show up as a ninth full-width line.
     ///
-    /// Measured the way the caption's own test measures: every string is drawn a
-    /// second time on its own and the popover's lines of ink are compared against
-    /// those widths. Eight lines above the first rule, in order — ratio figure,
-    /// ratio caption, ratio bar, quota figure, quota caption, quota bar, rate
-    /// figure, rate caption — and each named one asserted, so a layout that
-    /// dropped a line or drew the same reading twice fails on the count *and* on
-    /// the widths.
-    ///
-    /// The eighth line is the one that says the rate has no bar of its own: a
-    /// `QuotaBar(fraction: nil)` under it would draw an empty track, which reads
-    /// as a reading of zero, and it would land here as a ninth full-width line.
-    ///
-    /// The three figures are deliberately different strings, and the lead is at a
-    /// different size (`126%` at `headlineFigureSize`, `52%` and `23.8M/h` at
-    /// `supportingFigureSize`): were any two the same string at the same size, a
-    /// headline that drew one reading twice would pass the assertions on them.
+    /// The three figures are different strings, and the lead at a different size (`126%`
+    /// at `headlineFigureSize`, `52%` and `23.8M/h` at `supportingFigureSize`), so drawing
+    /// one reading twice cannot pass.
     func testTheHeadlineDrawsAllThreeReadingsAtOnce() async throws {
         let content = Double(UsagePopoverView.width - 2 * UsagePopoverView.padding)
         let lines = try await headlineInkBands(ratioPercent: 126, mean: 52)
@@ -9248,15 +7770,11 @@ final class UsagePopoverPaintTests: XCTestCase {
                        "the caption under the spend rate is not the spend rate's")
     }
 
-    /// The quota's bar keeps the quota's own scale, and the lead's keeps the
-    /// load's ramp — two rules on one surface, each on the reading it belongs to.
-    ///
-    /// The fixture puts them on opposite sides on purpose: a load of 62% is cold
-    /// blue on the ramp while a quota of 92% is red on `QuotaBar.color(for:)`'s
-    /// 60-and-85 scale, so a headline that painted both bars by one rule cannot
-    /// pass whichever rule it picked. Then the two are swapped — 126% is hot on
-    /// the ramp while 52% is green on the scale — which is the same trap the
-    /// other way round.
+    /// The quota's bar keeps the quota's scale and the lead's keeps the load's ramp. The
+    /// fixture puts them on opposite sides: a load of 62% is cold blue on the ramp while
+    /// a quota of 92% is red on `QuotaBar.color(for:)`'s 60-and-85 scale, so painting both
+    /// by one rule fails. Then swapped: 126% is hot on the ramp and 52% green on the
+    /// scale.
     func testTheTwoBarsKeepTheirOwnScales() async throws {
         let alarming = try await headlineBarHues(load: 62, mean: 92)
         XCTAssertEqual(alarming.lead,
@@ -9356,14 +7874,11 @@ final class UsagePopoverPaintTests: XCTestCase {
             .environment(\.colorScheme, scheme))
     }
 
-    /// The headline's lead figure and lead bar, as they land on the plate the
-    /// popover is drawn on, at one load in one scheme.
-    ///
-    /// The two are the first and third lines of ink above the popover's first
-    /// rule, which is the order `testTheHeadlineDrawsAllThreeReadingsAtOnce`
-    /// holds. Composited over the plate for the reason the menu bar's own
-    /// measurement composites: the rendering is on transparency, and what a
-    /// reader sees is the popover's material through it.
+    /// The headline's lead figure and bar as they land on the popover's plate, at one
+    /// load in one scheme: the first and third lines of ink above the first rule (the
+    /// order `testTheHeadlineDrawsAllThreeReadingsAtOnce` holds). Composited over the
+    /// plate because the rendering is on transparency and a reader sees the material
+    /// through it.
     private func headlineOnPlate(ratioPercent percent: Double, scheme: ColorScheme)
         async throws -> (figure: (red: Double, green: Double, blue: Double, contrast: Double),
                          bar: (red: Double, green: Double, blue: Double, contrast: Double)) {
@@ -9408,15 +7923,11 @@ final class UsagePopoverPaintTests: XCTestCase {
             .font(.system(size: UsagePopoverView.headlineCaptionSize)))).first)
     }
 
-    /// The hue of the popover's big figure, and how much of it was drawn in a
-    /// colour at all.
-    ///
-    /// The figure is the topmost band of ink in the picture — the layout is
-    /// figure, caption, bar, which is what `testTheHeadlineCaptionIsDrawnOnOneLine`
-    /// holds — so the band is taken from the rendering rather than from a
-    /// coordinate. Hues are centred around zero before they are averaged
-    /// (`> 0.5` becomes negative), because red sits on the wrap: a mean of
-    /// pixels at 0.99 and 0.01 is 0.5, which is a cyan nothing here draws.
+    /// The hue of the popover's big figure, and how much of it was drawn in colour. The
+    /// figure is the topmost band of ink (figure, caption, bar, held by
+    /// `testTheHeadlineCaptionIsDrawnOnOneLine`). Hues are centred around zero before
+    /// averaging (`> 0.5` becomes negative) because red sits on the wrap: the mean of
+    /// 0.99 and 0.01 would be 0.5, a cyan.
     private func headlineFigureHue(ratioPercent percent: Double?) async throws
         -> (hue: Double, pixels: Int) {
         var snapshot = try snapshot(labels: ["acc1"])
@@ -9498,26 +8009,17 @@ final class UsagePopoverPaintTests: XCTestCase {
 
     // MARK: - The note beside a switched-off account
 
-    /// A reason standing on the live gateway on 2026-09-06, and the one that made
-    /// this arrangement worth measuring: 62 characters, wider than the room the
-    /// name line has for a note at any width this popover is drawn at.
-    ///
-    /// Live, and **not drawn anywhere today**: it sits on `acc3`, whose `disabled`
-    /// is `false`, so the row it belongs to shows no note at all. `disabled_reason`
-    /// outlives the switch it was written for. What that buys is the length being
-    /// a real one rather than an invented one — a fixture, not an observation of
-    /// the surface.
+    /// A real reason seen on the gateway: 62 characters, wider than the room the name
+    /// line has for a note at any popover width. It sits on an account whose `disabled`
+    /// is `false` (`disabled_reason` outlives its switch), so it is a fixture of real
+    /// length, not an observation of the surface.
     private static let longReason = "operator: 22h, switched over from the temporary quota cooldown"
 
-    /// One account's row, rendered on its own at the width the list gives it.
-    ///
-    /// The row and not the whole popover, because what the arrangement promises is
-    /// a **height**, and a height is only observable on the thing that has one.
-    /// Ink bands over the whole picture — how this was measured while the note had
-    /// a line of its own — cannot see the note at all now: the name line runs from
-    /// the dot to the checkbox at the right edge, so a note between them widens no
-    /// band. What is counted instead is inked pixels, which a wider note moves and
-    /// a note that is not drawn does not.
+    /// One account's row, rendered alone at the width the list gives it. The row rather
+    /// than the whole popover, because the claim is a height. Ink bands cannot see the
+    /// note: the name line runs from the dot to the checkbox at the right edge, so a note
+    /// between them widens no band. Inked pixels are counted instead, which a wider note
+    /// moves and an undrawn note does not.
     private func accountRow(disabled: Bool,
                             reason: String,
                             label: String = "acc1") async throws -> Canvas {
@@ -9551,30 +8053,12 @@ final class UsagePopoverPaintTests: XCTestCase {
         return count
     }
 
-    /// The row of an account the gateway is not routing to says so, and the row
-    /// of one it is says nothing extra.
-    ///
-    /// Asked with **two values of the same field, of different widths** rather
-    /// than with the note and without it (§4). "With it and without it" answers a
-    /// different question — "do these two pictures differ" — and the two states
-    /// differ in the checkbox's own tick as well, so a note deleted outright
-    /// would still leave the pictures unequal and the probe would report it
-    /// drawn. Two reasons of different lengths hold the rest of the row fixed:
-    /// the note is drawn and the wider reason inks more of the line, or it is not
-    /// and the two renderings are the same to the pixel.
-    ///
-    /// Both are short enough to escape the truncation, because two reasons both
-    /// cut off at the same width would ink the same amount for a reason that has
-    /// nothing to do with whether either was drawn.
-    ///
-    /// Mutation, 2026-09-06 against a suite of 674: deleting the note's `Text` from
-    /// `accountRow` reddens this and nothing else in the suite — 8372 inked pixels
-    /// against 8372, the two reasons drawing the same picture to the pixel. The two
-    /// tests under it stay green under that mutation and are supposed to: with the
-    /// note's `Text` gone all three of the height test's rows are equally
-    /// note-less, so both of its pairs collapse into equalities, and the name
-    /// test's crowded row has nothing left to crowd it. Each of them has its own
-    /// mutation, recorded with it.
+    /// The row of an account the gateway is not routing to says so, and the row of one it
+    /// is says nothing extra. Asked with two values of the same field, of different
+    /// widths (§4): the two states also differ in the checkbox's tick, so "with and
+    /// without" would see a difference even with the note deleted. Two reasons of
+    /// different lengths hold the rest fixed: either the wider one inks more, or the
+    /// renderings are identical. Both are short enough to escape truncation.
     func testTheRowOfASwitchedOffAccountSaysSoAndTheRowOfALiveOneDoesNot() async throws {
         let narrow = inkedPixels(in: try await accountRow(disabled: true, reason: "z"))
         let wide = inkedPixels(in: try await accountRow(disabled: true, reason: "zzzzzzzzzz"))
@@ -9591,42 +8075,15 @@ final class UsagePopoverPaintTests: XCTestCase {
                        "an account in the rotation drew a reason it is not disabled for")
     }
 
-    /// And the note costs the row no height, which is the whole of why it moved
-    /// onto the name line.
+    /// The note costs the row no height, which is why it sits on the name line: a note on
+    /// its own line grows the list under the pointer the moment an account is switched
+    /// off from this very row.
     ///
-    /// It had a line of its own until 2026-09-06 and the complaint was the two
-    /// halves of that: a bare `off` on a row by itself, and a list that grows by a
-    /// line the moment somebody switches an account off — under the pointer, since
-    /// the click that switches it is made on this very row.
-    ///
-    /// Three rows and not two, and **each pair among them catches a defect the
-    /// other cannot** — measured, not reasoned: the mutations below fail one
-    /// assertion each, and a different one. The live row against the short reason
-    /// is what sees the arrangement itself, the note taking a row of its own; the
-    /// two reasons of different widths are what see the truncation, a note allowed
-    /// to wrap on exactly the value that made it worth showing. Neither pair alone
-    /// is this test. The two-widths pair is here in the shape §4 prescribes for
-    /// "is it drawn" and does not answer that question here — the test next door
-    /// does, and the height claim needs the live row that the §4 shape leaves out.
-    ///
-    /// Mutations, re-run 2026-09-06 against a suite of 675, and what makes both
-    /// pairs necessary is that **each fails one assertion here, and a different
-    /// one** — not that either is invisible elsewhere in the suite. Putting the
-    /// note back under the name, exactly as it stood (its `lineLimit(1)` kept),
-    /// fails the live-against-short assertion alone: 51.0 pt against 68.0, the
-    /// 17 pt a switched-off account cost the list. That one reddens nothing else
-    /// in the suite, and it leaves the two reasons equal at 68.0, so the pair that
-    /// reads as the canonical §4 probe cannot see that defect at all. Taking
-    /// `lineLimit(1)` off the note fails the other one instead, 51.0 against 62.0
-    /// — the live reason wrapping to a second line inside the name row. That one
-    /// is **not** confined to this test: it reddens three assertions across two,
-    /// the other two being both of the name test's ink checks next door (623
-    /// against 381 at the short label, 3038 against 0 at the long one), and that
-    /// test's own record carries them.
-    ///
-    /// (Recorded wrong first time round and re-run: the first mutation was written
-    /// without the `lineLimit(1)`, which is two changes at once, and the 81.0 pt it
-    /// produced was charged to the arrangement rather than to the wrapping.)
+    /// Three rows, and each pair catches a defect the other cannot. The live row against
+    /// the short reason sees the arrangement (the note taking a row of its own); the two
+    /// reasons of different widths see the truncation (a note allowed to wrap on the
+    /// long value). Putting the note back under the name fails only the first pair;
+    /// removing `lineLimit(1)` fails only the second.
     func testTheNoteRidesOnTheNameLineAndCostsTheRowNoHeight() async throws {
         func height(disabled: Bool, reason: String) async throws -> Double {
             let picture = try await accountRow(disabled: disabled, reason: reason)
@@ -9644,20 +8101,14 @@ final class UsagePopoverPaintTests: XCTestCase {
                        + "list moving under the pointer of whoever clicked it")
     }
 
-    /// The dot and the name, as the row with nothing beside them draws it: over the
-    /// name line's own rows, every column up to the first clear gap wider than the
-    /// 5 pt the `HStack` puts between its items.
+    /// The dot and the name, as the bare row draws them: over the name line's own rows,
+    /// every column up to the first clear gap wider than the `HStack`'s 5 pt spacing.
     ///
-    /// Two things here were first written as assumptions and both were wrong, which
-    /// is why they are measured. The band **cannot be a number**: written as one it
-    /// was 60 pt, on the arithmetic that `acc1` at 12 pt semibold is 27.5 pt of ink
-    /// after a 7 pt dot and a 5 pt gap — and the note starts 5 pt past the name,
-    /// well inside 60, so the crowded row came out 185 pixels *heavier* than the
-    /// bare one and the probe read a wider name where it was reading a reason. And
-    /// the columns **cannot be taken over the whole row**: under the name line sit
-    /// the two window rows, whose ink runs from the label to the reset column, so
-    /// the first gap in a full-height scan is one of theirs — 164 pt in, past the
-    /// note entirely.
+    /// Both are measured, not assumed. The band cannot be a fixed number: the note starts
+    /// 5 pt past the name, well inside any guessed width, so the probe would read the
+    /// reason as name. And the columns cannot span the whole row: the two window rows
+    /// beneath run to the reset column, so the first gap of a full-height scan is theirs,
+    /// past the note entirely.
     private func nameBand(of canvas: Canvas, over rows: Range<Int>) -> Int {
         func inked(_ x: Int) -> Bool { rows.contains { canvas.alpha(x, $0) > 8.0 / 255 } }
         // Wider than the 5 pt between the name and whatever follows it, and far
@@ -9673,41 +8124,18 @@ final class UsagePopoverPaintTests: XCTestCase {
         return canvas.width
     }
 
-    /// And what the note gives up to fit is its own tail and never the name.
+    /// What the note gives up to fit is its own tail, never the name: the checkbox acts
+    /// on that account, so the name is the row's identity. Asked with a reason wider than
+    /// the line, comparing the left of the row (dot and name) with the same row without a
+    /// note, pixel for pixel, since a name shortened by `truncationMode(.middle)` still
+    /// inks something.
     ///
-    /// The name is the row's identity: the checkbox beside it does something to
-    /// *that* account, and a row whose name was eaten by a 62-character reason
-    /// no longer says which. So the two are asked with a reason wider than the line
-    /// has room for, and what is compared is the left of the row — dot and name —
-    /// against the same row with no note at all. Pixel for pixel, because a name
-    /// shortened by `truncationMode(.middle)` is still a name and still inks
-    /// something, an ellipsis of its own at that.
-    ///
-    /// **Asked twice, and the second label is the whole test.** A fleet's labels
-    /// are short — `acc2`, `acc3`, `main` — and at that length the two never
-    /// compete at all: the dot and `acc1` take 37.5 pt of a 292 pt line, the note
-    /// truncates into what is left whatever the priorities say, and taking
-    /// `layoutPriority` off the name reddened **nothing in a suite of 674 until
-    /// this test asked a long label**. That is
-    /// the modifier-in-the-default trap (§4): the label comes off `/gw/usage` and
-    /// is whatever the gateway calls an account, so the arrangement is asked at the
-    /// length where something has to give.
-    ///
-    /// Mutations, re-run 2026-09-06 against a suite of 675, and the two are not
-    /// symmetrical. Taking `layoutPriority(1)` off the name fails the long label's
-    /// assertion alone — 3038 inked pixels in the name's first 178 pt against 2483,
-    /// the name giving up a fifth of itself to a reason — leaves the short label's
-    /// green, and reddens nothing else in the suite. That asymmetry is the whole
-    /// reason the long label is here, and it is the only thing the pair of labels
-    /// has to prove: what the other mutation does is **not** the mirror image of
-    /// it. Taking `lineLimit(1)` off the note fails **both of this test's ink
-    /// checks** — 623 against 381 in the short label's 37.5 pt, 3038 against 0 in
-    /// the long one's 178 pt, a note that may wrap asking for its full width and
-    /// the name paying for it even at `acc1` — and the height test next door as
-    /// well, three assertions across two tests, which is that test's own record.
-    /// The two band guards here stand through both mutations and cannot do
-    /// otherwise: the band is measured on the **bare** row, which carries no note
-    /// for either modifier to act on.
+    /// Asked twice, and the long label is what matters: with short labels (`acc2`,
+    /// `main`) the two never compete, so `layoutPriority` on the name is untested there
+    /// (the modifier-in-the-default trap, §4). Labels come from `/gw/usage` and can be
+    /// any length. Removing `layoutPriority(1)` fails only the long label; removing the
+    /// note's `lineLimit(1)` fails both. The band guards are measured on the bare row,
+    /// which has no note, so neither modifier affects them.
     func testTheNameIsNeverTheHalfThatIsCutToFitTheNote() async throws {
         func ink(_ label: String) async throws -> (bare: Int, crowded: Int, band: Double) {
             let bare = try await accountRow(disabled: false, reason: "", label: label)
@@ -9749,27 +8177,18 @@ final class UsagePopoverPaintTests: XCTestCase {
                        + "first \(long.band) pt of the name line against \(long.crowded)")
     }
 
-    /// The window the warning's own orange occupies in a rendering, measured.
-    ///
-    /// `Color.orange` asked directly reports hue 0.10136; drawn as text at 10 pt
-    /// and read back off the bitmap it lands between 0.09681 and 0.09797 over the
-    /// 5179 pixels the two lines of the sentence cover (2026-09-06, scale 2.0,
-    /// popover width). The band below is wide enough to hold that spread and
-    /// nowhere near the rest of the surface's colour, which in the same rendering
-    /// runs 0.00886…0.21144.
+    /// The hue window of the warning's orange in a rendering. `Color.orange` reports hue
+    /// 0.10136; drawn as 10 pt text and read off the bitmap it lands between 0.09681 and
+    /// 0.09797 (scale 2.0, popover width). The band holds that spread and stays clear of
+    /// the rest of the surface's colour, which runs 0.00886…0.21144.
     private static let warningHue: ClosedRange<Double> = 0.09...0.105
 
-    /// Lines of the popover drawn entirely in the fleet warning's orange.
-    ///
-    /// A **line**, not a count of pixels, because this surface has other colour on
-    /// it and part of that colour's range straddles the orange: the rest of the
-    /// chromatic ink spans 0.00886…0.21144 in the very rendering the caller
-    /// measures, and one band of it holds hues on both sides of the warning's own.
-    /// A band of ink every coloured pixel of which is that orange
-    /// cannot be assembled out of a wider spread, and the floor below keeps a band
-    /// with no colour in it at all from answering yes by vacuity — the sentence's
-    /// two lines carry 2613 and 2566 such pixels, so 100 is far under either and
-    /// far over anything a rounded edge could leave behind.
+    /// Lines of the popover drawn entirely in the fleet warning's orange. Lines rather
+    /// than a pixel count, because other colour on this surface straddles the orange; a
+    /// band every coloured pixel of which is that orange cannot be made out of a wider
+    /// spread. The floor of 100 pixels keeps a colourless band from qualifying by
+    /// vacuity: the sentence's two lines carry about 2600 each, far above it and far
+    /// above anything a rounded edge could leave.
     private func orangeLines(in canvas: Canvas) -> Int {
         inkBandRows(in: canvas).filter { band in
             var coloured = 0
@@ -9787,42 +8206,20 @@ final class UsagePopoverPaintTests: XCTestCase {
 
     // MARK: - The fleet's own lines with no accounts to draw them under
 
-    /// The orange line is drawn when the account list is empty.
+    /// The orange line is drawn when the account list is empty. The rows come from the
+    /// quota poll and the rotation from `/gw/status`, which fail apart: with `/gw/usage`
+    /// down and every client request answered 429, the half that is up is the one with
+    /// something to report.
     ///
-    /// The rows come from the quota poll and the rotation from `/gw/status`, and
-    /// they fail apart: with `/gw/usage` answering HTTP 500 the popover used to say
-    /// "/gw/usage: HTTP 500" and nothing else, while every client request was being
-    /// answered 429 and the line saying so had been drawn inside the branch that
-    /// needs a list. That is not a state on the way to somewhere — it is a gateway
-    /// half up, and the half that is up is the one with something to report.
+    /// Asked of the line's colour, not of two pictures differing (§4): `fleetWarning` has
+    /// one non-`nil` value, `noRouteWarning`, so there is no second width to compare.
+    /// This surface draws only its warning in `.orange`, and `orangeLines` answers "not
+    /// there" by returning zero.
     ///
-    /// Asked of the line's **colour**, not of two pictures differing (§4). The
-    /// usual remedy here — two values of one field, of different widths — has
-    /// nothing to work with any more: since the sentence stopped arriving from the
-    /// gateway, `fleetWarning` has exactly one non-`nil` value it can ever hold,
-    /// `noRouteWarning`, which is one string and one width. So the question is put
-    /// to the picture directly. This surface draws its warning in `.orange` and
-    /// nothing else in it, and `orangeLines` says how many lines of ink are wholly
-    /// that colour — a measurement that answers "the line is not there" by
-    /// returning nothing, which is the property "these two pictures differ" never
-    /// had.
-    ///
-    /// Two lines rather than one because the sentence is 114 characters at 10 pt
-    /// and the popover is 320 pt wide before its padding: it wraps, and
-    /// `fixedSize(horizontal: false, vertical: true)` on it is what lets it wrap
-    /// rather than be cut. A truncated single line would answer 1 here, and that is
-    /// worth being told about.
-    ///
-    /// The control is the same picture over a fleet with somewhere to route, and it
-    /// is a control on the **method** and not the question: it says the count can
-    /// come back zero, so the two above are the line and not an artefact of the
-    /// measurement.
-    ///
-    /// Proved by mutation, 2026-09-06: moving the three fleet lines back inside the
-    /// `else` takes the raised count from 2 to 0 and reddens this test together
-    /// with the two below it — three of the suite as it stood that morning, 666,
-    /// and nothing else in it. Not re-run since; the suite has grown past that
-    /// number, and the figure dates the mutation rather than describing today.
+    /// Two lines because the 114-character sentence at 10 pt wraps within 320 pt minus
+    /// padding; `fixedSize(horizontal: false, vertical: true)` lets it wrap instead of
+    /// being cut, and a truncated line would count 1. The control, a fleet with
+    /// somewhere to route, shows the count can come back zero.
     func testTheFleetWarningIsDrawnWithNoAccountsToDrawItUnder() async throws {
         func lines(rotation: String) async throws -> (orange: Int, warning: String?) {
             let history = UsageHistoryModel(client: flatHistoryClient(readings: [:],
@@ -9858,30 +8255,14 @@ final class UsagePopoverPaintTests: XCTestCase {
                        "the measurement answers yes to a picture with no warning in it")
     }
 
-    /// And the blame for a click that would not go through is drawn there too.
+    /// The blame for a click that would not go through is drawn there too: the rows come
+    /// from `/gw/usage` and this line from the operator's click, which needs no rows. A
+    /// failing quota poll must not hide the only statement that the click failed.
     ///
-    /// Same argument as the orange line above and the same failure it was moved
-    /// out of the `else` to stop: the rows come from `/gw/usage` and this line from
-    /// the operator's own click, which needs no rows to have happened. A quota poll
-    /// answering HTTP 500 while somebody clicks a checkbox would take the only
-    /// statement that the click did not go through off the screen and leave the
-    /// popover saying `/gw/usage: HTTP 500`, with the tick sitting where it was.
-    ///
-    /// Asked with **two values of the same field, of different widths** (§4): one
-    /// unreachable reason of one character against one of ten, so the blame is
-    /// `acc1: unreachable: z` against `acc1: unreachable: zzzzzzzzzz` and every
-    /// other thing in the picture is held fixed. Never with the line and without
-    /// it — a click that fails and a click that does not differ in more than this
-    /// line, and "the two pictures differ" is a different question. Both strings
-    /// are short enough to stay on one line and to be cut by nothing, so the number
-    /// of bands is the same in both and exactly one of them may follow the field.
-    ///
-    /// Two mutations, 2026-09-06. Deleting this block outright reddens exactly this
-    /// test and leaves the other 665 of that morning's 666 green — before it was
-    /// written the block could be taken out for nothing. Moving the three lines back
-    /// inside the `else` reddens this one, the orange line's above and the pass's
-    /// below. Neither has been re-run since the suite grew past 666, so both counts
-    /// date the mutation rather than describing today.
+    /// Asked with two values of the same field, of different widths (§4):
+    /// `acc1: unreachable: z` against `acc1: unreachable: zzzzzzzzzz`, everything else
+    /// fixed. Both stay on one line uncut, so the band count is equal and exactly one
+    /// band may follow the field.
     func testTheBlameForAFailedClickIsDrawnWithNoAccountsToDrawItUnder() async throws {
         func bands(reason: String) async throws -> [Double] {
             let client = UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
@@ -9932,25 +8313,13 @@ final class UsagePopoverPaintTests: XCTestCase {
                              "nine more characters bought \(line.1 - line.0) pt of line")
     }
 
-    /// And so is the reason the checkboxes went inert.
+    /// And so is the reason the checkboxes went inert: `/gw/status` failing empties
+    /// `switches`, drawing every box clear and unclickable, and a gateway that cannot
+    /// answer `/gw/status` often cannot answer `/gw/usage` either, leaving no rows.
     ///
-    /// The third of the three, and the one whose absence is worst: `/gw/status`
-    /// failing is exactly what empties `switches`, so every box on the surface is
-    /// drawn clear and unclickable — and drawn inside the `else`, the line that
-    /// says why would be missing in precisely the state it exists for, because a
-    /// gateway that cannot answer `/gw/status` is often a gateway that cannot
-    /// answer `/gw/usage` either and then there are no rows.
-    ///
-    /// Asked the same way as the blame: **two values of the same field, of
-    /// different widths**, one unreachable reason of one character against one of
-    /// ten, giving `status: unreachable: z` against `status: unreachable:
-    /// zzzzzzzzzz`. With the pass failing there is no rotation and no count, so the
-    /// other two fleet lines are `nil` in both halves and cannot move.
-    ///
-    /// Two mutations, 2026-09-06, the same pair as the blame's: deleting this block
-    /// reddens exactly this test out of that morning's 666, and moving the three
-    /// lines back inside the `else` reddens all three of them. Not re-run since the
-    /// suite grew past that number.
+    /// Asked like the blame: `status: unreachable: z` against
+    /// `status: unreachable: zzzzzzzzzz`. With the pass failing there is no rotation and
+    /// no count, so the other two fleet lines are `nil` in both halves.
     func testTheReasonTheSwitchesWentInertIsDrawnWithNoAccountsToDrawItUnder() async throws {
         func bands(reason: String) async throws -> [Double] {
             let client = UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { _ in
@@ -9988,24 +8357,14 @@ final class UsagePopoverPaintTests: XCTestCase {
 
     // MARK: - The mean line is ink
 
-    /// The mean is drawn in ink, and no account may be handed that colour.
+    /// The mean is drawn in ink, and no account may be handed that colour. That is why
+    /// the chart declares its own colour scale: without `chartForegroundStyleScale`
+    /// Charts gives the mean a palette hue, and the headline number (that line's last
+    /// point) names nothing in the picture.
     ///
-    /// Which is the whole reason the chart declares its own colour scale: without
-    /// `chartForegroundStyleScale` the mean is a series like any other and Charts
-    /// hands it a hue out of its palette, at which point the one line this popover
-    /// exists to show is a colour among colours — and the number in the headline,
-    /// which is that line's last point, names nothing in the picture.
-    ///
-    /// The rule held nothing after the legend was hidden: the test that had
-    /// covered it named the legend's first entry, and it went with the legend. The
-    /// tests that stayed weigh alpha, which a hue does not move.
-    ///
-    /// Read in the two bands `UsageHistoryTests` calibrated (§4): with two flat
-    /// accounts at 100 and 20 the mean's band holds the mean's line and nothing
-    /// else, and the lower band holds the second account's. Saturation is
-    /// averaged over the band's ink and weighted by its alpha, so the grey of a
-    /// grid line cannot be answered for by a stray pixel either way — and neither
-    /// band contains one.
+    /// Read in the two bands `UsageHistoryTests` calibrated (§4): with flat accounts at
+    /// 100 and 20 the mean's band holds only the mean's line and the lower band the
+    /// second account's. Saturation is averaged over the band's ink, weighted by alpha.
     func testTheMeanLineIsInkAndTheAccountsAreNot() async throws {
         let (view, _, history) = try await popover(named: ["acc1", "acc2"],
                                                    asked: ["acc1", "acc2"],
@@ -10026,25 +8385,15 @@ final class UsagePopoverPaintTests: XCTestCase {
                              + "(saturation \(account.saturation))")
     }
 
-    /// And it stays ink when an account is called what the mean's key used to be
-    /// called.
+    /// It stays ink when an account carries the mean's key. `styleDomain` puts the mean's
+    /// key first and the accounts after it, so a colliding account name repeats it in the
+    /// domain; Charts keeps the last colour for a repeated key, and the mean would take
+    /// that account's hue. Other palette tests stay green through that (both lines are
+    /// chromatic, each dot matches a line), so only the mean's band can tell, by
+    /// saturation.
     ///
-    /// `styleDomain` puts the mean's key at the head and the accounts after it, so
-    /// a key an account can also hold puts the same string in the domain twice.
-    /// Charts keeps the last colour for a repeated key, and the mean is then drawn
-    /// in that account's hue, one hue among hues rather than the one line in
-    /// ink. Measured with the key spelled `average`, over the accounts
-    /// `["average", "acc2"]`: the domain came out `["average", "acc2", "average"]`,
-    /// the range `[primary, blue, orange]`, and the mean's line took the orange —
-    /// the colliding account's own hue, measured as 0.097 in the mean's band.
-    ///
-    /// Which is why every other test on this palette stays green through it: both
-    /// lines are chromatic, and each dot still matches a line of its own hue. Only
-    /// the mean's own band can tell, and only by saturation.
-    ///
-    /// Same arrangement as the test above — the account that collides is the one at
-    /// 100, so the mean is still 60 and the two calibrated bands (§4) still hold
-    /// one line each.
+    /// Same arrangement as above: the colliding account is the one at 100, so the mean
+    /// is 60 and the two calibrated bands (§4) hold one line each.
     func testAnAccountNamedLikeTheMeanCannotTakeItsColour() async throws {
         let colliding = "average"
         let (view, _, history) = try await popover(named: [colliding, "acc2"],
@@ -10090,25 +8439,16 @@ final class UsagePopoverPaintTests: XCTestCase {
 
     // MARK: - The dot beside a name and the line it names
 
-    /// A dot beside an account's name is the colour of that account's line, and
-    /// stays it when the two lists the colours are handed out from disagree.
+    /// A dot beside an account's name is the colour of that account's line, even when the
+    /// two lists the colours come from disagree: an account that failed its history
+    /// request is in the poll but not on the chart, one that just left the poll is on the
+    /// chart but not in the list. Keyed on `history.series`, the dots would point at
+    /// someone else's line.
     ///
-    /// They disagree exactly when an account is named by the quota poll and
-    /// missing from the chart's answers, or the other way about — and both
-    /// happen: an account that failed its history request is in the poll and not
-    /// on the chart, an account that has just left the poll is on the chart and
-    /// not in the list. Keyed on `history.series` the dots would then be counted
-    /// off a list one shorter than their own, and the dot beside a name would
-    /// point at somebody else's line.
-    ///
-    /// Asked of the pixels, because the pure functions were already under test
-    /// and neither call site was: `styleRange` and `accountColor` answered
-    /// correctly all along while the view handed one of them the wrong list.
-    ///
-    /// Here the poll names an account whose history request failed: its dot is in
-    /// the picture and its line is not, and the accounts after it must not shift a
-    /// hue for it. Counted off the chart's list, the silent account is not on that
-    /// list at all and its dot falls out of the palette into grey.
+    /// Asked of the pixels because `styleRange` and `accountColor` are tested as pure
+    /// functions but their call sites are not. Here the poll names an account whose
+    /// history failed: its dot is drawn, its line is not, and the accounts after it must
+    /// keep their hues.
     func testAnAccountThatDidNotAnswerStillHasItsOwnColour() async throws {
         let (view, _, history) = try await popover(named: ["acc1", "acc2", "acc3"],
                                                    asked: ["acc1", "acc2", "acc3"],
@@ -10132,18 +8472,13 @@ final class UsagePopoverPaintTests: XCTestCase {
                        "the account that did not answer has a line on the chart")
     }
 
-    /// The same rule from the other side, and this is the arrangement in which
-    /// nothing but a colour changes: an account the poll has stopped naming is
-    /// still on the chart, so the list of lines is the longer of the two. The
-    /// popover draws a dot for every account it *does* name, and each of those
-    /// dots has to be the colour of that account's line. Counted off the chart's
-    /// list they come out one place along — and the count is the same either way,
-    /// so nothing but the hue can say which happened.
+    /// The same rule from the other side, where nothing but a colour changes: an account
+    /// the poll stopped naming is still on the chart, so the list of lines is the longer.
+    /// Each dot must be the colour of its account's line; counted off the chart's list
+    /// they would shift one place, with the same count, so only the hue can tell.
     ///
-    /// The account that left keeps a line, drawn grey: it has no place in a
-    /// palette handed out by the poll, which is `accountColor`'s answer for a
-    /// label the poll does not name. Grey is not a hue, so it is not among the
-    /// lines counted here.
+    /// The departed account keeps a grey line (`accountColor`'s answer for a label the
+    /// poll does not name), and grey is not counted among the hues.
     func testEveryDotIsTheColourOfItsOwnLine() async throws {
         // The poll names two accounts, the chart answered for three: `acc2` has
         // left the poll and its line is still in hand.
