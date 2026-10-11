@@ -2,27 +2,15 @@
 # Tests for scripts/install-hooks.sh — the installer that edits the user's
 # ~/.claude/settings.json.
 #
-# That file belongs to a live user with a dozen sessions open, so it is never
-# the file under test. Every case runs with HOME pointed at a throwaway
-# directory, which puts even the *default* settings path inside the sandbox: the
-# installer resolves `${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}` and also
-# does a `mkdir -p "$HOME/.claude/window-status"`, so overriding the variable
-# alone would leave one write behind. With both redirected there is no path from
-# here to the real file even if one of them stopped being honoured.
+# The real settings file is never under test. Every case runs with HOME pointed
+# at a throwaway directory (the installer also does a
+# `mkdir -p "$HOME/.claude/window-status"`) and CLAUDE_SETTINGS inside it too.
+# `run` refuses to start the installer unless both paths are inside the sandbox
+# (an empty SETTINGS would fall back to the real file); a later case asserts each
+# redirection, and the last one compares the real file's `cksum`.
 #
-# Three things keep that true, and only the first of them is a guarantee rather
-# than a report: `run` refuses to start the installer unless both paths point
-# inside the sandbox — which also catches an empty `SETTINGS`, since the
-# installer would silently fall back to the real file for one; a later case then
-# asserts each redirection separately; and the last one re-reads the real file's
-# `cksum` (its CRC and size — not a byte-for-byte diff) to confirm it did not
-# move underneath. Being the only guarantee, the guard gets a case of its own as
-# well: it used to be the one thing here that nothing checked.
-#
-# One write does leave the sandbox: in install mode the installer does a
-# `chmod +x` on the repository's own hook scripts. Both are already tracked
-# 755, so it changes nothing — but it is the one thing these tests touch outside
-# their temporary directory, and `--uninstall` does not do it at all.
+# One write leaves the sandbox: install mode does `chmod +x` on the repository's
+# hook scripts, which are already tracked 755.
 #
 # Run: bash scripts/test-install-hooks.sh   (also wired into `make test`)
 #
@@ -86,18 +74,10 @@ start() { # description [initial settings json]
 }
 
 run() { # installer args...
-	# The one check that runs *before* the installer does, on every call. Both
-	# paths have to sit under the throwaway root: `SETTINGS` is a global that
-	# starts out empty, and the installer resolves
-	# `${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}` — so an empty value does
-	# not fail loudly, it quietly writes to the user's own file. Assertions
-	# inside the cases can only report that afterwards; this refuses to run.
-	#
-	# Two cases and not one glob over `"$SETTINGS:$HOME"`: joined, the pattern is
-	# satisfiable by something other than what it means — a colon anywhere in
-	# either value re-splits the pair, and the halves the two `*` then cover are
-	# not the two paths. Nothing here holds a colon today, which is exactly why
-	# the joined form could rot without a test noticing.
+	# Both paths must sit under the throwaway root before the installer runs: an
+	# empty SETTINGS makes the installer fall back to the user's own file.
+	# Two separate cases, because one glob over "$SETTINGS:$HOME" would mis-split
+	# on a colon inside either value.
 	case "$SETTINGS" in
 	"$WORK"/*) ;;
 	*)
@@ -137,14 +117,10 @@ FOREIGN='{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/opt/o
 # --- the sandbox itself -------------------------------------------------------
 
 start "the guard refuses to run the installer outside the sandbox"
-# The guard in `run` is the only thing here that *prevents* a stray write instead
-# of reporting one afterwards, and nothing exercised it. Its two halves are
-# checked separately, because it is two cases: an escaped `SETTINGS` and an
-# escaped `HOME`. The escape points at another throwaway directory, so a guard
-# that failed to fire would still not reach the user's own file — what is
-# asserted is that it fires, and that it fires *before* the installer runs:
-# `run` creates `$SANDBOX/out` only as it launches it, so an absent `out` is the
-# proof. `run` exits the shell it is in, hence the subshell around it.
+# Checks an escaped SETTINGS and an escaped HOME separately. The escape points at
+# another throwaway directory. `run` creates `$SANDBOX/out` only as it launches
+# the installer, so an absent `out` proves the guard fired first. `run` exits
+# its shell, hence the subshell.
 OUTSIDE=$(mktemp -d "${TMPDIR:-/tmp}/vsw-outside.XXXXXX")
 sandboxed=$SETTINGS
 SETTINGS="$OUTSIDE/settings.json"
@@ -172,15 +148,9 @@ export HOME="$SANDBOX"
 rm -rf "$OUTSIDE"
 
 start "the installer writes inside the sandbox and nowhere else"
-# This one is a real install, so it reports where the writes landed rather than
-# preventing a stray one — that is the guard in `run`. HOME is a throwaway
-# directory, so `$HOME/.claude/settings.json` — the path the installer falls
-# back to — is already inside it; CLAUDE_SETTINGS then moves the file somewhere
-# else inside it again. Asserting all three below distinguishes the two
-# redirections: the named file getting written proves CLAUDE_SETTINGS is
-# honoured, the untouched default proves it was not silently ignored, and
-# window-status proves HOME took effect for the one write that does not go
-# through the variable at all.
+# The named file getting written proves CLAUDE_SETTINGS is honoured, the
+# untouched default under HOME proves it was not ignored, and window-status
+# proves HOME took effect for the write that does not go through the variable.
 run
 check "the file CLAUDE_SETTINGS named was written" "$([ -s "$SETTINGS" ] && echo yes || echo no)" "yes"
 check "the default path under HOME was left alone" "$([ -e "$SANDBOX/.claude/settings.json" ] && echo present || echo absent)" "absent"

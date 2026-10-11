@@ -24,7 +24,7 @@ import Foundation
 /// inherited sideways and goes stale: the `claude` binary itself carries the
 /// marker of whatever launched VSCode, and most of the markers on this machine
 /// name something that is not a live session at all — 120 of the 136 carried,
-/// against 24 live sessions (26.08.2026). Those are not orphans, they are
+/// against 24 live sessions, in one census. Those are not orphans, they are
 /// inherited junk, and a marker naming a dead or unknown pid is ignored
 /// outright.
 ///
@@ -70,10 +70,9 @@ enum SessionProcesses {
         var own: UInt64
         /// `ri_child_user_time + ri_child_system_time`: what its reaped
         /// children burned, folded in at the moment each one is reaped — and
-        /// not just the child, the child's **whole subtree**. Measured
-        /// 26.08.2026 rather than read out of the header: a grandchild burning
-        /// 1.0 s under a child burning 0.3 s landed 1.24 s here at the moment
-        /// the child was reaped, so a reaped child hands over its own
+        /// not just the child, the child's **whole subtree**: a grandchild
+        /// burning 1.0 s under a child burning 0.3 s lands 1.24 s here at the
+        /// moment the child is reaped, so a reaped child hands over its own
         /// `ri_child_*` along with its `ri_user_time`.
         var child: UInt64
 
@@ -267,9 +266,7 @@ enum SessionProcesses {
     /// Ten of the slowest ticks the snapshot is rebuilt on, so that an ordinary
     /// slow pass — the assembly spends 40–180 ms on disk (§6) — never blanks the
     /// column. Taken from `SnapshotStore.idleInterval` rather than written down,
-    /// because a threshold expressed in ticks has to move when the tick does:
-    /// spelled as a number it drifted to fifteen, which is ten of no interval
-    /// this app has.
+    /// because a threshold expressed in ticks has to move when the tick does.
     ///
     /// **This end blanks the column and the other end holds it, and the
     /// asymmetry is deliberate.** A gap too short has a fresh figure to keep —
@@ -299,10 +296,10 @@ enum SessionProcesses {
     /// transition. None of those is the timer, and none of them waits for it.
     ///
     /// A rate over such a gap is not a worse average, it is noise: measured
-    /// 26.08.2026 against a process held at a steady 30% duty cycle, 25 probes
-    /// per window — 0.05 s reads sd 28.8 (min 0.0, max 59.6), 0.15 s sd 9.6,
-    /// 0.50 s sd 1.5, 1.00 s sd 0.7, 2.00 s sd 0.7. So the very moment the panel
-    /// exists for showed a steady 28% as anything from nothing to twice itself.
+    /// against a process held at a steady 30% duty cycle, 25 probes per window
+    /// — 0.05 s reads sd 28.8 (min 0.0, max 59.6), 0.15 s sd 9.6, 0.50 s sd 1.5,
+    /// 1.00 s sd 0.7, 2.00 s sd 0.7. So the very moment the panel exists for
+    /// would show a steady 28% as anything from nothing to twice itself.
     ///
     /// Half the panel's own tick, and derived from it rather than written down
     /// for the reason the ceiling is. The floor has to sit *below* the fastest
@@ -372,40 +369,31 @@ enum SessionProcesses {
         /// A *debtor* leaving the table is what writes a debt down, not what
         /// loses one, and the case that has nowhere to be addressed never
         /// reaches this counter at all: a vanishing whose walk comes back empty
-        /// is dropped before it becomes a debt (60 of them in the 27.08.2026
-        /// census, 4.449 core-seconds — `heir(of:lastSeen:byPID:survivors:)`
-        /// carries that number). Only what was written down can be given up on.
+        /// is dropped before it becomes a debt
+        /// (`heir(of:lastSeen:byPID:survivors:)`). Only what was written down
+        /// can be given up on.
         ///
-        /// Nothing on the screen says a debt went unsettled, and an unsettled
-        /// debt is exactly the shape of the bug the ledger replaced, so the
-        /// count is carried out to where a test can ask
-        /// (`ProcessSampler.PassStats`).
+        /// Nothing on the screen says a debt went unsettled, so the count is
+        /// carried out to where a test can ask (`ProcessSampler.PassStats`).
         var expired: Int
     }
 
     /// How long a debt waits for the growth that settles it.
     ///
-    /// **The floor is derived; the equality is a measurement and a price, and
-    /// the two must not be confused.** The only event that can settle a debt is
-    /// a pass — growth is a difference between two sweeps — and a legitimate
-    /// pass may arrive as late as `staleSampleSeconds`. That proves the lifetime
-    /// cannot be *shorter* than that gap: anything shorter throws debts away
-    /// before the one event able to discharge them. It does not prove equality,
-    /// and nothing about the window itself does either — how long a process
-    /// stays unreaped is up to when its parent chooses to call `wait`, and §2.8
-    /// puts no ceiling on that beyond "seconds" for `node` parsing a large tool
-    /// result.
+    /// **The floor is derived; the equality is a measurement and a price.** The
+    /// only event that can settle a debt is a pass — growth is a difference
+    /// between two sweeps — and a legitimate pass may arrive as late as
+    /// `staleSampleSeconds`, so the lifetime cannot be *shorter* than that gap:
+    /// anything shorter throws debts away before the one event able to
+    /// discharge them. Nothing proves equality: how long a process stays
+    /// unreaped is up to when its parent chooses to call `wait`.
     ///
-    /// What holds the upper end is a measurement, and the measurement uses the
-    /// whole of it. Census over the live machine 27.08.2026, driving this
-    /// function once a second for 200 passes while agents worked and the suite
-    /// built: **474 debts, 755.135 core-seconds owed; 464 settled on the very
-    /// pass that recorded them**, 4 waited one pass, 2 two, 2 three, 1 four —
-    /// **and 1 waited 20**, which is this constant exactly. One debt aged out.
-    /// So the earlier record here (263 debts, longest wait 4 passes, nothing
-    /// unsettled) was not a ceiling but a quiet afternoon: a lifetime cut to
-    /// 5 s would have thrown away a debt that did settle, and every second of
-    /// the 20 has now been asked for by something.
+    /// What holds the upper end is a measurement: driving this function once a
+    /// second for 200 passes while agents worked and the suite built gave 474
+    /// debts, 755.135 core-seconds owed; 464 settled on the very pass that
+    /// recorded them, 4 waited one pass, 2 two, 2 three, 1 four — and 1 waited
+    /// 20, which is this constant exactly. A shorter lifetime would throw away
+    /// debts that do settle.
     ///
     /// And an unsettled debt is indistinguishable from a pending one, so it
     /// spends itself against whatever genuine growth arrives next: holding it
@@ -438,11 +426,10 @@ enum SessionProcesses {
     /// **A process the sweep never saw twice still burned CPU, and for an agent
     /// that is most of it.** Every `Bash` call is a fresh `rg`, `git`, `cc` or
     /// `node` living a fraction of a second, and asking only the processes
-    /// present in both sweeps donates not one nanosecond of them: measured
-    /// 26.08.2026 against a shell spawning and reaping a child every 0.15 s, the
-    /// panel reported 0.3% while the reaped children burned 63.6–86.9% of a
-    /// core — and 0.3% is under the 1% the row draws anything at all above, so
-    /// the row read "nothing to look at here" (§3.1).
+    /// present in both sweeps misses all of them: against a shell spawning and
+    /// reaping a child every 0.15 s, that reports 0.3% while the reaped children
+    /// burn 63.6–86.9% of a core — and 0.3% is under the 1% the row draws
+    /// anything at all above (§3.1).
     ///
     /// Three kinds of process, then, and the sum is over all three:
     ///
@@ -478,16 +465,15 @@ enum SessionProcesses {
     /// growth, nothing settled, the debt waits for the pass where the reap
     /// lands).
     ///
-    /// **The launchd case does not cost nothing, and this used to say it did.**
-    /// "No growth ever, so nothing is ever taken off the survivor" is true of
-    /// the reparented process itself and false of the process the debt is
-    /// charged to: `claude` is a node process that reaps the next `Bash` on
-    /// nearly every tick, so growth arrives at it constantly, and a debt that
-    /// its own counter will never settle is settled by somebody else's. That is
-    /// why the debt is addressed to the debtor's **last-seen parent** rather
-    /// than to the first surviving ancestor — a process last seen under pid 1
-    /// is written down nowhere at all, because the counter had already left the
-    /// tree while the sweep was still watching.
+    /// **The launchd case is why the debt goes to the last-seen parent.** The
+    /// reparented process itself never settles anything, but the process its
+    /// debt would be charged to does see growth: `claude` is a node process that
+    /// reaps the next `Bash` on nearly every tick, so a debt its own counter
+    /// will never settle would be settled by somebody else's. So the debt is
+    /// addressed to the debtor's **last-seen parent** rather than to the first
+    /// surviving ancestor — a process last seen under pid 1 is written down
+    /// nowhere at all, because the counter had already left the tree while the
+    /// sweep was still watching.
     ///
     /// Reparenting is visible in `ppid`, and that is what makes the rule work:
     /// when a parent dies the next sweep sees its children under pid 1. What is
@@ -502,12 +488,8 @@ enum SessionProcesses {
     /// **Nothing here can come out below zero**, and that is a property rather
     /// than a clamp: `settled` is bounded by `childDelta`, so every process's
     /// figure is a difference of two non-decreasing counters plus a non-negative
-    /// remainder. The floor this function used to end with was load-bearing
-    /// while a vanished process's total was subtracted outright; with the ledger
-    /// there is no subtraction left for it to catch, and a branch that cannot
-    /// execute is worse than no branch — it looks like a guard. The invariant it
-    /// leaves behind is what `testSettlementCannotOutrunTheGrowthItSettles` asks
-    /// instead.
+    /// remainder. `testSettlementCannotOutrunTheGrowthItSettles` holds that
+    /// invariant.
     static func rates(previous: [Key: Counters],
                       current: [Key: Counters],
                       elapsed: TimeInterval,
@@ -562,11 +544,8 @@ enum SessionProcesses {
             // is not harmless bookkeeping: it would count itself among
             // `PassStats.openDebts` and, if its heir happened to see no growth
             // for the whole lifetime, among `expiredDebts` too — which are the
-            // statistics `debtLifetimeSeconds` is argued from. It is also the
-            // entry `settle` used to stop on. Rare rather than impossible —
-            // census 27.08.2026, 90 passes a second apart: 65 894 rows, **not
-            // one** with a zero total, and 291 vanishings, none of them — so it
-            // is refused here rather than tolerated downstream.
+            // statistics `debtLifetimeSeconds` is argued from. Rare rather than
+            // impossible, so it is refused here rather than tolerated downstream.
             guard before.total > 0 else { continue }
             guard let addressee = heir(of: debtor, lastSeen: previous,
                                        byPID: lastSeenByPID, survivors: survivors)
@@ -605,8 +584,7 @@ enum SessionProcesses {
             let settled = settle(growth: child, against: byHeir[key] ?? [], owed: &owed)
             // "Measured, and burned nothing" is `0` — a different answer from
             // "not measured", which is the absence, and the row draws the two
-            // differently (§3.1). Dropping the zeros instead reported `nil` for
-            // every quiet session, which a live probe caught on a shell.
+            // differently (§3.1).
             percent[key] = Double(own + (child - settled)) / 1e9 / elapsed * 100
         }
         return Rates(percentByKey: percent, debts: owed, expired: expired)
@@ -630,20 +608,15 @@ enum SessionProcesses {
     /// first is what keeps one debtor's reap from settling another's, the second
     /// is what keeps the caller's unsigned subtraction from trapping.
     ///
-    /// **The loop stops when the growth runs out, and that is not the same
-    /// question as `take == 0`.** `take` is `min(debt, left)`, so it is zero for
-    /// two unrelated reasons — the growth has gone, or *this* debt is zero — and
-    /// stopping on the second abandons every debt behind it. A zero debt sorts
-    /// to the front of its heir's bucket (ties on age break on the lower pid),
-    /// so the debt behind it is the real one: measured on this fixture, an heir
-    /// owed one second against one second of growth reported **100% instead of
-    /// 0%**, with the real debt still standing to eat a neighbour's growth later
-    /// or to expire and be charged twice. And the zero entry was not even
-    /// cleared, the removal sitting behind the `break`, so it repeated every
-    /// pass until it aged out. Asking `left` instead settles the zero debt for
-    /// nothing — `take == entry.debt.nanos` clears it — and carries on.
-    /// `rates` declines to write a zero debt down in the first place, so this is
-    /// the second of two guards rather than the only one.
+    /// **The loop stops when the growth runs out, not when `take == 0`.** `take`
+    /// is `min(debt, left)`, so it is zero for two unrelated reasons — the growth
+    /// has gone, or *this* debt is zero — and stopping on the second would
+    /// abandon every debt behind it. A zero debt sorts to the front of its heir's
+    /// bucket (ties on age break on the lower pid), so the debt behind it is the
+    /// real one. Asking `left` instead settles the zero debt for nothing —
+    /// `take == entry.debt.nanos` clears it — and carries on. `rates` declines
+    /// to write a zero debt down in the first place, so this is the second of
+    /// two guards rather than the only one.
     private static func settle(growth: UInt64,
                                against debts: [(debtor: Key, debt: Debt)],
                                owed: inout [Key: Debt]) -> UInt64 {
@@ -697,22 +670,18 @@ enum SessionProcesses {
     /// deduction — the growth that arrives decides how much of it was real
     /// (SPEC §2.8).
     ///
-    /// **How often that is, measured rather than assumed** (live census
-    /// 27.08.2026, 200 passes a second apart, 474 debts): 348 were addressed
-    /// straight to a last-seen parent that was still there, **126 climbed** past
-    /// a parent that had gone in the same gap — two to eight links — and 60 more
-    /// were addressed nowhere at all, having been last seen under launchd. Those
-    /// 60 carry 4.449 core-seconds between them, and that is the whole of what
-    /// this rule declines to charge anybody: 0.6% of everything that left the
-    /// table in the window, and it is a matter of the figure being low rather
-    /// than of a spike. **Not 0.6% of the 755.135 core-seconds
-    /// `debtLifetimeSeconds` quotes** — those are what was *owed*, by the 474
-    /// debts, and these 60 are by construction not owed by anybody; the two are
-    /// disjoint halves of what left the table, so one number cannot wear both
-    /// labels. The ratio survives the difference and the label does not.
-    /// Every one of the 126 climbs was settled by growth
-    /// arriving at the ancestor — which is a frequency and not an acquittal,
-    /// because nothing in the table says that growth was the debtor's own.
+    /// How often that is, measured over 200 passes a second apart (474 debts):
+    /// 348 were addressed straight to a last-seen parent that was still there,
+    /// **126 climbed** past a parent that had gone in the same gap — two to
+    /// eight links — and 60 more vanishings were addressed nowhere at all,
+    /// having been last seen under launchd. Those 60 carry 4.449 core-seconds
+    /// between them, which is the whole of what this rule declines to charge
+    /// anybody: about 0.6% of everything that left the table, an error toward a
+    /// low figure rather than a spike. They are disjoint from the core-seconds
+    /// `debtLifetimeSeconds` quotes, which are what the 474 debts *owed*. Every
+    /// one of the 126 climbs was settled by growth arriving at the ancestor —
+    /// a frequency and not an acquittal, because nothing in the table says that
+    /// growth was the debtor's own.
     static func heir(of key: Key,
                      lastSeen: [Key: Counters],
                      byPID: [Int32: Key],
@@ -765,43 +734,27 @@ enum SessionProcesses {
     /// Processes the kernel will not talk about are dropped without a word: they
     /// belong to another user and can never be a session's.
     ///
-    /// **The counts here are of a moving table, and every figure names the call
-    /// it is about.** One sweep is a snapshot of a process table that turns over
-    /// while it is being read, so a single pair of numbers reads like a constant
-    /// and is not one: two figures recorded a day apart in this project — "195
-    /// of 893 refused" and "893 pids, 693 readable" — were taken for a
-    /// contradiction, and they are the same machine at two moments. Measured as
-    /// a range instead, 200 sweeps a second apart, 27.08.2026: **863…893 pids
-    /// listed, 669…699 answering `proc_pid_rusage`, 669…699 answering
-    /// `PROC_PIDTBSDINFO`, 669…699 answering both** — which is what this
-    /// function keeps. Roughly 195 refused, and the width of the range is the
-    /// answer to how precise that is.
+    /// One sweep is a snapshot of a process table that turns over while it is
+    /// being read, so its counts are a range, not a constant: over 200 sweeps a
+    /// second apart, 863…893 pids listed and 669…699 answering
+    /// `proc_pid_rusage`, `PROC_PIDTBSDINFO` and both — which is what this
+    /// function keeps. Roughly 195 are refused.
     ///
-    /// **The two calls do not refuse the same processes**, and the record here
-    /// used to say they did — "698 answered `PROC_PIDTBSDINFO`, the same 698
-    /// answered `proc_pid_rusage`, 0 answered one and not the other". The
-    /// counterexample is a **zombie**: a process that has exited and not yet
-    /// been waited for stays in `proc_listallpids` and goes on answering
-    /// `proc_pid_rusage` with its final counters, while `PROC_PIDTBSDINFO`
-    /// refuses it outright. In the census above **2 sweeps of the 200 caught a
-    /// pid that answered `proc_pid_rusage` and not `PROC_PIDTBSDINFO`**, each
-    /// for a single sweep, and none the other way round (3 of 200 in the run of
-    /// 26.08.2026 — the event is that rare, and counting it twice is how one
-    /// learns the rate rather than the number). What the old census established
-    /// is only its own narrower claim — that on that one run the two calls
-    /// agreed — and even that said nothing about parents and children, which is
-    /// what it was quoted for.
+    /// **The two calls do not refuse the same processes.** A **zombie** — a
+    /// process that has exited and not yet been waited for — stays in
+    /// `proc_listallpids` and goes on answering `proc_pid_rusage` with its final
+    /// counters, while `PROC_PIDTBSDINFO` refuses it outright. It is rare (2 of
+    /// 200 sweeps caught one, each for a single sweep, none the other way round)
+    /// but ordinary.
     ///
-    /// A hole is therefore ordinary, and the two things reading this table are
-    /// not equally ready for one. **Attribution is guarded**: `walkUp` tells
-    /// `broken` from `reachedTop`, so a chain that ran out of links buys the
-    /// marker nothing and nobody is reported as an orphan on the strength of a
-    /// parent the sweep merely could not see. **The rate was not.** A dropped
-    /// row looked exactly like a process that had been reaped, and its total was
-    /// deducted from an inheritor that had not gained a nanosecond of it — the
-    /// zombie above is precisely that shape, and the deduction floored the tick
-    /// to zero and then spiked by the whole lifetime when the reap really
-    /// landed. That is what the ledger in `rates` is for (SPEC §2.8).
+    /// A hole is therefore ordinary, and both readers of this table account for
+    /// it. **Attribution**: `walkUp` tells `broken` from `reachedTop`, so a chain
+    /// that ran out of links buys the marker nothing and nobody is reported as
+    /// an orphan on the strength of a parent the sweep merely could not see.
+    /// **The rate**: a dropped row looks exactly like a process that has been
+    /// reaped, and deducting its total at once would floor the tick to zero and
+    /// then spike by the whole lifetime when the reap really landed. That is
+    /// what the ledger in `rates` is for (SPEC §2.8).
     static func listProcesses() -> [Sampled] {
         let reported = proc_listallpids(nil, 0)
         guard reported > 0 else { return [] }
@@ -828,22 +781,19 @@ enum SessionProcesses {
     ///
     /// Those fields are **not** nanoseconds, whatever the `_time` in their names
     /// suggests: they are mach absolute time units, and on this machine one unit
-    /// is 125/3 = 41.667 ns. Dividing them by `1e9` reported three processes
-    /// each burning a whole core as 7.25% of one — every figure on the panel was
-    /// 41.7 times too small.
+    /// is 125/3 = 41.667 ns. Dividing them by `1e9` would make every figure 41.7
+    /// times too small.
     ///
     /// Read once, because the ratio cannot change while the system is up. Not
     /// written down as 125/3, because it differs between Apple silicon
     /// generations and is 1/1 on Intel.
     ///
-    /// Spelled `nonisolated` although this enum has no global actor to be
-    /// isolated to today: it is read from `listProcesses`, which the snapshot
-    /// assembly calls off the main thread, and a globally-isolated `static let`
-    /// hops its reader onto the main actor without a word of warning (§6). The
-    /// modifier is what stops that from arriving as a side effect of somebody
-    /// annotating the enum — and it is on **every** stored constant of this
-    /// enum for that reason, not on this one alone. One door left open is the
-    /// same hop as four.
+    /// `nonisolated` although this enum has no global actor to be isolated to:
+    /// it is read from `listProcesses`, which the snapshot assembly calls off
+    /// the main thread, and a globally-isolated `static let` hops its reader
+    /// onto the main actor without a word of warning (§6). The modifier keeps
+    /// that from arriving as a side effect of somebody annotating the enum, and
+    /// it is on **every** stored constant of this enum for that reason.
     nonisolated static let timebase: (numer: UInt64, denom: UInt64) = {
         var info = mach_timebase_info_data_t()
         guard mach_timebase_info(&info) == KERN_SUCCESS, info.numer > 0, info.denom > 0 else {
@@ -919,11 +869,8 @@ enum SessionProcesses {
     /// platform binary carrying `CS_RESTRICT` — `/bin/sleep`, `/bin/bash`,
     /// `/usr/bin/git`, `/bin/cp` all answer that way, whatever is actually in
     /// their environment, while `/opt/homebrew/bin/node` and `/usr/bin/python3`
-    /// hand the whole block over. On this machine 296 of the 682 readable
-    /// processes (43%) cannot present a marker at all — the census SPEC §2.8
-    /// records, quoted rather than restated, because a second run of the same
-    /// count on a machine that keeps forking is a second number, not a check
-    /// of the first.
+    /// hand the whole block over. On this machine about 43% of readable
+    /// processes cannot present a marker at all (the census is in SPEC §2.8).
     enum Marker: Sendable, Equatable {
         /// The environment was readable and named a session.
         case pid(Int32)
@@ -1076,8 +1023,7 @@ final class ProcessSampler: @unchecked Sendable {
         /// tautology no mutation can break (§6).
         var cacheEntries: Int
         /// Entries the counter table holds afterwards, likewise off the field.
-        /// It is the other half of "the tables are rebuilt", and it was the
-        /// unchecked half.
+        /// It is the other half of "the tables are rebuilt".
         var counterEntries: Int
         /// Debts the ledger still holds after the pass: CPU reported for
         /// processes that have left the table and has not arrived anywhere yet
@@ -1119,12 +1065,11 @@ final class ProcessSampler: @unchecked Sendable {
     /// tables are rebuilt from this sweep, so a process that has gone takes its
     /// entries with it.
     ///
-    /// The whole pass is under the lock, the sweep included. Reading the clock
-    /// outside it was a trap rather than a saving: two overlapping calls could
-    /// leave `previousAt` ahead of a later call's `now`, and `now - previousAt`
-    /// on `UInt64` does not go negative, it crashes. And there was little to
-    /// save — the expensive half of a cold pass is the environment reads, which
-    /// were under the lock already.
+    /// The whole pass is under the lock, the sweep included. With the clock read
+    /// outside it, two overlapping calls could leave `previousAt` ahead of a
+    /// later call's `now`, and `now - previousAt` on `UInt64` traps. The
+    /// expensive half of a cold pass is the environment reads, which need the
+    /// lock anyway.
     func sample(sessionPIDs: Set<Int32>) -> SessionProcesses.Load {
         lock.lock()
         defer { lock.unlock() }
@@ -1133,8 +1078,7 @@ final class ProcessSampler: @unchecked Sendable {
         // Read after the sweep, not before it. The counters are read *during*
         // the sweep (0.94–6.6 ms, §6), so a timestamp taken on the far side of
         // it on one pass and the near side on the next describes a different
-        // interval from the one the counters describe. Same side both times is
-        // the whole of the fix.
+        // interval from the one the counters describe. Same side both times.
         let now = DispatchTime.now().uptimeNanoseconds
 
         if argumentBuffer.count != SessionProcesses.argumentsMaximum {

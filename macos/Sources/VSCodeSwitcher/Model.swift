@@ -156,9 +156,8 @@ struct ProjectActivity: Sendable, Equatable {
 /// is resolved again from `pid` + `windowNumber` when a window has to be raised.
 struct VSCodeWindowInfo: Sendable, Codable, Identifiable, Hashable {
     /// Stable for as long as the window exists, and — unlike the z-order index
-    /// it falls back to — unaffected by raising any window. Every row's
-    /// identity used to change on every click, which reset the selection, the
-    /// hover highlight and the scroll position of the whole list.
+    /// it falls back to — unaffected by raising any window, so a click does not
+    /// reset the selection, the hover highlight or the scroll position.
     var id: String {
         guard let windowNumber else { return "\(pid):\(windowIndex)" }
         return "\(pid):w\(windowNumber)"
@@ -346,9 +345,8 @@ struct SwitcherRow: Sendable, Codable, Identifiable {
     /// claim about the *present*. While anything in the window is still running
     /// the window is not finished, and the honest answer is "busy, come back
     /// later", not "ready, go read it". The green tick has to mean the window
-    /// really has gone quiet and only the reading is left. This was caught live:
-    /// the main chat had answered while a subagent went on working, and the row
-    /// declared itself done over a window that was visibly working.
+    /// really has gone quiet and only the reading is left — not, say, a main
+    /// chat that answered while a subagent goes on working.
     ///
     /// `blocked` still outranks everything: that chat needs a human and the wait
     /// is pure idle time, which does not keep. `done` is a message that does.
@@ -425,12 +423,8 @@ struct SwitcherSnapshot: Sendable, Codable {
     /// The two buckets hold **different sets by construction**: each report
     /// narrows its contest by its own window start (`UsageIndex.narrowToWindow`,
     /// called once per report), so one session's contest is settled inside the
-    /// hour and still open over the week, and the two empty apart. That is not a
-    /// hypothetical — it is this machine's ordinary reading: four dumps of the
-    /// release build on 2026-08-28, three within seconds of 04:33 and one at
-    /// 04:49, all gave `ambiguous 7d: 12 sessions` against `ambiguous 1h: 0
-    /// sessions, -`. The week's tokens drift between them (582.53M to 589.86M ie)
-    /// and the counts do not, which is the half of the reading this is about. One
+    /// hour and still open over the week, and the two empty apart (a typical
+    /// reading is 12 ambiguous sessions over the week and 0 over the hour). One
     /// bucket for both would report the hour's refusal as a week's number.
     ///
     /// **Failure is a second way in**, and it is the one that makes the split
@@ -441,11 +435,8 @@ struct SwitcherSnapshot: Sendable, Codable {
     /// reports, which is exactly the silent loss the split exists to prevent.
     ///
     /// The gateway's cap on the week — its 200 largest consumers, the rest dropped
-    /// with `truncated` set (SPEC §2.7) — is a third way in, and it is **not
-    /// firing on this machine**: measured 2026-08-27, the week's report came back
-    /// with 116 sessions and `truncated: false`, and `--dump`'s `window:` line
-    /// carried no truncation suffix. So the *reported* hour's sessions are a
-    /// subset of the week's today; what the two buckets make of them is not.
+    /// with `truncated` set (SPEC §2.7) — is a third way in: once it fires, the
+    /// reported hour's sessions are no longer a subset of the week's.
     var ambiguousHourlyUsage: TokenCounts = .zero
     var ambiguousHourlySessions: Int = 0
 

@@ -6,54 +6,21 @@ import SwiftUI
 /// The press that took the usage popover down, kept only long enough to tell it
 /// apart from the next press.
 ///
-/// A `.transient` popover is dismissed from the mouse-*down*, while the status
-/// item's action is sent on the mouse-*up* (`sendAction(on:)` in
-/// `installStatusItem`). Measured on a bench of synthesised `NSEvent`s posted
-/// into the app's own queue, with the down and the up 300 ms apart:
-/// `popoverDidClose` arrives 1–6 ms after the down, `NSApp.currentEvent` at that
-/// instant being the down itself. So the two halves of one press are 300 ms
-/// apart with nothing but the moment shared between them, and `isShown` — false
-/// by the time the action runs — cannot tell that press from the next one.
+/// A `.transient` popover is dismissed on the mouse-down, while the status
+/// item's action arrives on the mouse-up, so `isShown` is false either way and
+/// cannot tell the dismissing press from a new one. Two rules decide instead:
 ///
-/// Two things decide it here instead, and neither is the length of the press:
+/// - The mark is set only if a mouse button was still down when the popover
+///   closed (`NSEvent.pressedMouseButtons`, the hardware state; not
+///   `NSApp.currentEvent`, which goes stale). Esc and programmatic
+///   `performClose` arm nothing.
+/// - The mark is spent by the first click that asks, whatever the answer, so a
+///   press whose second half never arrives costs at most one click.
 ///
-/// - **A button was still down when the popover went away.** That is the mark of
-///   a press in flight, and it is `NSEvent.pressedMouseButtons`, the hardware
-///   state at that instant rather than anything remembered. Measured: 1 at a
-///   close a real press caused (three of them, from clicks that landed on the
-///   machine while the bench was running), 0 at a `performClose` called from a
-///   timer. Which is what keeps a dismissal by Esc, and `showStatusMenu`'s own
-///   `performClose`, from arming anything. Not `NSApp.currentEvent`: it is the
-///   last event *retrieved from the queue* and goes stale — at a programmatic
-///   close it named an `appKitDefined` event 1.4 s old.
-/// - **One press, one answer.** The mark is spent by the first click that asks,
-///   whatever the answer, so a press whose second half never arrives can cost
-///   at most that one click: the click after it is somebody's first half either
-///   way.
-///
-/// The window is what is left over: the backstop for exactly that second half
-/// never arriving. What it *bounds*, though, is not the length of that press,
-/// and the measurement is what says so. On the bench the dismissing left press
-/// never reached the action at all — its mouse-down is swallowed by the
-/// popover's own dismissal monitor, and a status item sends no action for an up
-/// whose down it never saw (`toggleUsagePopover` has the whole of it). So the
-/// mark is not spent by the press that left it: it is spent by whichever click
-/// comes next, and the interval measured against the window is the pause
-/// between two clicks.
-///
-/// Which gives the window a price, and the price is one click. An ordinary
-/// double click on the status item — `down#1 → up#2`, 200–350 ms — has its
-/// second half swallowed if that half lands inside the window: the popover
-/// closes on the first click and does not come back on the second. At the 0.4 s
-/// this replaces, the whole of that range was inside. 0.25 s is about as narrow
-/// as the band can be made while still leaving room for the case the guard is
-/// here for: a press whose action does arrive, ending the press that began it.
-///
-/// That case is also why the guard stands at all, and why "it never fires on
-/// the bench" is not grounds for taking it out: the live HID path is not
-/// reachable from a test. A status item put up while the menu bar is full parks
-/// off screen (x = -14322), and clicking the running app's own item means a
-/// rebuilt bundle, which revokes its Accessibility grant (README).
+/// With synthesised events the dismissing left press never reaches the action
+/// at all, so the window effectively bounds the pause before the next click; it
+/// is kept narrow (0.25 s) so an ordinary double click is rarely swallowed. The
+/// guard stays for the live HID path, which cannot be reproduced in a test.
 struct PopoverDismissal: Equatable {
 
     /// How long after such a close a click is still taken to be the second half
@@ -96,10 +63,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// than inside it: one is disk-bound and runs every second, the other talks
     /// to the network once a minute. They meet in `UsageCache`.
     private let usage: UsageStore
-    /// Utilisation over time for the popover's chart. **This object** fetches
-    /// only while the popover is open — the endpoint behind it is not that
-    /// exclusive, `usage` above reads the same histories every ten minutes for
-    /// the burn ratio (`UsageClient.history`).
+    /// Utilisation over time for the popover's chart, fetched only while the
+    /// popover is open. `usage` above also reads the same histories every ten
+    /// minutes for the burn ratio (`UsageClient.history`).
     private let history: UsageHistoryModel
     private let trigger: EdgeTrigger
     private let panel: PanelController
@@ -114,8 +80,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the instant it is being shown — see `showStatusMenu`.
     private var statusMenu: NSMenu?
     private var screenObserver: (any NSObjectProtocol)?
-    /// Light and dark are an input to the picture now that it is not a template
-    /// (`MenuBarIcon`), so a change of them is a reason to redraw it.
+    /// The picture is not a template (`MenuBarIcon`), so a light/dark change
+    /// requires a redraw.
     private var appearanceObserver: NSKeyValueObservation?
     private var cancellables = Set<AnyCancellable>()
 
@@ -192,14 +158,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `panelDidMove`, which refreshes the frame without disarming an auto-hide
     /// that may already be counting down.
     ///
-    /// The status item's picture is redrawn for a related reason: it is a bitmap
-    /// rasterised once, at the scale in force when it was drawn (see
-    /// `MenuBarIcon.image`), and otherwise only redrawn when the figure behind it
-    /// changes — which can be hours. A display of a different backing scale
-    /// arriving is exactly the event that invalidates it. Unlike the panel's
-    /// half this one is reasoned, not observed: there is one screen on the
-    /// machine this was written on, so what a mismatched scale looks like is
-    /// untested. It costs one bitmap on an event that happens by hand.
+    /// The status item's picture is redrawn too: it is a bitmap rasterised at
+    /// the backing scale in force when drawn (`MenuBarIcon.image`), and a
+    /// display with a different scale invalidates it. This part is untested on
+    /// a multi-display setup.
     private func observeScreenParameters() {
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -215,38 +177,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The menu bar going from light to dark is the other event that invalidates
-    /// the picture, and it is not the figure changing — nothing in the snapshot
-    /// moves, so `observeUsage` below never fires and the icon would keep its old
-    /// ink until the next poll that happened to say something new. Which can be
-    /// hours: the figure is a rounded percentage and mostly repeats.
+    /// The menu bar switching between light and dark also invalidates the
+    /// picture: it is not a template, so it is drawn against one appearance
+    /// (`MenuBarIcon.image`), and `observeUsage` does not fire because the
+    /// figure has not changed.
     ///
-    /// Since the picture stopped being a template it is drawn against one
-    /// appearance and holds it (`MenuBarIcon.image`), so a stale one is dark ink
-    /// on a dark menu bar.
-    ///
-    /// The button's own appearance and not `NSApp`'s, which is what stood here
-    /// under the reasoning that the two are "a dependency for no difference on a
-    /// machine where the menu bar and the app share an appearance". They do not
-    /// share one: measured 2026-08-18, `NSApp.effectiveAppearance` is
-    /// `NSAppearanceNameDarkAqua` while the status item's button is
-    /// `NSAppearanceNameVibrantDark`, and forcing `NSApp.appearance` to `aqua`
-    /// leaves the button on `VibrantDark` — the menu bar follows the wallpaper,
-    /// not the system theme (`MenuBarIcon.appearance(ofButton:system:)` records
-    /// the whole measurement). Both halves failed together: the picture resolved
-    /// its ink against the wrong appearance, and the theme it watched had not
-    /// changed, so nothing redrew it.
-    ///
-    /// `effectiveAppearance` is KVO-compliant on the button too, which is not a
-    /// thing to assume of a derived property — measured in the same scratch
-    /// process, three changes of the button's own `appearance` (to `darkAqua`,
-    /// to `aqua`, back to inherited) delivered three notifications, while the
-    /// three changes of `NSApp.appearance` delivered none, the button's
-    /// effective appearance not having moved.
-    ///
-    /// No fallback branch to `NSApp`: with no button there is no picture to
-    /// redraw, and an observer that watched the app in that case would be
-    /// keeping a bitmap nobody is showing up to date.
+    /// The button's own appearance is observed, not `NSApp`'s: the menu bar
+    /// follows the wallpaper, so the button can be `VibrantDark` while the app
+    /// is `aqua` (`MenuBarIcon.appearance(ofButton:system:)`). The button's
+    /// `effectiveAppearance` is KVO-compliant (measured). With no button there
+    /// is nothing to redraw, so there is no fallback to `NSApp`.
     private func observeAppearance() {
         guard let button = statusItem?.button else { return }
         appearanceObserver = button.observe(\.effectiveAppearance) { [weak self] _, _ in
@@ -275,27 +215,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The status item: a picture that carries the fleet's burn ratio, a left
     /// click that opens the popover and a right click that opens the menu.
     ///
-    /// The menu is deliberately *not* left sitting on `item.menu`. A status item
-    /// with a menu attached hands both mouse buttons to it and never sends its
-    /// action at all, so the left click could not do anything else. It is
-    /// attached for the length of one `performClick` instead, which is what
-    /// keeps the button highlighted while the menu is down.
+    /// The menu is not left on `item.menu`: a status item with a menu sends no
+    /// action for either button. It is attached for one `performClick` instead,
+    /// which keeps the button highlighted while the menu is down.
     private func installStatusItem() {
-        // Not `squareLength`: the picture is a bar and a number, and it is wider
-        // than it is tall. No app glyph in front of them — that one was thrown
-        // out on sight (`MenuBarIcon`).
+        // Not `squareLength`: the picture is a bar and a number, wider than tall.
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // Against the button's own appearance from the very first picture, and
-        // that one is asked of `item` rather than of the property: the property
-        // is assigned further down, and a first picture drawn against the app's
-        // appearance would be the wrong ink until something happened to redraw it.
+        // Uses `item.button` directly: `statusItem` is assigned further down,
+        // and the first picture must already use the button's appearance.
         item.button?.image = MenuBarIcon.image(
             for: nil,
             appearance: MenuBarIcon.appearance(ofButton: item.button,
                                                system: NSApp.effectiveAppearance))
-        // No `toolTip` on purpose: the tag popped up on every pass of the
-        // pointer over the menu bar and was asked for gone. The picture and the
-        // popover behind the click are how the item explains itself.
+        // No `toolTip` on purpose: it pops up on every pass over the menu bar.
         item.button?.target = self
         item.button?.action = #selector(statusItemClicked)
         // Both buttons have to reach the action for it to be able to tell them
@@ -320,9 +252,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: UsagePopoverView(usage: usage, history: history))
 
         // The panel's auto-hide can call `NSApp.hide`, which would take an open
-        // popover down with it. That is one of the four states `canHideApp`
-        // knows about, and the only one it has to ask this delegate for — the
-        // popover is AppKit's, not the panel controller's.
+        // popover down with it; `canHideApp` asks this delegate about it.
         panel.isPopoverOpen = { [weak self] in self?.popover.isShown ?? false }
 
         observeUsage()
@@ -330,18 +260,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Redraws the picture when — and only when — what it is drawn from changes.
     ///
-    /// `removeDuplicates` over the whole reason for the drawing, not over the
-    /// snapshot: a poll lands once a minute and mostly says the same thing, and
-    /// the picture is a pure function of one ratio, so two equal values cannot
-    /// produce two different pictures. No timer of its own — the store's poll is
-    /// the whole schedule.
-    ///
-    /// The reading moves on a schedule of its own: the histories are refetched
-    /// every ten minutes, so most passes leave the ratio exactly where it was. It
-    /// also has an age ceiling, which is why it is worked out here rather than
-    /// carried in the snapshot — a ratio nobody has confirmed for twenty minutes
-    /// drops out of the picture on the next pass that publishes anything, and the
-    /// poll publishes every minute whatever the gateway says.
+    /// The picture is a pure function of the ratio, so duplicates are removed on
+    /// the ratio, not the snapshot. No timer of its own: the store polls every
+    /// minute. The ratio is computed here rather than carried in the snapshot
+    /// because it has an age ceiling: a ratio unconfirmed for twenty minutes
+    /// drops out on the next published poll.
     private func observeUsage() {
         usage.$snapshot
             .map { MenuBarIcon.ratio(for: $0) }
@@ -357,12 +280,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Left click opens the popover, right click (and control-click, which is
     /// the same gesture on a one-button mouse) opens the menu.
     ///
-    /// Only the popover's half asks `PopoverDismissal` anything, and that is not
-    /// an oversight. Measured: a right press over an open popover takes it down
-    /// on its own mouse-down and then *does* deliver the action on the mouse-up,
-    /// about a millisecond later — the left button's does not, its down being
-    /// swallowed. A guard on this path would therefore swallow the menu itself,
-    /// every time it is asked for over an open popover.
+    /// Only the popover path asks `PopoverDismissal`: a right press over an open
+    /// popover dismisses it and still delivers the action, so a guard here would
+    /// swallow the menu.
     @objc private func statusItemClicked() {
         guard let event = NSApp.currentEvent else {
             toggleUsagePopover()
@@ -377,29 +297,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Puts the menu up under the status item, then takes it off again.
     ///
-    /// `popUp(positioning:at:in:)` would work too, but leaving the menu on the
-    /// item for the duration of one `performClick` is what makes AppKit draw the
-    /// button highlighted while the menu is open, exactly as it did when the
-    /// menu lived there permanently.
+    /// Attaching the menu for one `performClick`, rather than
+    /// `popUp(positioning:at:in:)`, makes AppKit draw the button highlighted.
     private func showStatusMenu() {
         guard let item = statusItem, let menu = statusMenu else { return }
-        // Declared before anything else happens, because the very next line can
-        // hide the app: closing the popover hands the keyboard back, and a
-        // hand-back with nothing left in front of it calls `NSApp.hide`, which
-        // cancels menu tracking — here, the tracking that has not begun yet, one
-        // instruction before it does. `canHideApp` reads the flag and answers no
-        // meanwhile. Standing the close far enough from the click would not be a
-        // defence: it holds only as long as AppKit delivers that close
-        // synchronously, which is nobody's promise and which `animates = false`
-        // makes likelier rather than certain.
+        // First: closing the popover hands the keyboard back, which can call
+        // `NSApp.hide` and cancel the menu tracking about to start. `canHideApp`
+        // reads this flag and refuses meanwhile.
         panel.menuWillOpen()
-        // A menu opening over an open popover would leave two things up at once.
-        // Measured, that is belt and braces rather than the working part: the
-        // right button's mouse-*down* dismisses a transient popover just as the
-        // left one's does, ~300 ms before this action runs, so what this closes
-        // is almost always a popover that is already down. Kept because it costs
-        // nothing on an already-closed popover and because "almost always" is
-        // measured over one bench, not proved.
+        // Usually a no-op (the right mouse-down already dismissed the transient
+        // popover), but it guarantees the menu never opens over the popover.
         popover.performClose(nil)
         item.menu = menu
         // Returns when the tracking is over — the menu runs its own loop — so
@@ -411,47 +318,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func toggleUsagePopover() {
         guard let button = statusItem?.button else { return }
-        // The click that dismissed the popover must not open it again — the user
-        // asked for a close and saw a blink. `isShown` cannot tell the two
-        // presses apart: it is false here either way, because `.transient` took
-        // the popover down on the mouse-down of whichever press this is. What
-        // can is `PopoverDismissal`, and every word of its rule was measured on
-        // the bench described there.
-        //
-        // The branch that used to stand here — `if popover.isShown { close }` —
-        // was removed rather than kept as the fix: it could not run. Its
-        // documented entrance was a programmatic `performClick`, and the only
-        // one in this app is made with `item.menu` already attached, which is
-        // exactly the state in which a status item sends no action at all.
-        //
-        // What the bench could not reproduce is a real mouse: the status item it
-        // put up landed off screen (a full menu bar parks the overflow at
-        // x = -14322), so a click posted at its own coordinates would have gone
-        // somewhere else, and clicking the running app's item needs a rebuilt
-        // bundle — which revokes the Accessibility grant of the copy the user is
-        // running (README). With synthesised events the dismissing *left* press
-        // never reached this method at all: its mouse-down is swallowed by the
-        // popover's own dismissal monitor, and a status item button sends no
-        // action for an up whose down it never saw (checked with a lone up,
-        // which produces nothing, and with the press after, which works). So on
-        // that bench this guard has nothing to catch — it stands for the case
-        // the bench cannot show, and costs one ignored click in a 0.25 s window
-        // after a dismissal it did not catch.
+        // The click that dismissed the popover must not reopen it; `isShown` is
+        // false either way, so `PopoverDismissal` decides.
         guard !dismissal.shouldIgnoreClick(at: Date()) else { return }
-        // Same reasoning as the panel's search field (§4): this app is an
-        // `LSUIElement` that never activates on its own, so without this the
-        // first click inside the popover is spent activating the app instead of
-        // hitting the period picker it landed on. Probed: right after `show`
-        // the app is not yet active, half a second later it is and the popover's
-        // window is key — which is what the picker needs.
-        //
-        // Through the panel controller, because the hand-back is accounted for
-        // there and an activation off that account is one nobody gives back —
-        // see `PanelController.activateAppForOwnWindow`. This call is also what
-        // undoes the `NSApp.hide` that settles it: probed from the hidden state,
-        // `activate` plus `show` brings the popover back up with `isHidden`
-        // cleared, so there is no `unhide` to remember — the same arrangement
-        // the panel has with `orderFrontRegardless`.
+        // An `LSUIElement` never activates on its own, so without this the first
+        // click inside the popover only activates the app (§4). It goes through
+        // the panel controller, which accounts for the later hand-back, and it
+        // also clears a previous `NSApp.hide`, so no `unhide` is needed.
         panel.activateAppForOwnWindow()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         history.open(labels: usage.snapshot.accounts.map(\.label))
@@ -479,9 +352,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Opens `~/.config/vscode-switcher/config.json`, writing the current
-    /// effective values first when the file does not exist yet. The data layer
-    /// deliberately never creates the file on its own, so this is the one place
-    /// where an explicit user action may.
+    /// effective values first when the file does not exist yet. This explicit
+    /// user action is the only place the file is ever created.
     @objc private func openConfig() {
         let url = Config.fileURL
         if !FileManager.default.fileExists(atPath: url.path) {
@@ -534,14 +406,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Launch-time permission handling: the system prompt, and nothing else.
     ///
     /// `AXIsProcessTrustedWithOptions` shows its dialog asynchronously and
-    /// returns the *current* (still false) status immediately, so there is no
-    /// point waiting for an answer. macOS shows it only once per bundle, so a
-    /// second call is a harmless no-op — which is exactly what is wanted here.
-    /// Opening System Settings instead, as this used to do once the flag was
-    /// set, meant that an app in the login items popped a settings window and
-    /// stole the focus at every login where the permission had gone stale, with
-    /// the user having done nothing at all. Going to the settings pane is now
-    /// reserved for an explicit click — see `requestAccessibility`.
+    /// returns the current (still false) status immediately; macOS shows it only
+    /// once per bundle. The settings pane is never opened at launch, so a login
+    /// item does not steal focus; that is reserved for an explicit click
+    /// (`requestAccessibility`).
     private func promptForAccessibilityIfNeeded() {
         let defaults = UserDefaults.standard
         guard !defaults.bool(forKey: Self.promptShownKey) else { return }
@@ -553,20 +421,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The user asked for the permission — the banner in the panel or the menu
     /// item. Both the system prompt and the settings pane, every time.
     ///
-    /// The prompt is asked for unconditionally on purpose. It is a no-op while a
-    /// TCC entry exists, and the remembered flag is not a reliable statement
-    /// about whether one does: `tccutil reset` — the way to clear the dead entry
-    /// an ad-hoc signature leaves behind after a rebuild — removes the entry
-    /// without telling the app.
+    /// The prompt is requested unconditionally: it is a no-op while a TCC entry
+    /// exists, and the remembered flag cannot tell, since `tccutil reset`
+    /// removes the entry without telling the app.
     ///
-    /// So is the settings pane, and that is the difference from the launch path.
-    /// Opening it only once the prompt was known to be used up left the click
-    /// doing nothing at all in the one case that matters: the permission
-    /// switched off while the app was running. The TCC entry survives that with
-    /// `allowed = 0`, so the prompt stays silent, while the flag had been
-    /// cleared the last time access was seen — the orange banner swallowed the
-    /// first click and only reacted to the second. A click on it is the explicit
-    /// action this branch was kept for.
+    /// The settings pane is opened unconditionally too: when the permission is
+    /// switched off while running, the TCC entry stays with `allowed = 0` and the
+    /// prompt is silent, so the pane is the only thing the click can do.
     private func requestAccessibility() {
         UserDefaults.standard.set(true, forKey: Self.promptShownKey)
         VSCodeWindows.requestAccessibilityPermission()
@@ -581,11 +442,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Forgets the remembered prompt as soon as the permission is actually
     /// there.
     ///
-    /// Without this the flag is set once and never cleared, so the app is stuck
-    /// on "open the settings pane" forever — including after `tccutil reset`,
-    /// which wipes the TCC entry and makes the one-shot prompt work again. The
-    /// snapshot recomputes the trust flag every second, so this catches the
-    /// grant whenever it happens.
+    /// Clearing the flag lets the one-shot prompt work again after
+    /// `tccutil reset`. The snapshot recomputes the trust flag every second.
     private func observeAccessibilityGrant() {
         store.$snapshot
             .map(\.accessibilityTrusted)
@@ -675,16 +533,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Only ever used for actions the user started from the status item menu,
     /// where the panel is already down and a modal is harmless.
     ///
-    /// The activation goes on the same account as the popover's and the search
-    /// field's, and the debt is settled when the modal ends. Done here with a
-    /// bare `NSApp.activate`, this was the third activator of an app that has no
-    /// window of its own once the alert is dismissed — §4's defect by the
-    /// shortest route there is: press "Check permissions", read the answer,
-    /// click OK, and the app stays frontmost with nothing on screen while the
-    /// keystrokes go nowhere. No exception for a modal was found: hiding is
-    /// unsafe *during* `runModal` (`canHideApp` answers no while
-    /// `NSApp.modalWindow` stands), and by the line after it there is nothing
-    /// left of ours to hide.
+    /// The activation goes through the panel controller like the popover's and
+    /// the search field's, and the keyboard is handed back when the modal ends;
+    /// otherwise the app stays frontmost with nothing on screen (§4).
+    /// `canHideApp` refuses while `NSApp.modalWindow` is set.
     private func presentAlert(title: String, message: String) {
         let alert = NSAlert()
         alert.messageText = title
@@ -703,32 +555,17 @@ extension AppDelegate: NSPopoverDelegate {
     /// The popover went away: stop asking the gateway for history, and give the
     /// keyboard back.
     ///
-    /// Both halves are the popover's side of a bargain made elsewhere. The
-    /// fetching is tied to the popover being open, which is what makes "closed,
-    /// no requests" a fact rather than a hope — `NSPopover` keeps its content
-    /// view controller alive between showings, so a SwiftUI `onDisappear` is not
-    /// a promise this can be hung on.
+    /// Fetching is tied to this delegate call rather than SwiftUI `onDisappear`,
+    /// because `NSPopover` keeps its content view controller alive between
+    /// showings.
     ///
-    /// The hand-back is the same defect `PanelController.releaseKeyboardFocus`
-    /// exists for (§4): this app is an `.accessory` with no window of its own
-    /// once the popover is down, and activating it is not undone by closing
-    /// that popover. A transient popover dismissed with Esc leaves the app
-    /// frontmost with nothing to type into, and the user's next keystrokes go
-    /// nowhere while their editor looks perfectly alive.
-    ///
-    /// Which is why it is asked of the panel controller rather than decided
-    /// here. Decided here, it could only settle the debt on the spot: a popover
-    /// dismissed over a *visible* panel had to be let go, and nothing then
-    /// picked the debt up when the panel slid away a moment later — the app
-    /// stayed frontmost with nothing on screen, the very defect above. Over
-    /// there the debt outlives both, and the postponed hand-back carries its own
-    /// retry for a menu or a modal standing in the way.
+    /// Closing the popover does not undo the activation, so without a hand-back
+    /// an `.accessory` app stays frontmost with nothing to type into (§4). The
+    /// panel controller decides when, so a popover closed over a visible panel
+    /// is handed back once the panel hides too.
     func popoverDidClose(_ notification: Notification) {
-        // Before anything else: the press that dismissed it may still be in
-        // flight, its second half due as this app's own action. Whether it is
-        // one is asked of the hardware here and nowhere else — see
-        // `PopoverDismissal`. This is also the one place the answer is available
-        // at all: a moment later the button is up and the state says nothing.
+        // First: whether the dismissing press is still in flight is only
+        // observable now, while the button is down (`PopoverDismissal`).
         dismissal.popoverClosed(at: Date(), midPress: NSEvent.pressedMouseButtons != 0)
         history.close()
         panel.popoverDidClose()

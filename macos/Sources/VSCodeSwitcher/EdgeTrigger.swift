@@ -38,9 +38,8 @@ final class EdgeTrigger {
     /// Frame of the panel while it is on screen, `nil` when it is hidden.
     private var panelFrame: NSRect?
     private var edgeEnteredAt: TimeInterval?
-    /// Which screen's edge `edgeEnteredAt` was measured against. Without it a
-    /// dwell begun on one display counted towards the dwell on another: 100 ms
-    /// at the edge of A, then a jump to B, and B opened after 50 ms.
+    /// Which screen's edge `edgeEnteredAt` was measured against, so a dwell
+    /// begun on one display does not count towards another.
     private var edgeScreenFrame: NSRect?
     private var leftAt: TimeInterval?
     private var needsRearm = false
@@ -76,24 +75,16 @@ final class EdgeTrigger {
         panelFrame = frame
         resetDwell()
         leftAt = nil
-        // The panel can also be opened from the status item menu, and the
-        // pointer is then in the opposite corner of the screen — outside the
-        // keep-open zone from the very first tick, so the panel used to slide
-        // back out 400 ms later. The countdown is armed only once the pointer
-        // has actually been inside.
+        // Opened from the status item menu, the pointer starts outside the
+        // keep-open zone, so the countdown is armed only once it has been inside.
         pointerWasInside = false
     }
 
     /// The panel is still up and only moved or resized — a display was plugged
     /// in, the resolution or the Dock changed.
     ///
-    /// Deliberately not `panelDidShow`: that one disarms the auto-hide by
-    /// clearing `pointerWasInside`, and a screen notification landing while the
-    /// pointer is already outside — the 400 ms are ticking — would zero a
-    /// countdown that then never starts again, because the pointer never
-    /// re-enters. The panel stayed on screen until a click landed elsewhere.
-    /// `didChangeScreenParameters` arrives for a plugged-in display and a Dock
-    /// setting too, not only for a resolution change.
+    /// Not `panelDidShow`: that clears `pointerWasInside`, and with the pointer
+    /// already outside the auto-hide countdown would never start again.
     func panelDidMove(frame: NSRect) {
         guard panelFrame != nil else { return }
         panelFrame = frame
@@ -147,15 +138,9 @@ final class EdgeTrigger {
         leftAt = nil
         guard let screen = Self.screen(containing: point) else { return }
 
-        // Only the stretch of the edge the panel itself will cover arms the
-        // trigger, so the panel always appears right where the pointer already
-        // is; the free strips above and below let the pointer run along the edge
-        // without summoning it. The rect comes from the panel's own geometry —
-        // and from the current screen's `visibleFrame`, not the main screen's —
-        // so the strip cannot drift away from what it opens. That includes the
-        // horizontal edge: the panel is placed against `visibleFrame.minX`, so
-        // measuring the edge from `frame.minX` would bury the trigger strip
-        // under a left-hand Dock while the panel came out to the right of it.
+        // Only the stretch of edge the panel will cover arms the trigger. The
+        // strip is the panel's own frame on this screen's `visibleFrame`, so
+        // its left edge sits beside a left-hand Dock, where the panel appears.
         let strip = PanelController.frame(on: screen, config: config)
 
         if needsRearm {

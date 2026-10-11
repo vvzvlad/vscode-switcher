@@ -355,13 +355,9 @@ final class TranscriptQuestionTests: XCTestCase {
     }
 }
 
-/// A `tool_use` tail says a turn was started, not that it is still running, and
-/// until this was added nothing ever took a transcript-sourced `working` back.
-/// The reproducer is session `3fc12f86-…` of home-network: its last assistant
-/// record is from 2026-08-05, the user interrupted the `Artifact` call it had
-/// started three days later, and reopened the chat on 2026-08-16 — eleven days
-/// after that record — without typing anything. The row spun for a turn that
-/// had been cancelled.
+/// A `tool_use` tail says a turn was started, not that it is still running: an
+/// interrupt marker after it, or a tail older than the running process, takes a
+/// transcript-sourced `working` back.
 final class TranscriptInterruptTests: XCTestCase {
 
     /// The assistant record the fallback state comes from, in the shape the real
@@ -390,27 +386,23 @@ final class TranscriptInterruptTests: XCTestCase {
             + "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"\(text)\"}]}}"
     }
 
-    /// The other shape, and the one that was being read as silence: `content`
-    /// is a plain string. 4110 user records in the §2.4 census look like this —
-    /// dragged-in paths, slash commands, messages from other sessions — and not
-    /// one of its 789 markers ever did.
+    /// The other shape: `content` is a plain string (dragged-in paths, slash
+    /// commands, messages from other sessions). No marker has this shape (§2.4).
     private func stringPrompt(_ text: String = "/Users/vvzvlad/Data/Projects/fusion") -> String {
         "{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"2026-08-08T14:25:31.100Z\","
             + "\"message\":{\"role\":\"user\",\"content\":\"\(text)\"}}"
     }
 
-    /// A prompt that is nothing but a pasted image: eight user records in the
-    /// §2.4 census have exactly this shape, and each one started a turn.
+    /// A prompt that is nothing but a pasted image; it starts a turn too.
     private func imagePrompt() -> String {
         "{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"2026-08-08T14:25:31.100Z\","
             + "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"image\","
             + "\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBOR\"}}]}}"
     }
 
-    /// The aborted call still gets an answer — an `is_error` result — which is
-    /// why "was the last `tool_use` answered" cannot be the signal on its own:
-    /// six of the seven tails that go on reading `working` have theirs answered
-    /// too, and so does a session that is genuinely thinking after a result.
+    /// The aborted call still gets an answer — an `is_error` result — so "was the
+    /// last `tool_use` answered" cannot be the signal on its own: a session that
+    /// is genuinely thinking after a result has its call answered too.
     private func result(to id: String, timestamp: String = "2026-08-08T14:25:22.670Z") -> String {
         "{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"\(timestamp)\","
             + "\"message\":{\"role\":\"user\",\"content\":"
@@ -418,7 +410,7 @@ final class TranscriptInterruptTests: XCTestCase {
     }
 
     /// The marker in the shape it usually has: block-shaped `content` with a
-    /// `text` block — 786 of the 789 markers in the §2.4 census.
+    /// `text` block.
     private func interrupt(_ text: String = "[Request interrupted by user]",
                            isSidechain: Bool = false) -> String {
         "{\"type\":\"user\",\"isSidechain\":\(isSidechain),\"timestamp\":\"2026-08-08T14:25:24.390Z\","
@@ -426,8 +418,8 @@ final class TranscriptInterruptTests: XCTestCase {
     }
 
     /// The marker in its other shape: the *content* of a `tool_result` block,
-    /// with no text block anywhere in the record. Three records in the census,
-    /// and it is written when the interrupted turn was inside a tool call.
+    /// with no text block anywhere in the record. Written when the interrupted
+    /// turn was inside a tool call.
     private func interruptAsResult(to id: String,
                                    timestamp: String = "2026-08-08T14:25:24.390Z") -> String {
         "{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"\(timestamp)\","
@@ -437,8 +429,8 @@ final class TranscriptInterruptTests: XCTestCase {
     }
 
     /// What resuming a chat appends before it replays anything: records with no
-    /// `timestamp` field at all. Ten types of them in the §2.4 census, and the
-    /// reason the replay window exists — none of them moves `newestRecordAt`,
+    /// `timestamp` field at all. They are the reason the replay window exists —
+    /// none of them moves `newestRecordAt`,
     /// so between the resume and the result the newest stamp in the file is
     /// still the pre-resume one.
     private func resumeNoise() -> [String] {
@@ -448,9 +440,8 @@ final class TranscriptInterruptTests: XCTestCase {
     }
 
     /// What the machine says when a dialog is answered: a `tool_result` whose
-    /// `content` is a string too — 771 of 771 answers to
-    /// `AskUserQuestion`/`ExitPlanMode` in the §2.4 census have this shape. Only the marker prefix
-    /// tells the two apart.
+    /// `content` is a string too, as every answer to `AskUserQuestion`/
+    /// `ExitPlanMode` is. Only the marker prefix tells the two apart.
     private func dialogAnswer(to id: String) -> String {
         "{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"2026-08-08T14:25:24.390Z\","
             + "\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\","
@@ -483,29 +474,22 @@ final class TranscriptInterruptTests: XCTestCase {
         try Date(text, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true))
     }
 
-    /// The reproducer's own shape: the call, its aborted result, and the marker
-    /// the user's Escape left behind.
+    /// The call, its aborted result, and the marker the user's Escape left behind.
     func testAnInterruptedToolCallIsNotWork() throws {
         let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
         XCTAssertEqual(try fallbackState([assistant(id: id), result(to: id), interrupt()]), .idle)
     }
 
-    /// The other marker text Claude Code writes: 248 records in the §2.4 census
-    /// against 541 of the plain one, 789 together, and the prefix
-    /// `[Request interrupted` is what covers both.
+    /// The other marker text Claude Code writes; the prefix `[Request interrupted`
+    /// covers both.
     func testTheToolUseVariantOfTheMarkerCountsToo() throws {
         XCTAssertEqual(try fallbackState([assistant(), interrupt("[Request interrupted by user for tool use]")]),
                        .idle)
     }
 
     /// And the other *shape*: the interruption written as the content of the
-    /// `tool_result` itself, with no text block in the record at all. Three
-    /// records in the census have it — `9b8601b5` line 248, `758a45e9` line 124,
-    /// `aceb7b4f` line 579 — and until this was read the rule saw them as "the
-    /// user said nothing". Two are followed by an ordinary marker seconds later
-    /// and cost nothing; `9b8601b5` has no other marker at all, and its next
-    /// speech is a prompt 39.7 s later — 40 seconds of spinner over a turn the
-    /// user had cancelled.
+    /// `tool_result` itself, with no text block in the record at all. Such a
+    /// record may be the only marker of the interrupted turn.
     func testTheMarkerInsideAToolResultCountsToo() throws {
         let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
         XCTAssertEqual(ClaudeSessions.interruptVerdict(
@@ -529,40 +513,28 @@ final class TranscriptInterruptTests: XCTestCase {
 
     /// The window the marker rule must not misjudge: the user pressed Escape and
     /// immediately retyped, and the agent is working on the new prompt with no
-    /// assistant record of its own yet. Caught on live data — a marker at
-    /// 14:18:58.819 and the prompt that replaced it 36 ms later.
+    /// assistant record of its own yet.
     ///
-    /// This is why the *newest* thing the user said decides, and not "a marker
-    /// was seen somewhere above": the marker is still there, and reading it as
-    /// the last word would stop the spinner over a running turn. With no hooks
-    /// installed nothing else would notice, and §2.4 promises this source works
-    /// without them.
+    /// The *newest* thing the user said decides, not "a marker was seen somewhere
+    /// above". §2.4 requires this source to work without hooks.
     func testAPromptAfterTheMarkerIsANewTurn() throws {
         let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
         XCTAssertEqual(try fallbackState([assistant(id: id), result(to: id), interrupt(), prompt()]), .working)
-        // The same tail with the prompt taken off is the reproducer again.
+        // The same tail without the prompt is an interrupted turn.
         XCTAssertEqual(try fallbackState([assistant(id: id), result(to: id), interrupt()]), .idle)
     }
 
-    /// The same window, with the prompt in its other shape. This is the one the
-    /// first version got wrong: a plain-string `content` was read as "nothing
-    /// was said", the backwards scan walked straight past it and stopped at the
-    /// marker underneath, and the row went dark over an agent that was working.
-    ///
-    /// Not a hypothetical shape: 42 distinct events in the §2.4 census have a
-    /// string-shaped record immediately after a marker, six of them the
-    /// user's own words. In `150c56e0-…` the marker landed at 16:10:35.461, the
-    /// string-shaped prompt 6 ms later, and the turn's first assistant record
-    /// at 16:10:39.606 — 4.1 s of a wrongly darkened row, against a median of
-    /// 17 s and a p90 of 68 s for prompt → first record.
+    /// The same window, with the prompt in its other shape: a plain-string
+    /// `content` is speech, so the backwards scan must stop at it rather than walk
+    /// past it to the marker underneath. String-shaped prompts right after a
+    /// marker do occur on real data (§2.4).
     func testAStringShapedPromptAfterTheMarkerIsANewTurnToo() throws {
         let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
         XCTAssertEqual(try fallbackState([assistant(id: id), result(to: id), interrupt(), stringPrompt()]),
                        .working)
     }
 
-    /// And with the prompt that is only a pasted image. Words are not the only
-    /// way to start a turn, and the census's eight image-only records each did.
+    /// And with the prompt that is only a pasted image.
     func testAPastedImageAfterTheMarkerIsANewTurnToo() throws {
         XCTAssertEqual(try fallbackState([assistant(), interrupt(), imagePrompt()]), .working)
     }
@@ -570,7 +542,7 @@ final class TranscriptInterruptTests: XCTestCase {
     /// The other half of that: a `tool_result` is not the user saying anything.
     /// It is the machine answering the agent, it arrives in the middle of a
     /// running turn, and if it counted as speech the marker right under it
-    /// would never be reached — the reproducer has exactly this shape.
+    /// would never be reached.
     func testAToolResultIsNotTheUserSpeaking() throws {
         let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
         XCTAssertNil(ClaudeSessions.interruptVerdict(
@@ -582,12 +554,9 @@ final class TranscriptInterruptTests: XCTestCase {
     /// user interrupted, then sent a new prompt and the agent started working
     /// again. Only a marker *newer* than that record ends the turn it began.
     ///
-    /// Nothing in the scan tests this explicitly — it falls out of the verdict
-    /// being read exactly once, at the assistant record, with only newer records
-    /// scanned by then. That is the invariant this pins, so that a later change
-    /// to where the state is computed cannot quietly break it — including the
-    /// `needsAssistant` early-out on the user branch, which is there for the
-    /// cost of the casts and must stay behaviour-neutral.
+    /// This follows from the verdict being read once, at the assistant record,
+    /// with only newer records scanned by then. The `needsAssistant` early-out on
+    /// the user branch must stay behaviour-neutral with respect to it.
     func testAMarkerOlderThanTheLastTurnChangesNothing() throws {
         XCTAssertEqual(try fallbackState([interrupt(), assistant()]), .working)
     }
@@ -610,21 +579,16 @@ final class TranscriptInterruptTests: XCTestCase {
 
     /// Symmetry with the assistant branch, which skips sidechain records for the
     /// same reason: another branch of the conversation says nothing about the
-    /// chat the row shows. Not a scenario anybody has met — subagents write into
-    /// their own session file (§2.6.3), and there is no record with
-    /// `isSidechain: true` anywhere in the 425 parent transcripts of the §2.4
-    /// control run. What this pins is the shape, so that the two branches
-    /// cannot drift apart if such a record ever does turn up.
+    /// chat the row shows. Subagents write into their own session file (§2.6.3),
+    /// so this pins the shape rather than a seen scenario.
     func testASubagentsInterruptIsIgnored() throws {
         XCTAssertEqual(try fallbackState([assistant(), interrupt(isSidechain: true)]), .working)
     }
 
     /// The case that must not be broken by any of this: a `tool_use` with no
     /// marker after it is a long `Bash`, and a working agent must never silently
-    /// vanish from the list. Seven stale tails in the §2.4 census keep reading
-    /// `working` on purpose (96–741 hours idle; six have no marker after their
-    /// last assistant record, the seventh has one a newer prompt supersedes),
-    /// because nothing tells them apart from a command running for an hour.
+    /// vanish from the list. A stale tail of this shape keeps reading `working`,
+    /// because nothing tells it apart from a command running for an hour.
     func testAPlainToolCallStillReadsWorking() throws {
         XCTAssertEqual(try fallbackState([assistant(toolName: "Bash"), result(to: "toolu_01UWEyrHaGuNMkhfrzUbpAew")]),
                        .working)
@@ -659,8 +623,7 @@ final class TranscriptInterruptTests: XCTestCase {
     ///
     /// Here the newest record is the answer to the call, stamped 48 s after the
     /// process started but without fractional seconds; the assistant record
-    /// under it is eleven days old. Read the older stamp and this live session
-    /// goes dark. §2.4 leans on this: it is what lets the parse be attempted
+    /// under it is eleven days old. This is what lets §2.4 attempt the parse
     /// once, with no fraction-less second try.
     func testAStampThatDoesNotParseStopsTheSearch() throws {
         let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
@@ -673,11 +636,10 @@ final class TranscriptInterruptTests: XCTestCase {
         XCTAssertEqual(state.source, .transcript)
     }
 
-    /// The reproducer, end to end: a `tool_use` tail whose every record predates
-    /// the process reading it. `3fc12f86-…` was resumed at 2026-08-16T02:30:14Z
-    /// with nothing newer than the marker of 2026-08-08T14:25:24.390Z in it.
+    /// End to end: a `tool_use` tail whose every record predates the process
+    /// reading it.
     ///
-    /// The second half is the one that pins Rule 2 on its own. The full tail is
+    /// The second half pins Rule 2 on its own. The full tail is
     /// already `idle` from Rule 1, so neutering the stamp comparison would not
     /// show there; strip the marker and only the stamps are left to notice that
     /// the turn belongs to a previous life of the file.
@@ -694,15 +656,11 @@ final class TranscriptInterruptTests: XCTestCase {
         XCTAssertEqual(noMarker.source, .transcript)
     }
 
-    /// An answered question, which is the shape that made the last assistant
-    /// record the wrong thing to compare against. The answer to a dialog arrives
-    /// as a bare `tool_result` — 771 of 771 `AskUserQuestion`/`ExitPlanMode`
-    /// answers in the §2.4 census, and an approved permission dialog too — so a
-    /// question asked before the process started and answered after it leaves
-    /// the last assistant record in the past while the agent is thinking about
-    /// what it was just told. Live instance: `79583d9f-…` of home-network, asked
-    /// 2026-08-13T20:50:28.699Z, answered 2026-08-15T01:44:22.150Z, 28.9 hours
-    /// later, with the next assistant record 45 s after that.
+    /// An answered question: why Rule 2 compares the newest record, not the last
+    /// assistant record. The answer to a dialog (and an approved permission)
+    /// arrives as a bare `tool_result`, so a question asked before the process
+    /// started and answered after it leaves the last assistant record in the past
+    /// while the agent is thinking about what it was just told.
     func testAQuestionAnsweredAfterTheProcessStartedIsWork() throws {
         let asked = assistant(toolName: "AskUserQuestion", id: "toolu_ask",
                               timestamp: "2026-08-13T20:50:28.699Z")
@@ -718,8 +676,6 @@ final class TranscriptInterruptTests: XCTestCase {
     /// The same trap without a dialog: a tool call left hanging when the window
     /// was closed is replayed on resume, and its result lands under the new
     /// process while the assistant record that asked for it stays weeks old.
-    /// Live instance: `3c820b4c-…`, where the resume noise is followed by the
-    /// answer to a `Bash` call from 9.7 hours earlier and no prompt at all.
     ///
     /// This is the state *after* the result lands — 48 s past the process start
     /// here. The window before it is `testACallStillInFlightStandsRuleTwoDown`.
@@ -736,15 +692,11 @@ final class TranscriptInterruptTests: XCTestCase {
     /// not allowed to judge. The resume records carry no stamp, so the newest
     /// one in the file is the eleven-day-old `tool_use` itself, and the stamps
     /// alone would call this `idle` over a command that is executing right now.
-    /// The window is the call's own run time and has no ceiling: 63 442
-    /// call → result pairs on this machine give a median of 0.1 s, a p90 of
-    /// 8.3 s and a p99 of 606 s.
+    /// The window is the call's own run time and has no ceiling.
     ///
-    /// Nothing new is needed to see it. §2.4 already refuses to judge an
-    /// unanswered `tool_use` with no marker after it — it cannot be told apart
-    /// from a `Bash` that has been running for an hour — and a replay has
-    /// exactly that shape until its result lands. Rule 2 was reaching into that
-    /// exception; this is it put back.
+    /// §2.4 refuses to judge an unanswered `tool_use` with no marker after it,
+    /// and a replay has exactly that shape until its result lands, so Rule 2
+    /// stands down too.
     func testACallStillInFlightStandsRuleTwoDown() throws {
         let id = "toolu_01UWEyrHaGuNMkhfrzUbpAew"
         let replaying = [assistant(toolName: "Bash", id: id, timestamp: "2026-08-05T13:27:47.970Z")]
@@ -854,8 +806,8 @@ final class RowStatusTests: XCTestCase {
         }
     }
 
-    /// A finished turn nobody has read is not the same thing, and no longer
-    /// wears the same icon.
+    /// A finished turn nobody has read is not the same thing, and does not wear
+    /// the same icon.
     func testAFinishedTurnIsDoneNotBlocked() {
         XCTAssertEqual(row([.waiting]).status, .done)
     }
@@ -939,22 +891,16 @@ final class RowStatusTests: XCTestCase {
 
     /// And "no session" is the whole test, because a subagent cannot exist
     /// without one: the aggregate sums them over the sessions, so an empty pool
-    /// can only ever produce a zero. The `guard` used to check both halves, and
-    /// the second half could not fire — this pins the invariant that makes it
-    /// redundant, instead of the dead branch that hid behind it.
+    /// can only ever produce a zero.
     func testASubagentCannotOutliveTheChatItRunsUnder() {
         XCTAssertEqual(DataSource.aggregate([], cpu: [:], orphans: [:]).activeSubagents, 0)
         XCTAssertNil(DataSource.aggregate([], cpu: [:], orphans: [:]).state)
     }
 
-    /// Half the invariant lives in `aggregate`, the other half in the promise
-    /// that every row's number comes *from* `aggregate` over that row's own
-    /// sessions — and that half used to hold only because all three row
-    /// constructors happen to be written that way. Nothing checked it, and with
-    /// the `guard` gone nothing would notice a fourth constructor filling the
-    /// field from somewhere else. So check it on the assembled snapshot, over
-    /// every row of every kind at once: window rows, project rows and the
-    /// orphan `cwd:` rows.
+    /// Half the invariant lives in `aggregate`, the other half in every row's
+    /// number coming *from* `aggregate` over that row's own sessions. Checked on
+    /// the assembled snapshot over every kind of row: window rows, project rows
+    /// and the orphan `cwd:` rows.
     func testEveryAssembledRowTakesItsSubagentsFromItsOwnChats() throws {
         var busy = TestFixtures.session(id: "s1", cwd: "/p/open", state: .working)
         busy.activeSubagents = 3
@@ -1079,8 +1025,7 @@ final class RowStatusTests: XCTestCase {
     }
 }
 
-/// The window limit decides every percentage the panel shows, and it used to be
-/// guessed from whichever numbers happened to be around.
+/// The window limit decides every percentage the panel shows.
 final class ContextWindowTests: XCTestCase {
 
     func testUnknownLimitStaysUnknownBelowTwoHundredK() {
@@ -1129,8 +1074,8 @@ final class ContextWindowTests: XCTestCase {
                        1_000_000)
     }
 
-    /// The reproduced defect, end to end: a 1M session at 19% used to render as
-    /// `194k (97%)` because the transcript numerator met a made-up denominator.
+    /// End to end: a 1M session at 19% must not render as `194k (97%)` against a
+    /// made-up 200k denominator.
     func testOneMillionSessionBelowTwoHundredKIsNotReportedAsNearlyFull() {
         var transcript = ClaudeSessions.TranscriptSummary()
         transcript.model = "claude-opus-5"
@@ -1251,8 +1196,7 @@ final class ContextWindowTests: XCTestCase {
     func testMetricsBranchIgnoresTheTranscriptModel() {
         let now = Date()
         var transcript = ClaudeSessions.TranscriptSummary()
-        // A transcript never carries the `[1m]` suffix; this is what the branch
-        // used to consult anyway.
+        // A transcript never carries the `[1m]` suffix; it must not be consulted.
         transcript.model = "claude-opus-5[1m]"
         transcript.lastActivity = now
 
@@ -1265,8 +1209,8 @@ final class ContextWindowTests: XCTestCase {
     }
 
     /// The case the whole configuration source exists for: `.metrics.json`
-    /// covers one session in six, so almost every session used to show a bare
-    /// token count. The user's `~/.claude/settings.json` says `opus[1m]`, which
+    /// covers only a fraction of sessions. The user's `~/.claude/settings.json`
+    /// says `opus[1m]`, which
     /// is Claude Code's own way of asking for the large window.
     func testConfiguredModelSuppliesTheLimitWhenNothingElseCan() {
         var transcript = ClaudeSessions.TranscriptSummary()
@@ -1619,11 +1563,9 @@ final class SessionStateTests: XCTestCase {
     /// transcript touched a second ago is proof the agent is alive, and it is
     /// available even when the tail yielded no state at all.
     ///
-    /// `fallbackState == nil` next to a live transcript is not hypothetical —
-    /// a `stop_reason` outside the three known values (39 records in 11 114 on
-    /// real data), or a single assistant record larger than the whole 512 KiB
-    /// tail window (93 transcripts on this machine hold records over 200 KiB,
-    /// the largest 2.0 MB).
+    /// `fallbackState == nil` next to a live transcript happens with a
+    /// `stop_reason` outside the three known values, or a single assistant record
+    /// larger than the whole 512 KiB tail window.
     func testFreshTranscriptKeepsAStaleWorkingHookAliveWithoutAFallbackState() {
         let now = Date()
         var transcript = ClaudeSessions.TranscriptSummary()
@@ -1666,9 +1608,8 @@ final class SessionStateTests: XCTestCase {
     }
 
     /// A permission dialog is invisible to the transcript: the last assistant
-    /// record still says `tool_use`, and the file goes on being touched. Every
-    /// such touch used to overrule the hook and turn the orange indicator off
-    /// while the dialog was still on screen.
+    /// record still says `tool_use`, and the file goes on being touched. A touch
+    /// must not overrule the hook while the dialog is still on screen.
     func testATouchedTranscriptDoesNotClearAPermissionWait() {
         let now = Date()
         var transcript = ClaudeSessions.TranscriptSummary()
@@ -1750,10 +1691,8 @@ final class SessionStateTests: XCTestCase {
         XCTAssertEqual(resolved.source, .unknown)
     }
 
-    /// A resumed chat replays its last turn. Session `3fc12f86-…` of
-    /// home-network was interrupted on 2026-08-08 and reopened on 2026-08-16
-    /// without a single prompt typed into it: no hook file, a `tool_use` tail,
-    /// and a spinner over a process that had never run a turn.
+    /// A resumed chat replays its last turn: no hook file, a `tool_use` tail
+    /// older than the process, and no turn ever run by that process.
     func testATurnFromBeforeTheProcessStartedIsNotRunningNow() {
         let started = Date()
         var transcript = ClaudeSessions.TranscriptSummary()
@@ -1847,8 +1786,7 @@ final class SessionStateTests: XCTestCase {
 
     /// A fresh file mtime is not the signal, and this is the pair of cases that
     /// says why. Resuming a chat touches the transcript without appending a
-    /// stamped record — the reproducer's mtime is two seconds *after* its
-    /// process started — so writing alone proves somebody is alive, not that
+    /// stamped record, so writing alone proves somebody is alive, not that
     /// this process ever started a turn. Only a record stamp newer than the
     /// process stands the rule down, and once one exists the mtime is beside
     /// the point: an hour of silence after it changes nothing.
@@ -1903,8 +1841,7 @@ final class SessionStateTests: XCTestCase {
     /// wants the transcript newer than `now - 120`, ageing wants the hook older
     /// than `now - 300`, and the two together always leave the transcript more
     /// than 90 s newer than the hook. So the ageing branch's own
-    /// `fromTranscript ??` is unreachable with the current constants — removing
-    /// it breaks no test, which was checked. The promise is what this pins.
+    /// `fromTranscript ??` is unreachable with the current constants.
     func testAStaleWorkingHookNextToAFreshTranscriptKeepsTheRowAlive() {
         let now = Date()
         var transcript = ClaudeSessions.TranscriptSummary()
@@ -1929,10 +1866,8 @@ final class SessionStateTests: XCTestCase {
     /// branch compares the hook's age *at that moment* — and that decides
     /// between the two halves of §2.4's answer.
     ///
-    /// Above the tolerance, the transcript wins at once. This is not an
-    /// exotic case: 44 of the 786 markers in the §2.4 census (5.6%) were
-    /// written more than 90 s after the last record that would have fired a
-    /// hook, which is Escape during a long generation or a long tool call.
+    /// Above the tolerance (Escape during a long generation or tool call), the
+    /// transcript wins at once.
     /// Below it, the hook's `working` outlives the transcript's `idle` until
     /// the 300 s ageing — nothing else moves, because no hook event follows an
     /// Escape.
@@ -1972,8 +1907,7 @@ final class SessionStateTests: XCTestCase {
 final class SnapshotAssemblyTests: XCTestCase {
 
     /// The state the user actually sees before granting Accessibility: sessions
-    /// read from disk, no windows at all. They used to be reachable only through
-    /// the window list, so all of them disappeared.
+    /// read from disk, no windows at all. They must not depend on the window list.
     func testSessionsSurviveAnEmptyWindowList() throws {
         let project = makeProject(path: "/p/home-network", rootName: "home-network")
         let session = makeSession(id: "s1", cwd: "/p/home-network", state: .working)
@@ -2010,9 +1944,8 @@ final class SnapshotAssemblyTests: XCTestCase {
         XCTAssertEqual(snapshot.projects.first { $0.project?.path == "/p/a" }?.activeCount, 1)
     }
 
-    /// Six agents started in the same directory outside every scan root used to
-    /// produce six identical rows, while the same six inside a project were
-    /// aggregated into one.
+    /// Agents started in the same directory outside every scan root aggregate
+    /// into one row, as they do inside a project.
     func testOrphanSessionsFromOneDirectoryBecomeASingleRow() throws {
         let sessions = [makeSession(id: "s1", cwd: "/elsewhere/tool", state: .working),
                         makeSession(id: "s2", cwd: "/elsewhere/tool", state: .permission),
@@ -2283,12 +2216,9 @@ final class WindowOrderingTests: XCTestCase {
 }
 
 /// The order of the "projects" section: when Claude Code work last happened in
-/// each project, newest first. Directory mtime, which this used to be, does not
-/// move when a file inside the project is edited, so the order it produced
-/// looked arbitrary; the key is the mtime of the newest session transcript
-/// instead. The count of sessions inside the window, which ordered this section
-/// for a while in between, answers "how much" rather than "where" and no longer
-/// takes part.
+/// each project, newest first. The key is the mtime of the newest session
+/// transcript, not the directory mtime (which does not move when a file inside
+/// is edited) and not the session count.
 final class ProjectRankingTests: XCTestCase {
 
     private func daysAgo(_ days: Double) -> Date {
@@ -2348,7 +2278,7 @@ final class ProjectRankingTests: XCTestCase {
                        ["fresh", "middling", "stale"])
     }
 
-    /// The activity window no longer bounds the order. A session older than
+    /// The activity window does not bound the order. A session older than
     /// `activityWindowDays` still places its project, and places it above one
     /// whose newest session is older still — the window survives only as the
     /// count `--dump` prints.
@@ -2391,13 +2321,9 @@ final class ProjectRankingTests: XCTestCase {
     }
 
     /// The tie-break, asked of the comparison itself rather than through
-    /// `sorted`. The test above goes through `sorted`, and `sorted` cannot show
-    /// this: it is only documented as unstable, while the implementation shipping
-    /// today leaves equal elements where they were — so with the arrival-index
-    /// line deleted the whole ranking suite stays green and the order becomes
-    /// whatever the next standard library feels like. Asked directly, the
-    /// comparison has to answer both ways round, and a comparison that has run
-    /// out of keys cannot.
+    /// `sorted`: `sorted` is documented as unstable but happens to keep equal
+    /// elements in place, which would hide a missing arrival-index key. Asked
+    /// directly, the comparison has to answer both ways round.
     func testTheComparisonSeparatesRowsTheStampsCannot() {
         let pair = rows(["a", "b"])
         let left = (offset: 0, element: pair[0])
@@ -2458,8 +2384,7 @@ final class ProjectActivityTests: XCTestCase {
     /// fresh every time — cached alongside the listing they froze at the moment
     /// the last session was *started*, and since `lastSession` is what orders
     /// the section (§2.2.1), the project being worked in right now would sit
-    /// where it stood hours ago. The gap is 1.7 h at the median on the owner's
-    /// machine and 222 h at the worst.
+    /// where it stood hours ago.
     func testWritingIntoAnOpenSessionMovesLastSessionWithoutANewFile() throws {
         let root = try makeTemporaryDirectory()
         let path = "/Users/x/Data/Projects/pebble"
@@ -2534,9 +2459,8 @@ final class ProjectActivityTests: XCTestCase {
 /// Scanning the project roots.
 final class WorkspaceScanTests: XCTestCase {
 
-    /// `smarthome_ng/` is a project and holds ten repositories of its own; they
-    /// used to become rows, and the nested `mqtt2influx` then fought the real
-    /// top-level one for the same `rootName`.
+    /// A project that holds repositories of its own: they must not become rows,
+    /// or a nested one would fight a top-level one for the same `rootName`.
     func testScanDoesNotDescendIntoADirectoryThatIsItselfAProject() throws {
         let root = try makeTemporaryDirectory()
         try makeProjectDirectory(root.appendingPathComponent("smarthome_ng"))
@@ -2680,19 +2604,11 @@ final class ConfigTests: XCTestCase {
         XCTAssertFalse(config.resolvedProjectRoots[0].path.contains("~"))
     }
 
-    /// **A key this file has retired is a key nobody has to remove**, and that is
-    /// the whole promise made to a config written before it went.
+    /// A retired key (`usageLoadWindowHours`) in an old config has no effect:
+    /// `load` walks the keys it knows rather than the keys the file has.
     ///
-    /// `usageLoadWindowHours` chose between two ways of estimating the week's
-    /// demand and, by the same number, how deep to fetch. Nothing estimates
-    /// demand any more — the gateway measures it — so both estimators went and
-    /// the key with them. `load` walks the keys it knows rather than the keys the
-    /// file has, so what is left of it is nothing at all: not a default, not a
-    /// warning, no effect on any other field.
-    ///
-    /// Asked alongside a key that *is* read, because "the file was ignored
-    /// wholesale" would satisfy the first half on its own and is the failure this
-    /// is really about — a retired key must not take its neighbours down with it.
+    /// Asked alongside a key that *is* read, so that "the file was ignored
+    /// wholesale" cannot pass.
     func testARetiredKeyIsIgnoredWithoutDisturbingTheRest() throws {
         let url = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("vscode-switcher-config-\(UUID().uuidString).json")
@@ -2929,8 +2845,7 @@ final class SnapshotCoalescingTests: XCTestCase {
 
     /// Builds are numbered, and the number is the snapshot's timestamp, so
     /// "which build produced this" is an equality check rather than a race with
-    /// the clock: two snapshots built a microsecond apart used to be told apart
-    /// by their wall-clock stamps alone.
+    /// the clock.
     private func makeSource(counter: BuildCounter, duration: TimeInterval = 0) -> DataSource {
         DataSource(config: .default) {
             counter.increment()
@@ -2998,14 +2913,10 @@ final class SnapshotCoalescingTests: XCTestCase {
         XCTAssertNotEqual(first.generatedAt, second.generatedAt)
     }
 
-    /// The mirror of that defect, through the same plain entry point: an arrival
-    /// stamp from the *future* — a `Date()` read after the build rather than
-    /// before the call, an interval added to it, a clock nudged forward — is
-    /// never reached by `lastSnapshotFinishedAt`, so the coalescing stops
-    /// happening at all and everyone who queued behind a build in flight goes
-    /// off and rescans the same disk the moment they are let through. It is
-    /// silent: every answer stays correct and only the I/O multiplies, which is
-    /// the one thing the coalescing exists to prevent.
+    /// Through the plain entry point: an arrival stamp from the *future* (a
+    /// `Date()` read after the build rather than before the call) is never
+    /// reached by `lastSnapshotFinishedAt`, so coalescing silently stops and
+    /// every queued caller rescans the disk; answers stay correct, only I/O grows.
     ///
     /// The build signals that it has started and then holds the lock for 0.3 s,
     /// so the second call is made — and its arrival stamped — well before the
@@ -3107,8 +3018,8 @@ final class FileDerivedCacheTests: XCTestCase {
         XCTAssertEqual(computations, 3)
     }
 
-    /// Subagents go through the same cache now, keyed on their directory: the
-    /// listing and every `.meta.json` parse used to be redone on every snapshot.
+    /// Subagents go through the same cache, keyed on their directory, so the
+    /// listing and `.meta.json` parses are not redone on every snapshot.
     func testSubagentEntriesAreReadFromTheDirectory() throws {
         let directory = try makeTemporaryDirectory().appendingPathComponent("subagents")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -3192,21 +3103,14 @@ final class SubagentLivenessTests: XCTestCase {
         }
     }
 
-    /// The price of the fix, written down rather than left implicit: an answer
-    /// that was delivered but carries `stop_reason: null` is *not* read as an
-    /// ending, so its row keeps spinning until the clock runs out — 243 of the
-    /// same 2776 tails. It stays that way on purpose: across the corpus read
-    /// whole, the identical shape sits mid-turn 22204 times against 245 as a
-    /// last record, so calling it an ending would blank the indicator over a
-    /// subagent that is still working (SPEC §3.1).
+    /// An answer that was delivered but carries `stop_reason: null` is *not* read
+    /// as an ending, so its row keeps spinning until the clock runs out: the same
+    /// shape sits mid-turn far more often than as a last record, so calling it an
+    /// ending would blank the indicator over a working subagent (SPEC §3.1).
     ///
-    /// Two things hang on this row staying `true`: the `as? String` in
-    /// `uncachedIsFinished` — JSON `null` parses to `NSNull`, not to a string —
-    /// and the whitelist, in the form the blacklist is naturally written in.
-    /// `stopReason != "tool_use"` over the *optional* needs no `guard let` and
-    /// so drops it; that version passes every other test in this class and
-    /// fails this one. The version that keeps the `guard let` is a different
-    /// matter — see the test below.
+    /// Pins the `as? String` in `uncachedIsFinished` (JSON `null` parses to
+    /// `NSNull`) and the whitelist: a blacklist `stopReason != "tool_use"` over
+    /// the optional passes every other test in this class and fails this one.
     func testADeliveredAnswerWithoutAStopReasonKeepsWorking() throws {
         let root = try makeTemporaryDirectory()
         try writeTranscript(Self.deliveredWithoutStopReason, age: 60, in: root)
@@ -3219,14 +3123,10 @@ final class SubagentLivenessTests: XCTestCase {
     /// the whole point — a value nobody has seen must not blank the indicator
     /// over a subagent that is still going.
     ///
-    /// Four `stop_reason` values occur among the tails (`end_turn`,
-    /// `stop_sequence`, `tool_use`, `null`), and on every one of them a
-    /// blacklist that keeps the `guard let` answers exactly as the whitelist
-    /// does — which is why that mutation survives everything else here. A fifth
-    /// value is not hypothetical, though: read whole, the corpus has one
-    /// `refusal` — record 53 of 91 in `agent-abbf674d09bc1b914.jsonl` — which
-    /// has simply never landed last yet (SPEC §2.5). This pins what happens
-    /// when it does.
+    /// On the four common values (`end_turn`, `stop_sequence`, `tool_use`,
+    /// `null`) a blacklist that keeps the `guard let` answers exactly as the
+    /// whitelist does; an unknown value such as `refusal` (SPEC §2.5) is what
+    /// tells them apart.
     func testAnUnknownStopReasonIsNotAnEnding() throws {
         let root = try makeTemporaryDirectory()
         try writeTranscript(assistantTail(stopReason: "max_tokens"), age: 60, in: root)
@@ -3454,8 +3354,8 @@ final class HookScriptTests: XCTestCase {
         XCTAssertEqual(try state(in: directory), "working")
     }
 
-    /// And a state file that is not an object at all used to kill the jq
-    /// program outright, with the same result.
+    /// And a state file that is not an object at all must not kill the jq
+    /// program either.
     func testANonObjectStateFileDoesNotWedgeTheFileEither() throws {
         let directory = try makeStatusDirectory()
         try write("[1,2]", to: directory)
@@ -3648,11 +3548,7 @@ final class SessionProcessTests: XCTestCase {
 
     /// The whole reason the marker exists: a process whose parent has exited
     /// reparents to pid 1, which names nobody, while `CLAUDE_PID` in its
-    /// environment still names the session that started it.
-    ///
-    /// Verified live on this machine — three spin loops left behind by an
-    /// exiting shell reparented to launchd and turned up here as three orphans
-    /// of the session that had spawned them (SPEC §2.8).
+    /// environment still names the session that started it (SPEC §2.8).
     func testAnOrphanIsClaimedByItsMarker() {
         let attribution = SessionProcesses.attribute(facts([(pid: 100, ppid: 1, marker: nil),
                                                             (pid: 200, ppid: 1, marker: 100)]),
@@ -3663,11 +3559,9 @@ final class SessionProcessTests: XCTestCase {
 
     /// And the rule that keeps the inherited junk out. The marker is passed
     /// sideways — the `claude` binary itself carries the marker of whatever
-    /// launched VSCode — so 120 of the 136 markers on this machine name a
-    /// session that is not live, against 24 that are (26.08.2026). Most of what
-    /// this signal says is junk, and the count that comes off it would be junk
-    /// too. A marker is worth something only when the pid it names is
-    /// a live session, and the two halves of that are checked apart:
+    /// launched VSCode — so most markers name a session that is not live. A
+    /// marker is worth something only when the pid it names is a live session,
+    /// and the two halves of that are checked apart:
     ///
     /// - `900` is not in the process table at all: the session is gone;
     /// - `800` is a perfectly live process that is simply not a session.
@@ -3689,11 +3583,7 @@ final class SessionProcessTests: XCTestCase {
     /// When both signals speak and disagree, the chain wins and the marker is
     /// not even consulted: a descendant of session A carrying a marker naming
     /// session B is a process A spawned out of an environment B had already
-    /// polluted.
-    ///
-    /// Zero such cases on live data (measured over 740 processes and 25
-    /// sessions), which is exactly why the rule is written down and asked here:
-    /// otherwise it is whatever order the code happens to check in.
+    /// polluted. Asked so the precedence does not depend on check order.
     func testTheChainWinsOverAMarkerNamingAnotherLiveSession() {
         let attribution = SessionProcesses.attribute(facts([(pid: 100, ppid: 1, marker: nil),
                                                             (pid: 300, ppid: 1, marker: nil),
@@ -3714,10 +3604,6 @@ final class SessionProcessTests: XCTestCase {
     /// second `claude` typed into a neighbouring terminal — carries that
     /// session's `CLAUDE_PID`. None of them lost a parent. Counting them as
     /// orphans would put the whole editor's CPU on one row.
-    ///
-    /// On this machine the tree currently holds **80** processes the chain does
-    /// not place, and it works today only because the marker they carry names a
-    /// session that is dead — the accident this rule replaces.
     func testTheEditorsOwnTreeIsNotAnOrphanOfTheSessionThatLaunchedIt() {
         let attribution = SessionProcesses.attribute(facts([(pid: 10, ppid: 1, marker: 100),
                                                             (pid: 20, ppid: 10, marker: 100),
@@ -3730,17 +3616,13 @@ final class SessionProcessTests: XCTestCase {
         XCTAssertEqual(attribution.orphansBySessionPID, [:])
     }
 
-    /// And the rule must not cost a real orphan, which is the half that makes it
-    /// worth having. Verified on live data as well — 6 marker claims on this
-    /// machine, 6 kept, 0 refused — and asked here in both the shapes that
-    /// occurred there.
+    /// And the rule must not cost a real orphan.
     ///
     /// `200` is the plain case: its parent exited and launchd adopted it.
     /// `300` is the one a rule about ancestors could plausibly get wrong — it
-    /// still has its parent, and its parent is `200`. Five of the six live
-    /// claims were of that kind: a detached `python` with `docker` and two
-    /// `ssh` underneath it. Nothing in that chain is above a session, so
-    /// nothing in it is refused.
+    /// still has its parent, and its parent is `200` (e.g. a detached `python`
+    /// with `docker` and `ssh` underneath). Nothing in that chain is above a
+    /// session, so nothing in it is refused.
     func testAnOrphanAndEverythingUnderItStillCount() {
         let attribution = SessionProcesses.attribute(facts([(pid: 10, ppid: 1, marker: nil),
                                                             (pid: 100, ppid: 10, marker: nil),
@@ -3755,24 +3637,18 @@ final class SessionProcessTests: XCTestCase {
     /// A chain the sweep cannot follow to the end proves nothing, and must not
     /// be read as "detached" (SPEC §2.8).
     ///
-    /// The hole is ordinary, not exotic. `proc_pid_rusage` refuses another
-    /// user's process, so that row is dropped — and the row it drops has
-    /// children of ours: `/usr/bin/login` is root-owned and refuses both calls
-    /// while the login shell under it answers both, which is the shape of every
-    /// Terminal.app tab. Of 266 foreign-parent/our-child pairs on this machine
-    /// 265 are launchd, already excluded by the walk stopping above pid 1, and
-    /// one is `login`.
+    /// `proc_pid_rusage` refuses another user's process, so that row is dropped
+    /// even when it has children of ours: root-owned `/usr/bin/login` above the
+    /// login shell of every Terminal.app tab.
     ///
     /// So `200` here is a process in a second terminal tab carrying a marker
-    /// inherited sideways from the live session `100`. Its parent `20` is alive
-    /// and well; the walk merely runs out of links at `6`, the `login` that was
-    /// dropped. Reading that as "nothing above it" manufactures an orphan under
-    /// a living parent — the flickering counter, arriving by another door.
+    /// inherited sideways from the live session `100`. Its parent `20` is alive;
+    /// the walk merely runs out of links at `6`, the dropped `login`. Reading
+    /// that as "nothing above it" would manufacture an orphan under a living
+    /// parent.
     ///
-    /// `300` is the control half, and it is what stops the fix from being "deny
-    /// every marker": a real orphan reaches pid 1 and is claimed as before. A
-    /// test without it stays green when the walk is made to return `broken` for
-    /// everything.
+    /// `300` is the control half: a real orphan reaches pid 1 and is claimed, so
+    /// a walk that returns `broken` for everything fails here.
     func testAChainTheSweepCannotFollowDoesNotManufactureAnOrphan() {
         let attribution = SessionProcesses.attribute(facts([(pid: 100, ppid: 10, marker: nil),
                                                             (pid: 10, ppid: 5, marker: nil),
@@ -3812,10 +3688,8 @@ final class SessionProcessTests: XCTestCase {
     /// it must end the walk rather than spin inside a function that runs once or
     /// twice a second.
     ///
-    /// Run with a timeout and off this thread, because the regression this
-    /// guards against is a test run that never finishes rather than one that
-    /// fails. Removing the visited set hangs here instead of going red, and the
-    /// timeout is what turns that back into a failure.
+    /// Run with a timeout and off this thread: without the visited set the walk
+    /// hangs rather than fails, and the timeout turns that into a failure.
     func testACycleInTheParentGraphEndsTheWalk() {
         let done = expectation(description: "attribution returned")
         let input = facts([(pid: 100, ppid: 1, marker: nil),
@@ -3862,11 +3736,8 @@ final class SessionProcessTests: XCTestCase {
     /// again when one was requested mid-build, and the watcher debounces at
     /// 0.15 s while the state hook renames files on every transition.
     ///
-    /// Asked in seconds rather than through the constant, for the reason the
-    /// ceiling is: through `minimumSampleSeconds` the test says only that the
-    /// guard compares against whatever it compares against.
-    ///
-    /// The numbers are the promise the constant makes. It has to sit above the
+    /// Asked in seconds rather than through `minimumSampleSeconds`, so the test
+    /// pins the value. It has to sit above the
     /// watcher's 0.15 s and below `SnapshotStore.activeInterval` — the fastest
     /// tick the panel has — because a floor *on* the tick is rejected by a few
     /// milliseconds of jitter every other time.
@@ -3887,12 +3758,8 @@ final class SessionProcessTests: XCTestCase {
     /// comes out of such a pair is a mean over the gap, and the row promises the
     /// opposite.
     ///
-    /// Both sides of the threshold, and in seconds rather than through the
-    /// constant: asked through `staleSampleSeconds` itself the test says only
-    /// "the guard compares against whatever it compares against", and stays
-    /// green for 3 s and for 600 s alike.
-    ///
-    /// The numbers here are the promises the constant makes. An ordinary slow
+    /// Both sides of the threshold, in seconds rather than through
+    /// `staleSampleSeconds`, so the test pins the value. An ordinary slow
     /// pass — the slowest tick is `SnapshotStore.idleInterval` = 2 s and a slow
     /// assembly adds up to 0.18 s of disk to it (§6) — must never blank the
     /// column. Ten of those ticks is the last gap that still counts as "now".
@@ -3915,23 +3782,14 @@ final class SessionProcessTests: XCTestCase {
     /// clamped. Keyed on the pair, there is simply no rate for it this pass,
     /// which is the same answer a process that has only just appeared gets.
     ///
-    /// The environment cache in `ProcessSampler` is keyed by the same pair and
-    /// for the same reason: a marker read from the process that used to have
-    /// this pid would name the wrong session for as long as the new one lives.
+    /// The environment cache in `ProcessSampler` is keyed by the same pair: a
+    /// marker read from the pid's previous owner would name the wrong session.
     ///
-    /// The fixture is the way round that the mistake actually shows, and the
-    /// margin has to be wide enough to see. The pid's previous owner had burned
-    /// 0.4 s; the process holding it now has burned 0.5 s, all of it inside this
-    /// gap because it did not exist at the previous sweep. Keyed on the pair
-    /// that is 50%. Keyed on the pid alone the new process is mistaken for a
-    /// survivor and the dead one's total is subtracted from it: 10%.
-    ///
-    /// Two totals a hundredth apart would not tell those answers apart at all —
-    /// which is what the fixture was before short-lived processes started
-    /// counting for their whole total, and it would have gone quietly green.
-    /// The other way round — an old total larger than the new one — the
-    /// backwards-counter guard below catches by accident, and a fixture it
-    /// catches proves nothing about *this* rule.
+    /// The pid's previous owner had burned 0.4 s; the process holding it now has
+    /// burned 0.5 s, all of it inside this gap. Keyed on the pair that is 50%;
+    /// keyed on the pid alone the dead one's total is subtracted: 10%. The new
+    /// total is the larger one on purpose — the other way round, the
+    /// backwards-counter guard would catch it and prove nothing about this rule.
     ///
     /// `ppid: 1` on the dead process on purpose: launchd is not in the table, so
     /// it leaves no heir and its 0.4 s is charged to nobody. That rule has its
@@ -3958,10 +3816,7 @@ final class SessionProcessTests: XCTestCase {
     /// The work an agent does is mostly done by processes that never live long
     /// enough to be seen twice: every `Bash` call is a fresh `rg`, `git`, `cc`
     /// or `node` living a fraction of a second. Asked only about the processes
-    /// present in both sweeps, the rate misses all of it — measured 26.08.2026,
-    /// a shell spawning and reaping a child every 0.15 s reported 0.3% against
-    /// 63.6–86.9% of a core actually burned, and 0.3% is under the 1% the row
-    /// prints anything above at all.
+    /// present in both sweeps, the rate misses nearly all of it.
     ///
     /// The shell survives both sweeps and its `ri_child_*` is where the reaped
     /// children landed, so the figure is its own delta plus that one. Here the
@@ -3985,8 +3840,8 @@ final class SessionProcessTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(rates[key(60, 1)]), 25, accuracy: 0.001)
     }
 
-    /// And this is why adding `ri_child_*` naively would be worse than the bug
-    /// it fixes. At the moment a child is reaped the parent's counter gains the
+    /// Why `ri_child_*` cannot be added naively: at the moment a child is reaped
+    /// the parent's counter gains the
     /// child's **entire lifetime**, the part earlier passes already reported
     /// included. A `swift build` that ran ten minutes and then exited would put
     /// 600 s of CPU inside one 1 s tick — some 60000%, on a row whose figure is
@@ -4006,9 +3861,7 @@ final class SessionProcessTests: XCTestCase {
     }
 
     /// `ri_child_*` folds in the **whole subtree** of a reaped child, not the
-    /// child's own time alone — measured 26.08.2026 rather than read out of the
-    /// header, a grandchild burning 1.0 s under a child burning 0.3 s landed
-    /// 1.24 s in the grandparent at the moment the child was reaped. So what is
+    /// child's own time alone (measured, not documented). So what is
     /// subtracted for a vanished process is its last-seen *total*, own and child
     /// both.
     ///
@@ -4030,9 +3883,8 @@ final class SessionProcessTests: XCTestCase {
     /// When a process and its parent go in the same gap, both totals travel up
     /// to the first ancestor still standing, so both have to be subtracted off
     /// there. Charging the subtraction to the immediate parent instead loses the
-    /// deeper one — and `sh -c 'cc …'`, where the compiler and the shell that
-    /// ran it both exit inside one tick, is the ordinary shape of it, not a
-    /// contrived one.
+    /// deeper one — `sh -c 'cc …'`, where the compiler and the shell that ran it
+    /// both exit inside one tick, is the ordinary shape of it.
     ///
     /// `50` survives. `51` (its child) and `52` (its grandchild) both vanish,
     /// last seen holding 2 s and 3 s. `50` gained all 5 s plus 0.4 s of new
@@ -4053,13 +3905,8 @@ final class SessionProcessTests: XCTestCase {
     /// not an absence. "Measured, and idle" and "not measured yet" are different
     /// answers, the row draws them differently and `--dump --json` keeps them
     /// apart (§3.1), and the difference is made right here: a session whose
-    /// every process falls out of this map has no figure at all.
-    ///
-    /// It fell out once. Summing signed nanoseconds and then keeping only what
-    /// came out above zero reads as tidying away the negatives and quietly takes
-    /// the zeros with it — every quiet session on the machine turned `nil`, and
-    /// the whole suite stayed green. A live probe caught it, so the case is
-    /// written down.
+    /// every process falls out of this map has no figure at all. Filtering on
+    /// "above zero" would drop the zeros along with the negatives.
     func testAProcessThatBurnedNothingReportsZeroRatherThanNothing() throws {
         let rates = try XCTUnwrap(percents(previous: [key(80, 1): counters(7_000_000_000)],
                                            current: [key(80, 1): counters(7_000_000_000)],
@@ -4072,9 +3919,7 @@ final class SessionProcessTests: XCTestCase {
     /// **A process that leaves the table has not necessarily handed its counter
     /// over yet, so what it is owed is written down rather than deducted.**
     ///
-    /// This fixture used to be `testAnOverSubtractedProcessIsFlooredAtZeroAndNotDropped`
-    /// and asserted `0` — it pinned the defect as the expected answer. Two live
-    /// shapes produce it and neither is exotic (SPEC §2.8): a **zombie**, which
+    /// Two live shapes produce it (SPEC §2.8): a **zombie**, which
     /// keeps answering `proc_pid_rusage` while `PROC_PIDTBSDINFO` refuses it, so
     /// the sweep drops the row a tick or more before the parent's `wait` lands;
     /// and a descendant **reparented to launchd**, whose counter never arrives
@@ -4111,8 +3956,7 @@ final class SessionProcessTests: XCTestCase {
     /// 0.4 s the child burned after it was last seen — and `80` burned 0.1 s of
     /// its own. The answer is 0.5 s over 1 s, and the ledger comes back empty.
     ///
-    /// Without the settlement this tick reports 950%; with the old deduct-on-
-    /// disappearance rule it reported 940% here and 0 on the pass before.
+    /// Without the settlement this tick would report 950%.
     func testADebtIsSettledByTheGrowthOfTheLaterPassWhereTheReapLands() throws {
         let previous = [key(80, 1): counters(200_000_000)]
         let current = [key(80, 1): counters(300_000_000, child: 9_400_000_000)]
@@ -4129,16 +3973,13 @@ final class SessionProcessTests: XCTestCase {
     /// The other shape, and the one the walk cannot tell from the first: the
     /// parent died before its child, so the child was handed to launchd and
     /// reaped there. Its counter left the tree and no survivor ever gains a
-    /// nanosecond of it — measured 26.08.2026 on a live fixture, a grandparent
-    /// whose grandchild burned 1.0 s saw its `ri_child_*` move by the middle
-    /// process's own 6229 mach units and nothing more.
+    /// nanosecond of it (measured).
     ///
     /// `inheritor` still finds the grandparent, because from the table this is
     /// indistinguishable from "the chain died bottom-up and the grandparent
     /// holds it all". What tells them apart is that the growth never arrives:
     /// `min(debt, childDelta)` settles nothing, and the grandparent's tick keeps
-    /// its own 1.0 s. Deducted outright, the same tick reported 0 — the busy
-    /// session drawn as an idle one.
+    /// its own 1.0 s. Deducted outright, the busy session would read as idle.
     func testAGrandchildReapedByLaunchdTakesNothingOffTheSurvivor() throws {
         let previous = [key(90, 1): counters(0),
                         key(91, 1): counters(50_000_000, ppid: 90),
@@ -4160,8 +4001,7 @@ final class SessionProcessTests: XCTestCase {
         XCTAssertEqual(measured.debts[key(92, 1)]?.heir, key(90, 1))
     }
 
-    /// **Finding 1 of the fourth review: growth is only ever spent on a debt it
-    /// could have carried.**
+    /// **Growth is only ever spent on a debt it could have carried.**
     ///
     /// `70` is busy and it reaps: `71` is an ordinary short-lived child, and its
     /// whole life lands in `70`'s `ri_child_*` in this gap. `72` disappears in
@@ -4192,11 +4032,8 @@ final class SessionProcessTests: XCTestCase {
         // it could not have been settled even if it had been, because 4 s does
         // not fit inside 1.1 s of growth, so an empty ledger is the assertion.
         //
-        // What this fixture can and cannot fail on is worth being straight
-        // about. The 110% catches settlement gone wrong in either direction
-        // (none of it, or too much). The launchd half it cannot fail on by
-        // itself: pid 1 is not in this table, so the walk stops for want of a
-        // row whether or not the rule is there — that half is
+        // The 110% catches settlement gone wrong in either direction. The
+        // launchd half cannot fail here (pid 1 is not in this table); it is
         // `testACounterHandedToLaunchdIsNotChargedToLaunchd`, and the "growth
         // belongs to its own debt" half is
         // `testOneSurvivorsGrowthDoesNotSettleAnothersDebt`.
@@ -4206,7 +4043,7 @@ final class SessionProcessTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(70, 1)]), 110, accuracy: 0.001)
     }
 
-    /// The other half of that finding: **a debt is spent only against the growth
+    /// The other half: **a debt is spent only against the growth
     /// of the process it is addressed to**, and the fixture is built so that the
     /// growth in it is somebody else's.
     ///
@@ -4243,15 +4080,11 @@ final class SessionProcessTests: XCTestCase {
     /// And the stop at launchd is a rule of its own, not a by-product of who
     /// answers the kernel.
     ///
-    /// On this machine pid 1 never reaches the sweep at all — measured
-    /// 27.08.2026, it answers neither `proc_pid_rusage` nor `PROC_PIDTBSDINFO`,
-    /// while 318 of the 974 pids listed sit directly under it — so the walk in
-    /// `heir(of:)` stops there anyway, for want of a row to climb to, and taking
-    /// the `ppid > 1` test out failed **no** test in the suite. That is the
-    /// accident, not the rule: launchd is unreadable because the app runs as the
-    /// user, and the day it were readable every debt on the machine would be
-    /// addressed to the one process that reaps every orphan there is, so
-    /// unrelated growth would settle all of them within a tick.
+    /// Running as the user, the sweep never sees pid 1 (it answers neither
+    /// `proc_pid_rusage` nor `PROC_PIDTBSDINFO`), so the walk in `heir(of:)`
+    /// stops there anyway. If launchd were readable, every debt would be
+    /// addressed to the process that reaps every orphan, and unrelated growth
+    /// would settle all of them within a tick.
     ///
     /// The fixture therefore puts launchd in the table and gives it what it
     /// really has — growth from reaping somebody else — and asks that the 4 s
@@ -4270,8 +4103,8 @@ final class SessionProcessTests: XCTestCase {
         XCTAssertTrue(measured.debts.isEmpty)
     }
 
-    /// **Finding 2 of the fourth review: an unsettled debt travels with the
-    /// counters it was written against, instead of being forgiven.**
+    /// **An unsettled debt travels with the counters it was written against,
+    /// instead of being forgiven.**
     ///
     /// `61` was holding a debt for a zombie child of its own — 100 s already
     /// reported, nothing settled, because `61` had not called `wait` yet. In
@@ -4280,8 +4113,8 @@ final class SessionProcessTests: XCTestCase {
     /// zombie's 100 s included, because a reaped process hands over its whole
     /// subtree (`Counters.child`).
     ///
-    /// Given up on at the moment its debtor left the table — which is what the
-    /// ledger did until this review — those 100 s have nothing left to take them
+    /// Given up on at the moment its debtor left the table, those 100 s have
+    /// nothing left to take them
     /// off, and `60`'s one-second tick reports them in full: 10000%, bounded
     /// only by how long the zombie lived. Carried up with `61`'s own total
     /// instead, they are deducted exactly once and the tick keeps the 0.3 s of
@@ -4324,11 +4157,9 @@ final class SessionProcessTests: XCTestCase {
     /// because with the ledger nothing can produce one: each counter is guarded
     /// forward, and `settled ≤ childDelta` leaves `own + (child - settled) ≥ 0`.
     ///
-    /// The mutation that proves it is `settled = min(debt, child)` → `settled =
-    /// debt`: on this fixture the debt is 9 s against 0.4 s of growth, so the
-    /// subtraction underflows. **It surfaces as a crashed test run rather than a
-    /// clean failure** — a `UInt64` underflow traps — so a suite that aborts
-    /// here is this guard firing, not the suite breaking.
+    /// With `settled = debt` instead of `min(debt, child)`, the 9 s debt against
+    /// 0.4 s of growth underflows. **A `UInt64` underflow traps**, so a suite
+    /// that aborts here is this guard firing, not the suite breaking.
     ///
     /// The answer is the whole of the growth eaten by the debt and the process's
     /// own 0.1 s left standing: 10%. And 8.6 s of the debt is still owed.
@@ -4365,27 +4196,16 @@ final class SessionProcessTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(measured.percentByKey[key(80, 1)]), 10, accuracy: 0.001)
     }
 
-    /// **Finding 1 of the fifth review: a debt of nothing must not stop the
-    /// settlement of the debts behind it.**
+    /// **A debt of nothing must not stop the settlement of the debts behind it.**
     ///
-    /// `settle` used to leave the loop on `take == 0`, and `take` is
-    /// `min(debt, left)` — zero for two unrelated reasons. The one it meant is
-    /// "the growth has run out". The one it did not is "*this* debt is zero",
-    /// and a zero debt sorts to the **front** of its heir's bucket: ages tie at
-    /// 0 and the tie-break is the lower pid. So the loop stopped on the first
-    /// entry and never reached the real one behind it.
+    /// In `settle`, `take` is `min(debt, left)`, which is zero either when the
+    /// growth has run out or when *this* debt is zero; only the first may end
+    /// the loop. A zero debt sorts to the **front** of its heir's bucket (ages
+    /// tie at 0, the tie-break is the lower pid).
     ///
-    /// The pid order is the whole fixture. `81` owes nothing, `82` owes one
-    /// second, `80` gains exactly that second, and the answer is 0%: the growth
-    /// is the reap of already-reported time. Against the old code this pass
-    /// reported **100%** — the spike the ledger exists to prevent — left `82`
-    /// still owing its second, to eat somebody's growth later or expire and be
-    /// charged twice, and did not even clear `81`, the removal sitting behind
-    /// the `break`.
-    ///
-    /// **With the zero debtor at the higher pid the fixture is green against
-    /// the bug** (measured: `percent80=0.0`, `owed82=nil` either way), which is
-    /// why it is `81` here and not `83`.
+    /// The pid order is the whole fixture: `81` owes nothing, `82` owes one
+    /// second, `80` gains exactly that second, and the answer is 0%. The zero
+    /// debtor must be the lower pid (`81`, not `83`), or the fixture cannot fail.
     func testAZeroDebtDoesNotStopTheSettlementOfTheDebtsBehindIt() throws {
         let previous = [key(80, 1): counters(0)]
         let current = [key(80, 1): counters(0, child: 1_000_000_000)]
@@ -4461,15 +4281,11 @@ final class SessionProcessTests: XCTestCase {
                        1, "and giving up on one is counted, because nothing else records it")
     }
 
-    /// **Finding 3 of the fourth review: an old debt leaves a ledger that is
-    /// being topped up every pass.**
+    /// **An old debt leaves a ledger that is being topped up every pass.**
     ///
-    /// The ledger used to be one pool per heir carrying one age, re-dated by
-    /// every addition — and the process that loses a descendant on nearly every
-    /// pass is exactly the one this matters for: `claude` is a node process
-    /// spawning the next `Bash`. Its pool would be re-dated for ever, so a debt
-    /// nothing can settle would never age out and would go on eating that
-    /// session's growth indefinitely.
+    /// Each entry keeps its own age. `claude` loses a descendant on nearly every
+    /// pass; a single re-dated age per heir would never let an unsettleable debt
+    /// age out.
     ///
     /// Here `80` is that heir. One debt has been waiting almost the whole
     /// lifetime, a second is half its age, and `80` loses a fresh child on this
@@ -4571,9 +4387,9 @@ final class SessionProcessTests: XCTestCase {
         XCTAssertEqual(cpu.count, 1)
     }
 
-    /// **The two sides of that sum need not be the same age**, and the join is
-    /// the one place the `(pid, startTime)` discipline used to be dropped. On a
-    /// pass that arrives too soon the rates are held from an earlier pass while
+    /// **The two sides of that sum need not be the same age**, so the join keys
+    /// on `(pid, startTime)` too. On a pass that arrives too soon the rates are
+    /// held from an earlier pass while
     /// the ownership table is this sweep's, which is exactly what holding rates
     /// per process rather than per session was for: "a process that has since
     /// died drops out of the sum instead of being credited to a session by a
@@ -4633,7 +4449,7 @@ final class SessionProcessTests: XCTestCase {
         XCTAssertFalse(aggregate.cpuIsLowerBound, "a complete sum was marked as a floor")
     }
 
-    /// **Finding 9 of the fourth review: a partial sum says that it is one.**
+    /// **A partial sum says that it is one.**
     ///
     /// The sweep answers per session, and a row is a window with several chats
     /// in it, so one of them can be missing from a pass — a chat that started
@@ -4705,17 +4521,9 @@ final class SessionProcessTests: XCTestCase {
     /// That is only half the door: `SwitcherRow.cpuPercent`, `orphanCount` and
     /// `cpuIsLowerBound` all have memberwise defaults, so a constructor that
     /// asks `aggregate` and then forgets to carry the answer onto the row
-    /// compiles perfectly and shows a blank column — or an unmarked partial sum
-    /// — for ever. The test that names three rows cannot see that either, for
-    /// whichever row it does not name.
+    /// compiles and shows a blank column or an unmarked partial sum.
     ///
-    /// `cpuIsLowerBound` was the field that proved the point. It reaches the row
-    /// through the same three constructors and nothing asked about it: deleting
-    /// `cpuIsLowerBound: aggregate.cpuIsLowerBound,` from all three left the
-    /// whole suite green, and in that state the `≥` could never appear on the
-    /// panel and a sum over one chat of two would read as a whole one.
-    ///
-    /// Which is why pid 44 is **not** in the `cpu` table below. With every
+    /// Pid 44 is **not** in the `cpu` table below. With every
     /// session measured the flag is `false` on every row, and an assertion that
     /// compares `false` to `false` everywhere cannot go red whatever the
     /// constructors do. Leaving the twin unmeasured lights it on the `quiet`
@@ -4790,9 +4598,8 @@ final class SessionProcessTests: XCTestCase {
 /// the hand-rolled parse of `KERN_PROCARGS2`, and what one pass of
 /// `ProcessSampler` promises the next one.
 ///
-/// These run against real processes because there is nothing else to run them
-/// against — the questions here are all about what the machine actually hands
-/// over, and a fixture would only restate the assumption being tested.
+/// These run against real processes: the questions are about what the machine
+/// actually hands over, which a fixture would only restate.
 final class SessionProcessSyscallTests: XCTestCase {
 
     private var spawned: [Process] = []
@@ -4848,16 +4655,14 @@ final class SessionProcessSyscallTests: XCTestCase {
     // MARK: - Units
 
     /// `ri_user_time` and `ri_system_time` are mach absolute time units, not
-    /// nanoseconds, whatever the `_time` in their names suggests. Read as
-    /// nanoseconds every figure on the panel was 41.7 times too small on this
-    /// machine — three processes each burning a whole core showed as 7.25%.
+    /// nanoseconds, whatever the `_time` in their names suggests (125/3 on Apple
+    /// silicon, so a factor of 41.7).
     ///
     /// Asked against an independent clock rather than against the timebase the
     /// conversion itself uses: one thread spinning for a third of a second must
     /// move the process's counter by very nearly the wall time it spun for.
     /// `DispatchTime.uptimeNanoseconds` does its own conversion, so the two
-    /// sides of this ratio share nothing but the hardware. Dropping the
-    /// conversion makes it 0.024.
+    /// sides of this ratio share nothing but the hardware.
     func testTheKernelsCPUCounterIsNotAlreadyInNanoseconds() throws {
         let before = try XCTUnwrap(SessionProcesses.cpuNanos(of: getpid())).own
         let start = DispatchTime.now().uptimeNanoseconds
@@ -4871,26 +4676,17 @@ final class SessionProcessSyscallTests: XCTestCase {
         // deschedules this one. The bound has to leave room for that and still
         // catch the mistake, and the mistake is a factor of 41.7 — read as
         // nanoseconds this ratio is 0.024.
-        //
-        // 0.5 was too tight and was measured to be: under the load of agents
-        // and a sweep probe this thread got only 0.455 of the wall time it spun
-        // for, and the test went red in 1 run of 3 (26.08.2026). 0.1 sits
-        // between the two, and roughly four times from each: 4.6x below the
-        // worst descheduling actually seen, 4.2x above the ratio the mistake
-        // this test is named for would produce.
+        // Under load this thread was measured getting as little as 0.455 of the
+        // wall time; 0.1 sits roughly four times from both that and 0.024.
         XCTAssertGreaterThan(ratio, 0.1, "the counter barely moved: still being read as nanoseconds?")
         XCTAssertLessThan(ratio, 2.0)
     }
 
     /// The timebase is a ratio and the conversion is exact, remainder included.
     ///
-    /// The ratio is a parameter here rather than this machine's own, because
-    /// asked through `timebase` the test cannot reach the branch it is named
-    /// after. It built its input as `denom * 1_000_003 + denom - 1`, which is a
-    /// multiple of `denom` whenever `denom == 1` — so on Intel and on the `(1,1)`
-    /// fallback the remainder is always zero and the oracle degenerates to
-    /// `units == units`. 125/3 is this machine; 1/1 is the other case, and it
-    /// has to be asked on purpose.
+    /// The ratio is a parameter rather than this machine's own `timebase`, so
+    /// both cases are reached: with `denom == 1` (Intel, and the `(1,1)`
+    /// fallback) the remainder is always zero. 125/3 is Apple silicon.
     func testMachUnitsConvertExactly() {
         func check(numer: UInt64, denom: UInt64) {
             XCTAssertEqual(SessionProcesses.nanoseconds(fromMachUnits: 0, numer: numer, denom: denom), 0)
@@ -4943,8 +4739,8 @@ final class SessionProcessSyscallTests: XCTestCase {
 
     /// The measured negative result of §2.8: `KERN_PROCARGS2` hands over `argv`
     /// and stops for a platform binary, whatever is actually in its
-    /// environment. The marker cannot see 296 of the 682 readable processes on
-    /// this machine — 43% of them — and `/bin/sleep` is one.
+    /// environment. The marker cannot see a large share of processes, and
+    /// `/bin/sleep` is one.
     ///
     /// The environment here really does carry the marker, which is what makes
     /// this "withheld" rather than "absent": the parser is not being asked
@@ -4956,8 +4752,7 @@ final class SessionProcessSyscallTests: XCTestCase {
     /// that failed with EPERM, one that failed with ESRCH because the process
     /// exited, and the one meant here, a block that ends where `argv` ends. The
     /// assertion is their union, so it holds when the process simply died before
-    /// the call, which is the one outcome that would make this test about
-    /// nothing. So the cause is asked directly: the syscall **succeeded**, and
+    /// the call. So the cause is asked directly: the syscall **succeeded**, and
     /// there is nothing past `argv`.
     func testAPlatformBinaryWithholdsItsEnvironment() throws {
         let pid = try spawn("/bin/sleep", ["30"], ["CLAUDE_PID": "424242", "PATH": "/usr/bin:/bin"])
@@ -5011,173 +4806,33 @@ final class SessionProcessSyscallTests: XCTestCase {
         SessionProcesses.cpuNanos(of: pid) != nil && SessionProcesses.parentAndStart(of: pid) == nil
     }
 
-    /// **Finding 1, against a real zombie.** A child burns 3.0 core-seconds and
-    /// exits; its parent does not call `wait` until the sampling loop below
-    /// hands it the `reap` file, which that loop writes only once a pass has
-    /// both seen the zombie and swept past it. Through that window the sweep
-    /// cannot see the child at all, and its counter has not gone anywhere — the
-    /// parent's `ri_child_*` does not move until the `wait`.
+    /// **Against a real zombie.** A child burns 3.0 core-seconds and exits; its
+    /// parent does not call `wait` until the sampling loop below hands it the
+    /// `reap` file, which that loop writes only once a pass has both seen the
+    /// zombie and swept past it. Through that window the sweep cannot see the
+    /// child, and the parent's `ri_child_*` does not move until the `wait`. The
+    /// ledger defers: no growth, nothing settled, and the debt waits for the
+    /// pass where the reap lands. Deducting on disappearance would instead
+    /// report the child's whole lifetime in that one tick (§2.8).
     ///
-    /// Deducted on disappearance, this fixture reports the child's whole
-    /// lifetime inside the tick where the reap lands, while the pass where the
-    /// child turned into a zombie floors to zero, because the deduction is
-    /// charged to a parent that gained nothing. With `swift build` in the
-    /// child's place that spike is the 60000% §2.8 names. The ledger defers
-    /// instead: no growth, nothing settled, and the debt waits for the pass
-    /// where the reap really lands.
+    /// The 3.0 core-seconds are sized so `peak < 150` discriminates: a pass is
+    /// ~1 s, and a deduct-on-disappearance spike only clears the ceiling when the
+    /// reaped total exceeds 1.5 passes' worth. A healthy pass reports at most
+    /// about one core here, since the parent sleeps in its polling loop. Lowering
+    /// the burn to save a pass of run time makes the ceiling stop discriminating.
     ///
-    /// **How much the child burns is what makes `peak < 150` discriminate, so
-    /// it is derived from the pass rather than picked.** Deducted on
-    /// disappearance the whole reaped total lands in one pass, so the ceiling
-    /// can only fire when that total is over 1.5 passes' worth — and a pass was
-    /// measured rather than assumed: a second of sleep plus a sweep costs
-    /// 1.0043–1.0195 s over five instrumented runs, 27.08.2026. The sweep in
-    /// that second is a *warm* one, which §6 puts at about a millisecond;
-    /// §6's 5.9–6.6 ms is the cold sweep, and exactly one sweep here is cold —
-    /// the baseline one before the loop, outside every tick measured. What
-    /// fills the rest of the spread is `Thread.sleep` overshoot and scheduling
-    /// jitter, which was not measured and is not being sized here. At the 1.5
-    /// core-seconds this loop used to spin, the threshold was 1.5 passes ≈
-    /// 1.51 s of burn against 1.50 reaped: the mutation peaked at 148.795% and
-    /// 149.457% and **passed**, while the fixture stayed green and said
-    /// nothing. At 3.0 a pass would have to stretch to 2.0 s — double what was
-    /// measured — before the ceiling stopped catching it, and the mutation now
-    /// comes to 296.995% and 296.242% over two runs the same day, failing on
-    /// the ceiling and on the integral both (4.9990 and 5.9294 core-seconds
-    /// against 3.000983 and 3.000826 reaped, 1.67× and 1.98×, where the bound
-    /// below is 1.2×).
+    /// Asserted over the whole run: no pass reports more than one core, and the
+    /// child's CPU is counted **once** — the integral of the panel's figure is
+    /// compared against what `wait4` reported at the reap (a different API from
+    /// the one under test). A run that never saw the zombie proves nothing, so
+    /// that is asserted too.
     ///
-    /// What moved is the burn and not the ceiling, because the healthy peak is
-    /// a *rate* and does not know how long the child spins: 99.969%, 99.874%
-    /// and 100.003% over three runs at 3.0, against 96.355% and 99.457% from
-    /// the 1.5 child — the same one core either way. Those four figures are
-    /// unloaded runs, and the peak moves with load: later the same day, minutes
-    /// apart and under other work, the same fixture read 89.9–99.8% at 3.0 and
-    /// 76.2–86.0% at 1.5. The claim rests on the mechanism rather than on them.
-    /// The most a healthy pass can report for one attributed process is what
-    /// that process burned since the previous sweep, which cannot exceed one
-    /// core's worth of one pass, over the sampler's own interval; the row's
-    /// figure sums over every process of the session
-    /// (`cpuPercentBySessionPID`), so the strict bound is one core per
-    /// attributed process, and it comes to ~100% here only because the parent
-    /// sleeps in its polling loop. That interval is bounded below by the
-    /// `Thread.sleep(1)` plus the sweep, so contention moves the figure down by
-    /// whole percents. Up it can move only by one residual skew: the counters
-    /// are read *inside* the sweep while `now` is taken after it
-    /// (`SessionProcesses.sample`, where "same side both times is the whole of
-    /// the fix"), and where in a sweep a given process is read still differs
-    /// between two passes, so the interval the numerator covers can slightly
-    /// outrun the one the denominator measures. That is what the 100.003%
-    /// opening this paragraph is — a fraction of a percent, and no size is
-    /// being put on it here. Lowering the ceiling to
-    /// the size of the spike would have eaten the 50 points of slack that
-    /// absorb a loaded machine — the very margin the load flake cured below
-    /// turned on. **The price of the burn is a pass, and it is counted in
-    /// passes because seconds cannot express it:** a run is a whole number of
-    /// ~1 s passes and the machine decides how many the child needs, so
-    /// neither the run's length nor the difference between two burns is a
-    /// fixed number of seconds — the difference is quantised the same way the
-    /// absolute is. Counted, 27.08.2026, six runs at each burn back to back in
-    /// one session with the pass count printed from the loop: at 1.5 the run
-    /// took 4 passes five times and 5 once (4.166, 4.173, 4.168, 5.187, 4.177
-    /// and 4.182 s), at 3.0 it took 5 passes three times, 6 twice and 8 once
-    /// (5.111, 5.122, 8.817, 6.128, 5.175 and 6.118 s). One pass between the
-    /// two usual shapes, and a spread of one pass at 1.5 against three at 3.0,
-    /// because the child's exit lands on a pass boundary rather than safely
-    /// between two. The counts say where: a run ends two passes after the one
-    /// that saw the zombie, so 5 and 6 passes put the exit either side of the
-    /// third check — which is what the mutation's own integrals already
-    /// showed, 4.9990 and 5.9294 being a pass apart, the child last seen on
-    /// the second pass and on the third. The eight-pass run is that boundary
-    /// moved and not the account failing: it puts the exit between the fifth
-    /// check and the sixth, a loaded machine taking five to six *passes* — 5.5
-    /// to 6.6 wall seconds at the 1.0923 s its own passes averaged — to hand
-    /// the child its three core-seconds. Against that 1.0923 s stand
-    /// 1.0066–1.0123 s in the other eight instrumented runs at 3.0: the five
-    /// of the six counted above that are not this one, plus the three of the
-    /// `print`-cost check below. Every set of seconds recorded here before is
-    /// one of these shapes rather than a disagreement with another — 4.10 and 4.14 s are
-    /// the four-pass run at 1.5, 5.11/5.13/5.13 the five-pass run at 3.0,
-    /// 6.13/6.14/6.13 the six-pass one — so a re-measure is only readable
-    /// beside its own pass count. One shape has a second sighting and the
-    /// other does not: 6.13/6.14/6.13 is the six-pass record just quoted, not
-    /// a repeat of it, while 5.116/5.100/5.113/5.127 is genuinely new — a
-    /// separate uninstrumented sitting of the same unchanged fixture the same
-    /// day. Neither sitting had its passes counted, so calling them the
-    /// six-pass and the five-pass shape is read off the bands the counted runs
-    /// establish — 5.111–5.175 s for five passes, 6.118/6.128 for six — and is
-    /// an inference, not a reading. Anyone taking the burn back down to 1.5 to
-    /// save that pass is buying it with the ceiling, which stops
-    /// discriminating at that size. Every per-pass figure above was read with
-    /// a `print` inside the loop, which costs nothing the clock can see:
-    /// three further runs with it came to 5.12, 5.13 and 5.14 s against the
-    /// 5.11, 5.13 and 5.13 s without it, both of them the five-pass shape and
-    /// therefore comparable, and all twelve runs of the count above carried
-    /// it too. The 227.95% and 281.22% §2.8 records are not this fixture's
-    /// margin either: those runs reaped 2.30 and 2.85 core-seconds, so
-    /// whatever else they measured, it was not this child.
-    ///
-    /// The table-driven fixtures cannot express this at all — in them a
-    /// disappearance and the reap that follows it always fall in the same gap,
-    /// which is the one arrangement where deducting on disappearance is right.
-    ///
-    /// What is asserted is the whole figure and not one tick: no pass may report
-    /// more than one core when only one core was ever burned, and the child's
-    /// CPU must be counted **once** across the run.
-    ///
-    /// How much CPU that is cannot be assumed, so the oracle is `wait4`, which
-    /// is a different API from the one under test and the same one §2.8's
-    /// whole-figure check used through `/usr/bin/time`: the fixture reports what
-    /// the kernel handed it at the reap, and the integral of the panel's own
-    /// figure has to come to the same thing. Deducting on disappearance roughly
-    /// doubles that integral — the child's total is reported once as it burns
-    /// and again in the tick where the reap lands.
-    ///
-    /// A run that never saw the zombie state would prove nothing, so that is
-    /// asserted too.
-    ///
-    /// **Every wait in here is on a condition, and it took two rounds of red runs
-    /// to get there.** The child used to spin for 3 s of *wall* time, which on a
-    /// machine with its own work to do is not an amount of CPU at all: under a
-    /// concurrent build it came out below the half-core-second the canary
-    /// demands and the test failed for the machine's reasons rather than the
-    /// ledger's. The child now spins until `time.process_time()` says it has
-    /// burned the **core**-seconds sized above, signals its exit through a file
-    /// so the zombie window is a window and not a guess, and the sampling loop
-    /// runs until the reap has landed and a pass has carried it rather than for a
-    /// fixed nine passes — because how many wall seconds those core-seconds
-    /// take now belongs to the machine. Same fix as
-    /// `testARealGrandchildLeftToLaunchdDoesNotBlankTheSurvivorsTick`, which
-    /// waits on the grandchild's counter for the same reason.
-    ///
-    /// **And the zombie window itself was the last fixed interval, measured in
-    /// the wrong clock.** The parent used to hold the corpse for 3 s and then
-    /// reap it, which is only a window if a pass falls inside it — and a pass is
-    /// a second of sleep plus a whole sweep of the process table, so how many
-    /// passes fit in three seconds belongs to the machine's load and not to this
-    /// test. Overrun, the fixture does not fail loudly: the disappearance and
-    /// the reap land in the same gap, which is the *ordinary* case and the one
-    /// arrangement in which deducting on disappearance is right, so the run
-    /// quietly stops testing the thing it is named for and goes red on
-    /// `zombieSeen`. The parent now waits for a third file instead, which this
-    /// loop creates once a pass has actually seen the zombie **and swept**. The
-    /// window is then exactly as long as it needs to be, which also keeps it far
-    /// inside `debtLifetimeSeconds` — a debt that aged out before its reap would
-    /// spike by the whole amount written off.
-    ///
-    /// **Shown rather than argued, and without loading anything**: what decides
-    /// the old shape is the ratio between the window and the pass, so the window
-    /// was shrunk instead of the machine being slowed. Cut to 0.05 s with the
-    /// passes left at a second, the fixed-window shape went red on `zombieSeen`
-    /// in 3 runs of 3 (27.08.2026), on the very assertion the flake was reported
-    /// on; the handshake is green in 3 of 3, at 4.1 s a run — that being the
-    /// 1.5-core-second child of the hour, whose four-pass shape re-measured
-    /// the same day at 4.166–4.182 s, and the run costs a pass more now for
-    /// the reason sized at the top.
-    ///
-    /// A flake here is worse than it looks: this suite is the only thing between
-    /// the ledger and a silent regression, and a test that cries wolf under load
-    /// gets re-run rather than believed.
+    /// Every wait is on a condition, not a fixed interval: the child spins on
+    /// `time.process_time()` and signals its exit through a file, and the
+    /// parent reaps only once this loop has seen the zombie and swept. A fixed
+    /// window that a pass overran would put disappearance and reap in the same
+    /// gap — the ordinary case — and silently stop testing this one. The
+    /// handshake also keeps the window far inside `debtLifetimeSeconds`.
     func testARealZombieIsDeferredRatherThanSpikingWhenItIsReaped() throws {
         try requireInterpreter()
         let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -5263,8 +4918,8 @@ final class SessionProcessSyscallTests: XCTestCase {
         let burned = try XCTUnwrap(Double(printed.trimmingCharacters(in: .whitespacesAndNewlines)),
                                    "the fixture never reported what it reaped: \(printed)")
         // The child spins on its own counter, so this cannot fail for want of a
-        // free core any more. It stays because it is the one assertion that
-        // would notice `process_time` measuring something other than CPU.
+        // free core; it would notice `process_time` measuring something other
+        // than CPU.
         XCTAssertGreaterThan(burned, 0.5, "the child barely ran: this run tested nothing")
         // Below `burned` by whatever the child had spent before the baseline
         // sweep, and never above it: the point of the ledger is that the same
@@ -5273,7 +4928,7 @@ final class SessionProcessSyscallTests: XCTestCase {
         XCTAssertLessThan(coreSeconds, burned * 1.2)
     }
 
-    /// **Finding 3, against a real reparented grandchild.** The middle process
+    /// **Against a real reparented grandchild.** The middle process
     /// exits first, so its child is handed to launchd and reaped there: the
     /// counter leaves the tree, and the grandparent — which the walk still finds
     /// and still charges — never gains a nanosecond of it.
@@ -5281,8 +4936,8 @@ final class SessionProcessSyscallTests: XCTestCase {
     /// Both deaths are made to fall in one gap on purpose, because that is the
     /// only arrangement in which the walk is fooled: given a sweep in between,
     /// the grandchild is seen with `ppid` 1 and no heir is found at all (which
-    /// is `testAProcessReapedByLaunchdSubtractsFromNobody`, and was already
-    /// right). The live shape is a `Bash` timeout killing a process group, the
+    /// is `testAProcessReapedByLaunchdSubtractsFromNobody`). The live shape is a
+    /// `Bash` timeout killing a process group, the
     /// shell exiting a moment before the compiler.
     ///
     /// The grandparent burns a core throughout. Deducted on disappearance, the
@@ -5291,15 +4946,11 @@ final class SessionProcessSyscallTests: XCTestCase {
     /// instead, it waits for growth that never comes, and the tick keeps its
     /// own work.
     ///
-    /// **How much work that is, is measured rather than assumed.** This machine
-    /// is shared and a spinning fixture does not get a whole core — under a load
-    /// average of 26 it got about two thirds of one (26.08.2026) — so the
-    /// assertion compares the panel's figure against the grandparent's own
-    /// counter over the same window, read directly. That is not an independent
-    /// syscall, and it is not meant to be: what it is independent of is the rate
-    /// path, the ledger and the attribution, which is the whole of what this
-    /// fixture is about. The defect reports 0 against an oracle that reports
-    /// whatever the process really got.
+    /// **How much work that is, is measured rather than assumed**: a spinning
+    /// fixture on a loaded machine does not get a whole core, so the assertion
+    /// compares the panel's figure against the grandparent's own counter over
+    /// the same window. That oracle is independent of the rate path, the ledger
+    /// and the attribution, which is what this fixture is about.
     func testARealGrandchildLeftToLaunchdDoesNotBlankTheSurvivorsTick() throws {
         try requireInterpreter()
         let stop = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -5327,14 +4978,10 @@ final class SessionProcessSyscallTests: XCTestCase {
         _ = sampler.sample(sessionPIDs: [grandparent])
         // **Waited for rather than slept through.** The grandchild has to be
         // holding more than one tick's worth when it goes, or deducting it
-        // would not blank anything and the run would prove nothing. Two seconds
-        // of wall clock is not that: this fixture spins two processes at once on
-        // a machine that has its own work to do, and while the suite itself was
-        // running the grandchild came out with 0.788 core-seconds of the two
-        // (27.08.2026) — the canary below fired, in a run that was green when
-        // the machine was quiet. So the gap lasts until the counter is really
-        // there, and the canary stays to catch the machine that cannot manage it
-        // at all.
+        // would not blank anything and the run would prove nothing. Wall time
+        // does not guarantee that on a loaded machine, so the gap lasts until the
+        // counter is really there; the canary catches a machine that cannot
+        // manage it at all.
         let deadline = Date().addingTimeInterval(10)
         var owed: UInt64 = 0
         repeat {
@@ -5487,14 +5134,9 @@ final class SessionProcessSyscallTests: XCTestCase {
     /// exactly the same table, and then a cache that never evicts looks the
     /// same as one that does.
     ///
-    /// The question has to be put as a **decrease**, and both halves of the
-    /// previous version of it were unable to answer it. `cacheEntries` was
-    /// filled from the local the field is built from, one entry per process by
-    /// construction, so `cacheEntries == processes` was a tautology and the
-    /// mutation "append to the cache instead of rebuilding it" — which makes it
-    /// grow for the life of the app — stayed green. And `previousCPU` was not
-    /// asked about at all, though the name of the test is plural. Both are now
-    /// read back off the fields themselves.
+    /// The question is put as a **decrease**, and both tables (`cacheEntries`
+    /// and `previousCPU`) are read back off the fields themselves; comparing
+    /// against the process count would be a tautology.
     ///
     /// Forty processes rather than one, because the machine goes on forking
     /// between the sweeps and a decrease of one would be inside that noise.

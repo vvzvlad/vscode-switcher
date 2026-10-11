@@ -47,9 +47,9 @@ final class SwitcherViewModel: ObservableObject {
     /// routinely summoned with the editor closed, and an empty list is then a
     /// perfectly good frozen order — the windows opened from the panel after
     /// that have to be appended to it. Told apart by emptiness alone, that case
-    /// read as "no freeze": the rule that records newcomers switched itself off
-    /// for the rest of the appearance and the list went back to the live order
-    /// from the data layer, reshuffling under the pointer at every click.
+    /// would read as "no freeze": the rule that records newcomers would switch
+    /// itself off for the rest of the appearance and the list would reshuffle
+    /// under the pointer at every click.
     @Published private var windowOrder: [String]?
     /// The same for the "projects" section, frozen at the same instants.
     ///
@@ -58,15 +58,15 @@ final class SwitcherViewModel: ObservableObject {
     /// of a transcript an agent writes to several times a minute. Two projects
     /// with no editor window and a working agent in each — the ordinary shape of
     /// "Accessibility not granted", where every live agent is in this section —
-    /// swapped places about once a second while the panel was up.
+    /// would swap places about once a second while the panel is up.
     ///
     /// Newcomers are woven in by `merged` rather than appended, which is where
     /// this parts company with the windows above. An orphan `cwd:` row belongs
     /// at the head of the section (SPEC §2.2.1) — it exists only because an
     /// agent is running in that directory — and appending it would drop a live
-    /// agent to position 93 of 93, the exact defect that put orphans on top in
-    /// the first place. `merged` places it by the fresh ranking, which has the
-    /// orphans first, so the invariant holds without a rule of its own.
+    /// agent to position 93 of 93. `merged` places it by the fresh ranking,
+    /// which has the orphans first, so the invariant holds without a rule of its
+    /// own.
     ///
     /// `merged`'s divergence branch — where the two sides disagree about the
     /// known rows — is reachable here in ordinary use, unlike above: this key
@@ -114,8 +114,8 @@ final class SwitcherViewModel: ObservableObject {
         //
         // Redone by insertion, not by replacement: the assembly takes 40–180 ms
         // and the slide-in 140 ms, so this lands exactly when the panel has
-        // arrived and become worth aiming at. Replacing the whole order there
-        // reshuffled the list under a pointer already on its way to a row.
+        // arrived and become worth aiming at, and replacing the whole order there
+        // would reshuffle the list under a pointer already on its way to a row.
         //
         // Only the windows are redone here. The projects have no provisional
         // stage to redo: the rule below is not held back by the wait and has
@@ -126,12 +126,11 @@ final class SwitcherViewModel: ObservableObject {
         }
         // A window opened while the panel is up joins the frozen order the first
         // time it is seen, instead of being left out of it for `ordered` to
-        // append on every pass. Left out, its place was decided by the live
-        // order: clicking two projects in a row put both new rows at the bottom, and
-        // clicking either of them swapped them under the pointer — the list
-        // moving from a click, which is what the freeze exists to stop. Not
-        // while the re-freeze is still pending: the order is provisional until
-        // then, and a newcomer belongs in the slot `merged` gives it.
+        // append on every pass. Left out, its place would be decided by the live
+        // order: clicking two projects in a row would put both new rows at the
+        // bottom, and clicking either of them would swap them under the pointer.
+        // Not while the re-freeze is still pending: the order is provisional
+        // until then, and a newcomer belongs in the slot `merged` gives it.
         // An order frozen empty counts as frozen — that is the panel summoned
         // with no editor window at all, where every row that ever appears is a
         // newcomer and this rule is the only thing holding the list still.
@@ -151,10 +150,10 @@ final class SwitcherViewModel: ObservableObject {
         // the show, whatever the age of it.
         //
         // The wait exists so that a stale cache cannot pin a newcomer to the
-        // bottom until the panel closes; here it did that very thing. The cache
-        // is up to two seconds old, so an agent started a second before the panel
-        // was summoned is missing from the frozen order, and while the wait was
-        // on, a row the frozen order had never heard of fell through to the tail
+        // bottom until the panel closes, and here it would do exactly that. The
+        // cache is up to two seconds old, so an agent started a second before the
+        // panel was summoned is missing from the frozen order, and while waiting,
+        // a row the frozen order has never heard of falls through to the tail
         // `ordered` appends — for the ~1 s until a snapshot read after the show
         // arrives. For an orphan `cwd:` row the tail is the one place it must
         // never be (SPEC §2.2.1): that is a live agent at position 93 of 93.
@@ -199,18 +198,17 @@ final class SwitcherViewModel: ObservableObject {
     /// the order the next snapshot reports. Whatever the list looked like when
     /// the user aimed at it is what it has to keep looking like, so the order in
     /// force at this instant is written down and the pending re-freeze dropped.
-    /// Clearing the pending flag alone was not enough: when the order was still
+    /// Clearing the pending flag alone is not enough: when the order is still
     /// empty — the panel's first appearance after launch, before any snapshot —
-    /// the windows on screen appeared in it nowhere, so the list was laid out by
-    /// the raw order and jumped after every click, which is the defect the freeze
-    /// was built for.
+    /// the windows on screen appear in it nowhere, so the list would be laid out
+    /// by the raw order and jump after every click.
     ///
     /// And when there is nothing to write down, the wait stays on. The panel can
     /// be summoned with no editor window at all — the editor is closed, or the
     /// grant has only just been given — and then the only thing to click is a
-    /// project. Settling an empty order there cancelled the re-freeze that was
+    /// project. Settling an empty order there would cancel the re-freeze that is
     /// the one thing left to fix it, and every window opened from the panel
-    /// afterwards was ordered by the live order again.
+    /// afterwards would be ordered by the live order again.
     ///
     /// Only the windows are written down. The projects have been frozen since
     /// the panel appeared — `panelDidShow` records them from the cache, and
@@ -244,12 +242,9 @@ final class SwitcherViewModel: ObservableObject {
         }
 
         // Every project, in the order frozen when the panel appeared — the one
-        // `DataSource.ranked` gave until then. There was a cap of thirty here,
-        // and it cost more than it saved: the section had to be read as "the top
-        // of the list" rather than "the list", and the rows it dropped were
-        // exactly the ones the ranking is now good at finding. `LazyVStack`
-        // builds only the rows on screen, so the length is not what the list
-        // costs.
+        // `DataSource.ranked` gave then. No cap: `LazyVStack` builds only the rows
+        // on screen, so the length is not what the list costs, and the section
+        // reads as "the list" rather than "the top of the list".
         let projects = Self.ordered(snapshot.projects, by: projectOrder)
             .filter { Self.matches($0, needle) }
         if !projects.isEmpty {
@@ -264,12 +259,10 @@ final class SwitcherViewModel: ObservableObject {
     ///
     /// `DataSource` hands the windows over newest-message-first and the projects
     /// last-session-first, which is correct of it and unusable live: the list
-    /// would move whenever an agent said something, and raising a window —
-    /// exactly what the panel is for — used to do the same back when the order
-    /// was the z-order. Either way the next snapshot, one second later at most,
-    /// shifted rows under the pointer, and stepping through several rows meant
-    /// chasing a list that reshuffled after each click. Only the sequence is
-    /// frozen; the contents of the rows keep updating.
+    /// would move whenever an agent said something, the next snapshot (one second
+    /// later at most) shifting rows under the pointer, and stepping through
+    /// several rows would mean chasing a list that reshuffled after each click.
+    /// Only the sequence is frozen; the contents of the rows keep updating.
     ///
     /// Matching is by `row.id` — the `CGWindowID` for a window, the path for a
     /// project — so a row that went away simply drops out and leaves no hole.
@@ -581,16 +574,10 @@ struct SwitcherRowView: View {
             // what is left over after its other children — so this block gets
             // the width and the 6 pt spacer keeps its floor.
             //
-            // `.frame(maxWidth: .infinity)` and `.layoutPriority(1)` were both
-            // written here first, against the fear that two greedy siblings
-            // would split the line in half and squeeze the title's ladder. They
-            // were then measured, which is the rule for a modifier that is
-            // supposed to change something: swept at 380, 300, 240, 200, 172 and
-            // 150 pt, with the longest real name and with a short topic, the ink
-            // is identical to the last quarter-point with them, without the
-            // priority, and without either. All fifteen layout tests pass in all
-            // three builds. A modifier that changes nothing anywhere is one more
-            // thing to explain later, so neither is here.
+            // No `.frame(maxWidth: .infinity)` or `.layoutPriority(1)` either:
+            // swept at 380, 300, 240, 200, 172 and 150 pt, with the longest real
+            // name and with a short topic, the ink is identical with and without
+            // them.
 
             Spacer(minLength: 6)
             StatusBadge(status: row.status, panelVisible: panelVisible)
@@ -613,14 +600,13 @@ struct SwitcherRowView: View {
     /// fourth element up there would have to be paid for by one of them.
     ///
     /// Neither is compulsory, and the line itself is not either: a row with no
-    /// chat and nothing being spent — most of the "projects" section — draws
-    /// exactly what it drew before, with no empty second line under the name.
+    /// chat and nothing being spent — most of the "projects" section — draws no
+    /// empty second line under the name.
     ///
     /// When the two compete, the topic gives way. The number is `fixedSize`, so
     /// the shortfall lands on the topic's ellipsis: a truncated topic is still a
     /// topic, while a truncated rate is a lie about how fast the row is spending —
-    /// the same objection §4 makes to a truncated `(agents: N)`, and the same one
-    /// it made to a truncated total before the figure became a rate.
+    /// the same objection §4 makes to a truncated `(agents: N)`.
     @ViewBuilder private var secondLine: some View {
         let usage = Self.rateLabel(for: row)
         if subtitle != nil || usage != nil {
@@ -671,19 +657,16 @@ struct SwitcherRowView: View {
     ///    parked at the bottom of a 93-row list (§2.2.1).
     ///
     /// **Rungs 3 and 4 are the same rung for a long name and two different rungs
-    /// for a short one**, and leaving 3 out is what this ladder did until it was
-    /// measured. With only "name at the floor, no percentage" below rung 2, a
-    /// short name lost its bracket the moment rung 2 gave out — because rung 2
-    /// asks for 40 pt of name that a one-character name does not want, and the
-    /// rung under it asked for the same 40. Measured 27.08.2026 at 1 pt a step:
-    /// `p (agents: 1)` keeps its bracket to 154 pt on a row with no percentage,
-    /// and without rung 3 it lost it at **186** on a row with one — six points
-    /// below where the percentage itself went (192), while §4's failure order
-    /// promises the percentage gives way *first*. With rung 3 the bracket is
-    /// back to the same 154 the percentage-less row has, which is the property
-    /// the test asserts: the percentage costs the count nothing, because it is
-    /// always dropped first. `panelWidth` is a setting, so that end of its range
-    /// is where this class of claim has to be checked.
+    /// for a short one**, and rung 3 is what keeps a short name's bracket. Rung 2
+    /// asks for 40 pt of name that a one-character name does not want, so without
+    /// rung 3 a short name would lose its bracket the moment rung 2 gave out —
+    /// before the percentage, while §4's failure order promises the percentage
+    /// gives way *first*. With rung 3, `p (agents: 1)` keeps its bracket to the
+    /// same width (154 pt at 1 pt a step) whether or not the row carries a
+    /// percentage, which is the property the test asserts: the percentage costs
+    /// the count nothing, because it is always dropped first. `panelWidth` is a
+    /// setting, so that end of its range is where this class of claim has to be
+    /// checked.
     ///
     /// A rung is only reachable while it is narrower than every rung above it,
     /// and neither 2 nor 3 always is — the floor is a floor both ways. A name
@@ -711,19 +694,16 @@ struct SwitcherRowView: View {
     /// passes the real proposal through afterwards, so the name still takes
     /// whatever the line actually has.
     ///
-    /// `panelWidth` is a setting that takes any value above zero, and this is the
-    /// second attempt at that end of its range. `fixedSize` alone — the count
-    /// rigid, the name flexible — holds at 380 and 240 and breaks below: at
-    /// 150 pt the name came out as 2.25 pt of ink beside `(agents: 5)`, and with
-    /// `(agents: 124)` the row overflowed its own frame, colour bar and all,
-    /// 5.5 pt to the left of where it belongs. Giving the name a minimum width
-    /// instead keeps the name but truncates the count, and a truncated count is a
-    /// lie: measured at 150 pt it is the same 25.75 pt stump for 5 as for 124.
-    /// `RowLayoutTests` renders 380, 240 and 200 with the count still there, 150
-    /// with it gone, and sweeps every width in between: taking the middle rung
-    /// out is caught at all three of the first ones alike — the top rung has not
-    /// fitted the longest name since 380 — while lowering the floor changes
-    /// nothing at any of them and is caught only in the sweep.
+    /// `panelWidth` is a setting that takes any value above zero. `fixedSize`
+    /// alone — the count rigid, the name flexible — holds at 380 and 240 and
+    /// breaks below: at 150 pt the name comes out as 2.25 pt of ink beside
+    /// `(agents: 5)`, and with `(agents: 124)` the row overflows its own frame,
+    /// colour bar and all. Giving the name a minimum width instead keeps the name
+    /// but truncates the count, and a truncated count is a lie: at 150 pt it is
+    /// the same 25.75 pt stump for 5 as for 124. `RowLayoutTests` renders 380,
+    /// 240 and 200 with the count still there, 150 with it gone, and sweeps every
+    /// width in between: taking the middle rung out is caught at all three of the
+    /// first ones alike, while lowering the floor is caught only in the sweep.
     @ViewBuilder private var titleLine: some View {
         let count = Self.countLabel(for: row)
         let cpu = Self.cpuLabel(for: row)
@@ -836,8 +816,8 @@ struct SwitcherRowView: View {
     ///
     /// Two counts, and each appears only when it is not zero. `orphans: 0` is
     /// the ordinary state of every row on the machine and would be a column of
-    /// noughts across the whole panel; `agents: 0` was already left out for the
-    /// same reason before orphans existed.
+    /// noughts across the whole panel; `agents: 0` is left out for the same
+    /// reason.
     ///
     /// Which means a row can read `(orphans: 3)` with no agents in front of it,
     /// and that is the case worth having: an orphan is a process the parent
@@ -962,12 +942,10 @@ struct SwitcherRowView: View {
 
     private var tooltip: String { Self.tooltipText(for: row) }
 
-    /// The row's only tooltip.
-    ///
-    /// There used to be a second one on the badge, so what the user read
-    /// depended on which pixel the pointer had landed on. This one is on the
-    /// whole row and carries everything: the icons spelled out as words, and
-    /// the per-chat context and model that the row itself no longer shows.
+    /// The row's only tooltip, on the whole row, so what the user reads does
+    /// not depend on which pixel the pointer landed on. It carries everything:
+    /// the icons spelled out as words, and the per-chat context and model that
+    /// the row itself does not show.
     static func tooltipText(for row: SwitcherRow) -> String {
         var lines: [String] = [row.displayName]
         if let topic = rowSubtitle(row) { lines.append(topic) }
@@ -1055,11 +1033,11 @@ struct SwitcherRowView: View {
     /// of exited parents. It counts every process the chain no longer reaches —
     /// the one that lost its parent and everything still running underneath it,
     /// because a descendant of a detached process is detached too (SPEC §2.8).
-    /// One of the six live claims on this machine was a detached `python` with
-    /// a `docker` and two `ssh` under it: four processes, one dead parent, and
-    /// `4 orphaned processes` would have read as four of them.
+    /// A detached `python` with a `docker` and two `ssh` under it is four
+    /// processes and one dead parent, and `4 orphaned processes` would read as
+    /// four of them.
     ///
-    /// Silent when both are, so a quiet row's tooltip is what it was before.
+    /// Silent when both are, so a quiet row's tooltip has no extra lines.
     static func processLines(for row: SwitcherRow) -> [String] {
         var parts: [String] = []
         if let cpu = cpuLabel(for: row) { parts.append("CPU \(cpu) of one core") }
@@ -1169,10 +1147,9 @@ struct StatusBadge: View {
 
     var body: some View {
         Group {
-            // An icon rather than a coloured dot: the dot told the user there
-            // was *a* state and left the meaning to be memorised. Each of the
-            // four shapes is different enough to be read without the colour,
-            // and the tooltip spells the chats out in words.
+            // An icon rather than a coloured dot: each of the four shapes is
+            // different enough to be read without the colour, and the tooltip
+            // spells the chats out in words.
             if let status {
                 Image(systemName: Self.symbol(for: status))
                     .font(.system(size: 11, weight: .semibold))
@@ -1221,15 +1198,13 @@ struct StatusBadge: View {
             }
         }
         // No `.help` here on purpose. The row carries one tooltip for the whole
-        // line; a second one on the badge made the text the user got depend on
-        // which pixel the pointer happened to be over.
+        // line, so the text the user gets does not depend on which pixel the
+        // pointer happens to be over.
     }
 
-    /// SF Symbols, one shape per status. Three of the shapes are the ones the
-    /// states they fold used to wear, so the habit carries over: the green tick
-    /// of an answered chat, the turning arrows of a working one, the sleeping
-    /// moon. The raised hand is the new one, and it reads as what it is — a
-    /// chat that stopped mid-task and is holding its hand up.
+    /// SF Symbols, one shape per status: the green tick of an answered chat, the
+    /// turning arrows of a working one, the sleeping moon, and the raised hand of
+    /// a chat that stopped mid-task and is holding its hand up.
     static func symbol(for status: RowStatus) -> String {
         switch status {
         case .blocked: return "hand.raised.fill"

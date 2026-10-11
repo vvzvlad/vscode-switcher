@@ -8,11 +8,8 @@ import Foundation
 /// data for this session".
 enum ClaudeSessions {
 
-    /// Constants, not computed properties: the home directory cannot change
-    /// under a running process, while `homeDirectoryForCurrentUser` plus an
-    /// `appendingPathComponent` cost about 13 µs together. These are rebuilt
-    /// several times per session on every snapshot — once a second while the
-    /// panel is open — which is enough to be worth not doing.
+    /// Constants, not computed properties: building them costs ~13 µs and they
+    /// are used several times per session on every snapshot.
     static let claudeHome: URL =
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
 
@@ -47,14 +44,10 @@ enum ClaudeSessions {
     /// VSCode extension. Dead session files stay on disk forever and have to be
     /// filtered out. Sorted by last activity, most recent first.
     ///
-    /// **At most one row per `sessionId`**, and that is not a convenience: it is
-    /// what lets `DataSource.liveSlugsBySessionId` be a map at all, and therefore
-    /// what lets the contest veto ask one question and get one answer
-    /// (`DataSource.settle`). Held by `testOneSessionIdYieldsOneLiveRow`.
-    ///
-    /// The directory is a parameter for the same reason `UsageIndex` takes
-    /// `projectsDirectory`: that invariant is about a directory full of files, and
-    /// there is no other way to put two files naming one session in front of it.
+    /// At most one row per `sessionId`: `DataSource.liveSlugsBySessionId` is a
+    /// map and the contest veto in `DataSource.settle` relies on it
+    /// (`testOneSessionIdYieldsOneLiveRow`). The directory is a parameter so
+    /// tests can supply their own files.
     static func liveSessions(config: Config,
                              sessionsDirectory: URL = ClaudeSessions.sessionsDirectory) -> [ClaudeSessionInfo] {
         let fileManager = FileManager.default
@@ -71,11 +64,8 @@ enum ClaudeSessions {
                   let cwd = dict["cwd"] as? String
             else { continue }
 
-            // A session started from a terminal is running just as much and is
-            // dropped here, because the panel is about windows. Anything that
-            // reads this list as "the sessions that are running" inherits that
-            // gap — the contest veto in `DataSource.settle` is the one place
-            // where it matters, and it says so.
+            // Terminal sessions are dropped: the panel is about windows. The
+            // contest veto in `DataSource.settle` inherits this gap.
             let entrypoint = (dict["entrypoint"] as? String) ?? ""
             guard entrypoint.hasPrefix("claude-vscode") else { continue }
 
@@ -114,7 +104,7 @@ enum ClaudeSessions {
     /// Session files stay on disk after the process dies and pids are reused, so
     /// "alive" alone resurrects long-dead sessions under a stranger's process.
     /// A recycled pid necessarily started after the session did, which is enough
-    /// to tell the two apart. Files without `startedAt` keep the old behaviour.
+    /// to tell the two apart. Files without `startedAt` are judged by liveness alone.
     static func isSessionProcessAlive(pid: Int32, startedAt: Date?) -> Bool {
         guard isProcessAlive(pid) else { return false }
         guard let startedAt, let processStart = processStartTime(pid) else { return true }
@@ -153,12 +143,8 @@ enum ClaudeSessions {
         let metrics = metricsStatus(sessionId: sessionId)
         let transcript = transcriptSummary(atPath: transcriptPath, tailBytes: config.transcriptTailBytes)
 
-        // `isSessionProcessAlive` has let this session through, which for
-        // everything but one branch means the pid's start time was checked
-        // against this `startedAt`. The exception is a `sysctl` that yields no
-        // start time — it returns `true` without comparing anything — so read
-        // this as "not known to belong to somebody else's process", not as
-        // proven. `KERN_PROC_PID` does not fail for a live pid in practice.
+        // The pid passed `isSessionProcessAlive`, so it is not known to belong
+        // to another process (unproven only if `sysctl` gave no start time).
         let resolved = resolveState(hook: hook, transcript: transcript, sessionStartedAt: startedAt)
         let model = transcript.model ?? metrics?.modelId ?? metrics?.modelName
         let context = contextUsage(transcript: transcript,
@@ -201,39 +187,24 @@ enum ClaudeSessions {
     /// all, and some directories hold no transcript (worktree snapshots,
     /// sessions since deleted).
     ///
-    /// The *listing* is cached against the directory's own mtime, which moves
-    /// exactly when a session file is added or removed — that is, exactly when
-    /// the listing changes. The timestamps are deliberately not cached with it.
-    /// Appending to an existing transcript moves neither the directory's mtime
-    /// nor its size, so a cached stamp freezes at the moment the last session
-    /// was *started* while that session goes on writing for hours. It did not
-    /// matter while this only fed a count over weeks; it decides the order now
-    /// (SPEC §2.2.1), and the freeze is not small: across the 47 project
-    /// directories on this machine the gap between the directory's mtime and its
-    /// newest transcript is 1.7 h at the median, 6 h or more in a third of them
-    /// and 222 h at the worst — the project being typed in right now would sit
-    /// where it stood nine days ago. Re-stat'ing every transcript instead is one
-    /// `stat(2)` each, 362 of them here: 1.25 ms for the whole pass warm and
-    /// 3.4–4.1 ms on the first one, against a snapshot that spends 40–180 ms on
-    /// disk (release build, live data, SPEC §2.2.1).
+    /// The listing is cached against the directory's mtime, which moves when a
+    /// session file is added or removed. The timestamps are not cached:
+    /// appending to a transcript does not move the directory's mtime, and the
+    /// stamps decide the project order (SPEC §2.2.1). One `stat(2)` per
+    /// transcript costs ~1–4 ms per pass (SPEC §2.2.1).
     static func sessionTimes(forPath path: String,
                              projectsDirectory: URL = ClaudeSessions.projectsDirectory) -> [Date] {
         let directory = projectsDirectory.appendingPathComponent(slug(forPath: path))
-        // Most projects have never hosted a session and so have no directory
-        // here — 63 of the 93 on this machine. `FileDerivedCache` never caches a
-        // path that does not exist, so without this guard every one of them ran
-        // a `contentsOfDirectory` that could only fail, once per project per
-        // snapshot; building those `NSError`s cost more than every other part of
-        // the ranking together.
+        // Most projects have no directory here, and `FileDerivedCache` never
+        // caches a missing path; a failing `contentsOfDirectory` per project per
+        // snapshot would cost more than the rest of the ranking.
         guard fileStamp(atPath: directory.path) != nil else { return [] }
         let names = sessionNamesCache.value(atPath: directory.path) {
             guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
             return names.filter { $0.hasSuffix(".jsonl") }
         }
-        // The base path is built once and the names concatenated onto it.
-        // `URL.appendingPathComponent($0).path` per file was three quarters of
-        // the whole pass — 2.54 ms of it against 0.27 ms of `stat(2)` — which is
-        // the same trap the note about `claudeHome` below is about.
+        // String concatenation: `URL.appendingPathComponent($0).path` per file
+        // costs ~10x the `stat(2)` itself.
         let base = directory.path
         return names.compactMap { fileStamp(atPath: base + "/" + $0)?.modificationDate }
     }
@@ -241,11 +212,8 @@ enum ClaudeSessions {
     /// The Claude Code work a project has seen: when the newest session of any
     /// age was written, and how many of them fall inside the window.
     ///
-    /// Both halves go to `--dump`, and only there: the count used to be the key,
-    /// and it answers the wrong question — how much was done here, rather than
-    /// where the work is now (SPEC §2.2.1). The panel needs the stamp alone and
-    /// takes it straight from `sessionTimes`, so this whole function is off the
-    /// snapshot path.
+    /// Used only by `--dump`; the panel ranks by the newest stamp straight from
+    /// `sessionTimes` (SPEC §2.2.1), so this is off the snapshot path.
     static func activity(forPath path: String,
                          windowDays: Int,
                          now: Date = Date(),
@@ -280,52 +248,20 @@ enum ClaudeSessions {
     /// guards keep a stuck value out of the UI, and both use numbers that are
     /// computed anyway — the hook timestamp and the transcript mtime.
     ///
-    /// `sessionStartedAt` is the third guard, and the only one aimed at the
-    /// transcript rather than the hook. A resumed chat replays whatever its last
-    /// turn stopped on: the user opens a session from a week ago, types nothing,
-    /// and its `tool_use` tail reads `working` under a process that has not run
-    /// a single turn. A turn the current process cannot have started is not
-    /// running now.
+    /// `sessionStartedAt` is the third guard, aimed at the transcript: a resumed
+    /// chat whose tail reads `working` has not run a turn in this process. When
+    /// `newestRecordAt` (the stamp of the newest record of any type) is older
+    /// than the session start, a transcript `working` is demoted to `idle`. Any
+    /// prompt, dialog answer (`tool_result`) or finished replayed tool call
+    /// stamps the file, so a real turn stands the rule down. The file mtime is
+    /// not used: resuming touches it without appending a record.
     ///
-    /// The question that settles is "has this process written anything into the
-    /// transcript at all?", and `newestRecordAt` — the record-level stamp of the
-    /// newest record in the tail, whatever its type — answers it in one
-    /// comparison. Everything that means a turn is under way stamps the file on
-    /// the way in: the prompt the user typed, the bare `tool_result` an answer
-    /// to a dialog arrives as (771 of 771 `AskUserQuestion`/`ExitPlanMode`
-    /// answers in the §2.4 census have exactly that shape, and so does an
-    /// approved permission dialog), and, once it finishes, the hanging tool call
-    /// Claude Code replays on resume. Any of them stands the rule down, and none
-    /// of them would have if the comparison were against the last *assistant*
-    /// record instead.
+    /// A turn still awaiting a tool result (`lastTurnAwaitingToolResult`) is
+    /// exempt: a replayed call on resume has that shape until its result is
+    /// written, and it is indistinguishable from a long-running tool (§2.4).
     ///
-    /// The replay is the one with a gap in it: until its result is written the
-    /// newest record is still the pre-resume one, and the stamps alone would
-    /// call a turn that is executing right then `idle`. So the stamps are not
-    /// asked about it at all. A turn still waiting for a tool result is exactly
-    /// the shape §2.4 reserves — an unanswered `tool_use` with no marker after
-    /// it cannot be told apart from a `Bash` that has been running for an hour,
-    /// and a working agent must never silently vanish — and a replay always has
-    /// that shape while it runs. `lastTurnAwaitingToolResult` excludes it, and
-    /// Rule 2 keeps its own population: of the seven stale `working` tails on
-    /// disk, six have their call answered and are demoted as before (§2.4).
-    /// Rule 1 is not affected; a marker still ends the turn it follows.
-    ///
-    /// Not the file's mtime, which is the same idea and the wrong instrument:
-    /// resuming touches the transcript without appending a stamped record, so
-    /// the reproducer's mtime is two seconds *after* its process started while
-    /// its newest record is eight days older.
-    ///
-    /// Only `working` is demoted, and only to `idle`. Five of the thirteen live
-    /// sessions in the §2.4 control run have written nothing since their process
-    /// started, and all five read `waiting` — a perfectly true statement about a
-    /// resumed chat, and left alone. Only `working` is a claim about right now.
-    ///
-    /// `sessionStartedAt` deliberately has no default value. With one, dropping
-    /// it at the single production call site compiles and breaks no test — the
-    /// rule would simply be off, and the panel would spin over resumed chats
-    /// again with nothing to say so. Without one, every caller has to state what
-    /// it knows, and a lost wire is a compile error.
+    /// Only `working` is demoted: `waiting` is true of a resumed chat.
+    /// `sessionStartedAt` has no default, so a caller cannot silently drop it.
     static func resolveState(hook: HookStatus?,
                              transcript: TranscriptSummary,
                              sessionStartedAt: Date?,
@@ -345,17 +281,10 @@ enum ClaudeSessions {
         guard let hookState = hook?.state else { return fromTranscript ?? (.idle, .unknown) }
         guard let hookTime = hook?.timestamp else { return (hookState, .hook) }
 
-        // `waiting`, `permission` and `question` describe a condition the
-        // transcript cannot see: while a dialog sits on screen the last
-        // assistant record still says `tool_use` and the file keeps being
-        // touched, so every touch older than the tolerance used to turn the
-        // orange indicator off. Only a newer hook — `Stop`, `UserPromptSubmit`,
-        // `PostToolUse`, `PostToolUseFailure` — takes those states away. Both
-        // post-tool events are listed because the CLI sends the first only when
-        // the call succeeded; a wait whose tool then errored out is ended by the
-        // second (SPEC §2.6.2). `question` needs this most of all: `Stop` does
-        // not fire for `AskUserQuestion`, so nothing else would ever put the
-        // state back.
+        // `waiting`, `permission` and `question` are invisible to the
+        // transcript (a dialog leaves a `tool_use` tail while the file keeps
+        // being touched), so only a newer hook (`Stop`, `UserPromptSubmit`,
+        // `PostToolUse`, `PostToolUseFailure`) ends them (SPEC §2.6.2).
         let mayBeOverruled = hookState == .working || hookState == .idle
 
         // The session went on working long after the hook state was written, so
@@ -387,9 +316,7 @@ enum ClaudeSessions {
     /// Used tokens and the window they are measured against.
     ///
     /// The two numbers must come from one source: statusLine and the transcript
-    /// are sampled at different moments, and a numerator from one with a
-    /// denominator from the other produced percentages such as `194k (97%)` for
-    /// a session using 19% of a 1M window.
+    /// are sampled at different moments, and mixing them gives wrong percentages.
     /// `configuredModel` is the alias Claude Code's own settings would start a
     /// session in this directory with. It is the weakest of the sources and only
     /// ever fills in a limit nothing else could supply — see
@@ -432,11 +359,9 @@ enum ClaudeSessions {
     /// running.
     ///
     /// The file survives until `SessionEnd` and is never rewritten if statusLine
-    /// breaks — the user replaces their own status line, uninstalls the hooks
-    /// (`--uninstall` does not delete metrics), `jq` leaves the PATH. Its numbers
-    /// then stay authoritative forever: a stale `5k` against a transcript at
-    /// `460k` rendered as a confident `2.5%`. Only claimed when the transcript
-    /// can actually replace both numbers.
+    /// breaks (the user replaces their status line, uninstalls the hooks, `jq`
+    /// leaves the PATH). Only claimed when the transcript can actually replace
+    /// both numbers.
     static func metricsAreStale(metrics: MetricsStatus,
                                 transcript: TranscriptSummary) -> Bool {
         guard transcript.contextUsedTokens != nil,
@@ -470,11 +395,9 @@ enum ClaudeSessions {
     /// same payload did not state the size outright. Both numbers describe the
     /// same moment, so this is a reading, not a guess.
     ///
-    /// The percentage arrives rounded to a whole number, so the quotient carries
-    /// that rounding: a real payload gave `204 244` for a 200k window. A limit
-    /// is a round number in every window Claude offers, so the quotient is
-    /// snapped — to a known window size when the rounding interval covers one,
-    /// and to two significant digits otherwise.
+    /// The percentage is rounded to a whole number (e.g. `204 244` for a 200k
+    /// window), so the quotient is snapped to a known window size when the
+    /// rounding interval covers one, and to two significant digits otherwise.
     static func limitFromPercentage(usedTokens: Int, percentage: Double?) -> Int? {
         guard let percentage, percentage >= 1, usedTokens > 0 else { return nil }
         let raw = Double(usedTokens) * 100 / percentage
@@ -519,20 +442,12 @@ enum ClaudeSessions {
     /// The model identifier Claude Code resolves for a session started in `cwd`,
     /// or `nil` when nothing pins one and the built-in default applies.
     ///
-    /// This is configuration, not a measurement, which is what makes it usable:
-    /// a `[1m]` suffix in a model alias is Claude Code's own way of asking for
-    /// the 1M window, so reading it is not a guess about the session. It is
-    /// still the weakest source available, because the setting only decides what
-    /// *new* sessions start on — `/model` and `--model` override it for a
-    /// running one, and nothing on disk records that they did (see
-    /// `isExtendedContextModel`).
+    /// A `[1m]` suffix in the configured alias requests the 1M window. It is the
+    /// weakest source: `/model` and `--model` override it for a running session
+    /// and nothing on disk records that (see `isExtendedContextModel`).
     ///
-    /// The chain is Claude Code's own, most specific first. A project that pins
-    /// `sonnet` must beat a user default of `opus[1m]`, and sessions live in
-    /// different directories, so the answer is per-`cwd` rather than global.
-    /// The inherited environment comes last: a menu bar agent launched by
-    /// launchd inherits almost nothing, so its absence proves nothing, and a
-    /// value that is there is the most global signal of the four.
+    /// The chain is Claude Code's own, most specific first, per `cwd`. The
+    /// inherited environment comes last: a launchd agent inherits almost nothing.
     static func configuredModelIdentifier(cwd: String,
                                           claudeHome: URL = ClaudeSessions.claudeHome,
                                           environmentModel: String? = ClaudeSessions.environmentModel) -> String? {
@@ -652,8 +567,7 @@ enum ClaudeSessions {
     /// filled, which normally costs a few dozen JSON parses.
     ///
     /// The result is cached until the file changes: a snapshot runs about once a
-    /// second and would otherwise re-read several megabytes of unchanged tails
-    /// every time, which is what the menu bar agent's power draw comes down to.
+    /// second, and re-reading unchanged tails dominates the agent's power draw.
     static func transcriptSummary(atPath path: String, tailBytes: Int) -> TranscriptSummary {
         transcriptCache.value(atPath: path, variant: "\(tailBytes)") {
             uncachedTranscriptSummary(atPath: path, tailBytes: tailBytes)
@@ -674,24 +588,14 @@ enum ClaudeSessions {
         // Filled going backwards, so by the time the assistant record that
         // asked is read, its answer — which is written after it — has been seen.
         var answered: Set<String> = []
-        // What the newest thing the user said after the last assistant record
-        // was: `true` — an interrupt marker, `false` — anything else they
-        // said, `nil` — nothing of theirs met yet. Only the newest one counts,
-        // because a prompt typed after a marker restarts the turn the marker
-        // ended, and the agent is working on it again.
-        //
-        // Same trick as `answered`: this is read at the assistant record the
-        // fallback state comes from, and only the record that clears
-        // `needsAssistant` ever reaches the point where it is read (sidechain
-        // and `<synthetic>` records enter that branch too, but `continue` out
-        // before it). Everything the backwards scan has met by then is newer
-        // than that record, so a verdict set afterwards — one belonging to an
-        // earlier turn — can no longer be seen by anybody. It stays local: the
-        // liveness rule outside reads `newestRecordAt` instead (§2.4).
+        // The newest thing the user said after the last assistant record:
+        // `true` an interrupt marker, `false` anything else (a prompt after a
+        // marker restarts the turn), `nil` nothing yet. Read only at the
+        // assistant record that clears `needsAssistant`, so anything set
+        // afterwards (an earlier turn) is never seen.
         var lastUserSaidInterrupted: Bool?
-        // Whether a record carrying a `timestamp` field has been met yet. Not
-        // the same question as `newestRecordAt == nil`, and the difference is
-        // the whole point of the flag — see below.
+        // Whether a record carrying a `timestamp` field has been met yet; not
+        // the same as `newestRecordAt == nil` (see below).
         var newestStampSeen = false
 
         for line in lines.reversed() {
@@ -701,26 +605,15 @@ enum ClaudeSessions {
             }
             guard let type = record["type"] as? String else { continue }
 
-            // Newest record first, so the first stamp met is the newest one and
-            // the flag stops the search there: one date per transcript, not one
-            // per line. Records with no `timestamp` field at all are stepped
-            // over — resuming a chat writes ten kinds of record that carry none
-            // (§2.4) — but a field that is there and does not parse stops the
-            // search all the same, leaving `newestRecordAt` empty. It belongs to
-            // the newest record either way, and walking on to the next, older
-            // stamp would hand Rule 2 something that is not the newest record's
-            // and demote a session that has just written into the file. `nil`
-            // demotes nothing, which is what makes a failed parse harmless.
+            // The first stamp met is the newest. Records without a `timestamp`
+            // field are skipped (resume writes several such kinds, §2.4), but a
+            // field that does not parse still ends the search with `nil`: an
+            // older stamp would wrongly demote a session, and `nil` demotes
+            // nothing.
             //
-            // `Date.ISO8601FormatStyle` is a `Sendable` struct;
-            // `ISO8601DateFormatter` is a class, and a `static let` of one warns
-            // under `-strict-concurrency=complete` (checked — "not
-            // concurrency-safe … may have shared mutable state", an error in the
-            // Swift 6 language mode), which this build may not carry. Every
-            // timestamp in the §2.4 census has fractional seconds (282 511
-            // record-level stamps across 423 transcripts, none without), so
-            // there is no second, fraction-less attempt: a branch that cannot
-            // fire is a branch nobody can trust.
+            // `Date.ISO8601FormatStyle` because it is `Sendable`, unlike
+            // `ISO8601DateFormatter`. All observed stamps have fractional
+            // seconds (§2.4), so there is no fraction-less fallback.
             if !newestStampSeen, let stamp = record["timestamp"] as? String {
                 newestStampSeen = true
                 summary.newestRecordAt = try? Date(
@@ -747,10 +640,8 @@ enum ClaudeSessions {
                       model != "<synthetic>"
                 else { continue }
                 summary.model = model
-                // A fact about this record, recorded whatever the stop reason
-                // says: only Rule 2 reads it, and only for `working`, but
-                // computing it in one place keeps it what its name claims —
-                // "the last turn is still waiting for a tool".
+                // Recorded whatever the stop reason; only Rule 2 reads it, and
+                // only for `working`.
                 summary.lastTurnAwaitingToolResult = awaitingToolResult(message: message, answered: answered)
                 if let usage = message["usage"] as? [String: Any] {
                     let keys = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
@@ -761,12 +652,8 @@ enum ClaudeSessions {
                 switch message["stop_reason"] as? String {
                 case "end_turn", "stop_sequence": summary.fallbackState = .waiting
                 case "tool_use":
-                    // Most tool calls mean the turn is running, but two of them
-                    // are the agent handing control back and standing still
-                    // until a human answers. They are worth telling apart:
-                    // otherwise "asked a question" is indistinguishable from
-                    // "busy", which is the state the user is least likely to
-                    // interrupt.
+                    // Most tool calls mean the turn is running, but
+                    // `userFacingTools` hand control back until a human answers.
                     let asked = unansweredQuestion(message: message, answered: answered)
                     // An interrupted turn is over, whatever it stopped on. The
                     // question branch is left alone: a question the user typed
@@ -785,30 +672,11 @@ enum ClaudeSessions {
                 // included (SPEC §2.4): `tool_use_id` is unique, so a subagent's
                 // result can never close somebody else's question.
                 collectAnswers(record: record, into: &answered)
-                // What the user said, on the other hand, belongs to the chain it
-                // was typed on, so the sidechain test mirrors the one the
-                // assistant branch above already makes. No such record exists in
-                // a parent transcript today — subagents write into their own
-                // session file (§2.6.3), and not one record in the §2.4 control run
-                // has `isSidechain: true` — so this is symmetry between the
-                // two branches, not an answer to a case anybody has seen.
-                //
-                // `needsAssistant` here is an early-out on a hot path and
-                // nothing more. The verdict never leaves this function and is
-                // read at exactly one place — the assistant record that clears
-                // the flag — so a verdict recorded after that point cannot
-                // reach anybody, and dropping the flag from this condition
-                // changes no behaviour. What makes that true is the invariant
-                // `testAMarkerOlderThanTheLastTurnChangesNothing` pins; the
-                // test passes with this line and without it, as it should.
-                //
-                // It is worth its line because this is the once-a-second
-                // snapshot path: of the 4474 `user` records the scan visits
-                // across the 423 transcripts of the §2.4 census, 4348 (97%)
-                // come after the flag is already false — median 1 per transcript,
-                // p90 41, max 80 — and every one of them would repeat the two
-                // casts `collectAnswers` has just done, the second of which
-                // bridges an array of dictionaries.
+                // What the user said belongs to its own chain, mirroring the
+                // sidechain test in the assistant branch. `needsAssistant` is
+                // only an early-out on this hot path: most `user` records are
+                // visited after it is false, and the verdict is never read then
+                // (`testAMarkerOlderThanTheLastTurnChangesNothing`).
                 if needsAssistant, lastUserSaidInterrupted == nil,
                    (record["isSidechain"] as? Bool) != true,
                    let verdict = interruptVerdict(record: record) {
@@ -824,27 +692,17 @@ enum ClaudeSessions {
 
     /// Tools whose call is a question to the user rather than work being done.
     ///
-    /// `ExitPlanMode` is in here for the same reason as `AskUserQuestion`: the
-    /// plan is finished and the agent waits for a human to approve it. Unlike
-    /// `AskUserQuestion` it has never been caught in a payload, so treat it as
-    /// an assumption (SPEC §2.6.2) — here it costs nothing either way, because
-    /// this path reads the transcript, where the tool call is plainly visible.
+    /// `ExitPlanMode` waits for a human to approve the plan, like
+    /// `AskUserQuestion`; its hook payload is unverified (SPEC §2.6.2), but here
+    /// the call is read from the transcript.
     static let userFacingTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
 
     /// True when an assistant message asks the user something and the answer has
     /// not arrived yet.
     ///
-    /// Unlike the permission dialog, this leaves a trace in the transcript, so
-    /// it is a signal that works without any hook at all — but the trace stays
-    /// there after the question is answered, and the record that answered it is
-    /// the *next* one, which the scan has already passed. So `answered` carries
-    /// the `tool_use_id`s seen below this point, and a question whose id is
-    /// among them is finished business.
-    ///
-    /// Matching by id and not by "did any tool result follow": with several
-    /// tools in flight, an unrelated result arriving after the question would
-    /// otherwise close it, and the yellow chip would go out with the question
-    /// still on screen.
+    /// The answer is a later record, already passed by the backwards scan, so
+    /// `answered` carries the `tool_use_id`s seen below this point. Matching is
+    /// by id, so an unrelated tool result does not close the question.
     static func unansweredQuestion(message: [String: Any], answered: Set<String>) -> Bool {
         guard let content = message["content"] as? [[String: Any]] else { return false }
         return content.contains { block in
@@ -864,18 +722,10 @@ enum ClaudeSessions {
     /// True when the assistant record still has a tool call in flight: one of
     /// its own `tool_use` blocks has no result written for it below.
     ///
-    /// Same id matching as `unansweredQuestion` and deliberately not the same
-    /// question. That one asks about the two tools that are a question to the
-    /// user, because a question is a state of its own; this one asks about
-    /// **every** tool, because §2.4 refuses to judge a turn that is waiting for
-    /// one — an unanswered `tool_use` with no marker after it is a `Bash` that
-    /// may have been running for an hour, and a working agent must never
-    /// silently vanish from the list. Merging the two would either widen what
-    /// counts as a question or narrow what counts as a turn in flight.
-    ///
-    /// A `tool_use` with no id counts as in flight, for the reason it counts as
-    /// unanswered above: nothing can match it, and the safe direction is the one
-    /// that keeps the row alive.
+    /// Same id matching as `unansweredQuestion`, but over every tool: §2.4 does
+    /// not judge a turn waiting for any tool, since it may be a long `Bash` and a
+    /// working agent must never vanish. A `tool_use` with no id counts as in
+    /// flight.
     static func awaitingToolResult(message: [String: Any], answered: Set<String>) -> Bool {
         guard let content = message["content"] as? [[String: Any]] else { return false }
         return content.contains { block in
@@ -899,41 +749,22 @@ enum ClaudeSessions {
     }
 
     /// What Claude Code writes into the transcript when the user cuts a turn
-    /// short. Two texts exist in the §2.4 census — `[Request interrupted by
-    /// user]` (541 records) and `[Request interrupted by user for tool use]`
-    /// (245 as a text block, plus the 3 written inside a `tool_result`) — and
-    /// this prefix covers both.
+    /// short: `[Request interrupted by user]` or `[Request interrupted by user
+    /// for tool use]` (§2.4).
     static let interruptMarkerPrefix = "[Request interrupted"
 
     /// What a user record says about the turn: `true` — the user cut it short,
     /// `false` — the user said something else, so a turn is under way again,
     /// `nil` — the record is not the user speaking at all.
     ///
-    /// Both shapes `content` comes in are read, but the marker is looked for in
-    /// the block-shaped one only. A plain-string `content` is never the marker
-    /// in the §2.4 census (0 of 789); it is something else — a prompt the user typed
-    /// or dragged in (349 of the 4110 string-shaped records there), a slash
-    /// command (281), a message from another session (224), or an envelope the
-    /// machine injected on their behalf. All of those read `false`, which is
-    /// the safe direction in the only way that matters: `false` keeps
-    /// `working`, and only `true` ever takes a state away. Reading the string
-    /// shape as "nothing was said" is what did the damage — the backwards scan
-    /// walked past a prompt it could not see and stopped at the marker
-    /// underneath, calling a live agent `idle` until its first assistant record
-    /// landed (§2.4).
+    /// A plain-string `content` is never the marker (§2.4): it is a prompt,
+    /// slash command or injected message, and reads `false`, the safe direction
+    /// (`false` keeps `working`; only `true` takes a state away).
     ///
-    /// The marker has two shapes of its own, though: a `text` block (786 of the
-    /// 789 in the census) and the *content* of a `tool_result` block (3). The
-    /// second one has to stay this narrow. An ordinary `tool_result` is the
-    /// machine answering the agent and says nothing — including the string-
-    /// shaped answer to a dialog, which reads "Your questions have been
-    /// answered: …" (771 of 771 in the census) — so only the marker prefix
-    /// separates the two, and `nil` for everything else is what keeps a bare
-    /// result from ending a turn that is running.
-    ///
-    /// Any block that is neither counts as speech — eight user records in the
-    /// census are a pasted image with no text at all, and pasting an image
-    /// starts a turn exactly like typing does.
+    /// The marker appears as a `text` block or as the string content of a
+    /// `tool_result`. Any other `tool_result` (including a dialog answer) says
+    /// nothing and yields `nil`, so a bare result cannot end a running turn.
+    /// Any other block (e.g. a pasted image) counts as speech.
     static func interruptVerdict(record: [String: Any]) -> Bool? {
         guard let message = record["message"] as? [String: Any] else { return nil }
         if message["content"] is String { return false }
@@ -968,11 +799,9 @@ enum ClaudeSessions {
               let data = try? handle.readToEnd(), !data.isEmpty
         else { return [] }
 
-        // Split on the 0x0A byte, not on Characters: `String.split(separator:)`
-        // compares graphemes, and CRLF is a single grapheme that never equals
-        // "\n", so a CRLF transcript would come back as one giant "line" and the
-        // whole session summary would silently disappear. Splitting bytes also
-        // avoids materialising the tail as one big String.
+        // Split on the 0x0A byte, not on Characters: CRLF is a single grapheme
+        // that never equals "\n". Splitting bytes also avoids building the tail
+        // as one big String.
         //
         // A cut in the middle of a UTF-8 sequence only damages the first line,
         // which is dropped anyway when the file was longer than the window.
@@ -1010,25 +839,13 @@ enum ClaudeSessions {
     /// last record does not say it stopped — either a final answer (`end_turn`
     /// or `stop_sequence`) or the interrupt marker.
     ///
-    /// The meaningful half is that last record: work ends there, so a subagent
-    /// that stopped goes quiet at once, whatever the threshold is set to. The
-    /// age only guards the tails where the stop is not visible in the shape,
-    /// and silence is not a stopped subagent — a thinking model writes nothing
-    /// for minutes — so the threshold is deliberately generous (the number,
-    /// what the age actually guards and the price are in `Config` and SPEC §3.1).
+    /// The last record is what matters; the age threshold is deliberately
+    /// generous because a thinking model can be silent for minutes (`Config`,
+    /// SPEC §3.1). The cheap age check runs first so `isFinished` (a 64 KB tail
+    /// read) is skipped for old transcripts.
     ///
-    /// The cheap check is written first on purpose. The two are a conjunction,
-    /// so the order cannot change the answer, but lining the code up with the
-    /// prose above would call `isFinished` for every ancient transcript as
-    /// well: one more `stat` and a 64 KB tail read each, across the same set of
-    /// files the paragraph below counts.
-    ///
-    /// The directory listings and the `.meta.json` parses are cached, each
-    /// against its own directory's mtime, which moves exactly when an entry is
-    /// added or removed. This was the last uncached hot path: nine live sessions
-    /// meant re-listing nine directories and re-parsing 152 metadata files on
-    /// every snapshot, about 9 ms of a 44 ms build. Only the freshness of each
-    /// transcript is re-read, because that is what changes between snapshots.
+    /// Directory listings and `.meta.json` parses are cached against each
+    /// directory's mtime; only each transcript's freshness is re-read.
     static func subagents(slug: String,
                           sessionId: String,
                           config: Config,
@@ -1115,12 +932,8 @@ enum ClaudeSessions {
     }
 
     private static func uncachedIsFinished(transcriptPath: String) -> Bool {
-        // A last record longer than the window leaves no whole line once the
-        // cut one is dropped — 33 of 2786 tails, 31 of them `end_turn` (SPEC
-        // §3.1). Only then read further back, doubling until a whole line fits
-        // or the window covers the file. The answer is cached by (size, mtime),
-        // so this runs once per change of such a file, and every other read
-        // stays at 64 KB.
+        // A last record longer than the window leaves no whole line (SPEC §3.1);
+        // then the window doubles until a line fits or it covers the file.
         var window = 64 * 1024
         var lines = tailLines(atPath: transcriptPath, maxBytes: window)
         while lines.isEmpty, let size = fileStamp(atPath: transcriptPath)?.size, UInt64(window) < size {
@@ -1134,25 +947,13 @@ enum ClaudeSessions {
 
         switch record["type"] as? String {
         case "user":
-            // An interrupt all but ends a subagent — 19 of the 185 markers on
-            // this machine got something appended after them, against 789 of
-            // 793 on the main chain. Correctness does not rest on that ratio:
-            // whatever is appended becomes the tail and is read instead, and
-            // all 19 continuations are the parent re-tasking the subagent with
-            // a string `content`, which `interruptVerdict` reads as `false`
-            // (SPEC §2.5). Both shapes of the marker are already parsed by
-            // `interruptVerdict`, so there is no second parser here.
+            // An interrupt marker as the last record ends the subagent; anything
+            // appended later becomes the tail instead (SPEC §2.5).
             return interruptVerdict(record: record) == true
         case "assistant":
-            // A whitelist on purpose. The tempting addition is the assistant
-            // record that carries text and `stop_reason: null` — by its
-            // content a delivered answer ("## Done — …") — but read whole,
-            // every record of all 2786 subagent transcripts on this machine,
-            // that shape sits mid-turn 22204 times against 245 as a last
-            // record, with identical fields and `stop_details: null`. Nothing
-            // tells the two apart, so calling it an ending would blank the
-            // indicator over a subagent that is still working. That class
-            // stays with the clock (§3.1).
+            // A whitelist on purpose: a text record with `stop_reason: null`
+            // looks like an answer but occurs mid-turn far more often than as a
+            // final record, so it stays with the clock (§3.1).
             guard let message = record["message"] as? [String: Any],
                   let stopReason = message["stop_reason"] as? String
             else { return false }
@@ -1165,13 +966,8 @@ enum ClaudeSessions {
 
 /// Size and modification time of a path, or `nil` when it cannot be stat'ed.
 ///
-/// `stat(2)` rather than `FileManager.attributesOfItem`, which is what this used
-/// to be everywhere. That call goes through `NSURL`'s resource-value machinery
-/// and builds a whole dictionary of bridged objects — `_catInfo` and
-/// `resourceValuesForKeys` are what the profile showed — for the two integers
-/// wanted here. It runs once per live session transcript and once per subagent
-/// transcript on every snapshot, several hundred times a second on a busy
-/// machine, and cost about 4% of a core with the panel closed.
+/// `stat(2)` rather than `FileManager.attributesOfItem`, which builds a whole
+/// dictionary of bridged objects; this runs hundreds of times per snapshot.
 func fileStamp(atPath path: String) -> (size: UInt64, modificationDate: Date)? {
     var info = stat()
     guard stat(path, &info) == 0 else { return nil }
@@ -1185,9 +981,7 @@ func fileStamp(atPath path: String) -> (size: UInt64, modificationDate: Date)? {
 /// change.
 ///
 /// `(size, mtime)` is a complete key here: the derived values are pure functions
-/// of the file's bytes, and a transcript is only ever appended to. Without this
-/// every snapshot re-read and re-parsed several megabytes of tails that could
-/// not possibly have changed.
+/// of the file's bytes, and a transcript is only ever appended to.
 ///
 /// A directory works as the key too — its mtime moves exactly when an entry is
 /// added or removed, which is when a listing of it changes. A file that does not
