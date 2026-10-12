@@ -126,6 +126,10 @@ After changing which hook events are subscribed, existing installs need `make ho
   `allow`/`deny` lists do not cover, e.g. a sandbox project's `permissions.ask`.
 - Checking on the running app is welcome, but the machine is in use: close windows you opened,
   revert settings, do not leave System Settings open, put the pointer back.
+- Mutation checks: mutate a copy (`cp` to `/tmp`, take its sha256 first); never revert with
+  `git checkout -- <file>` on uncommitted work. Chain restore and copy removal with `&&`,
+  absolute paths only.
+- Do not generate machine load to reproduce a flake; shrink the timing window instead.
 - Layout claims need a render, not reasoning. `ImageRenderer` on empty content returns the
   previous rendering, so a "nothing is drawn" test must be able to fail.
 - The app is signed with the self-signed `VSCodeSwitcher Dev` certificate (README), so rebuilds

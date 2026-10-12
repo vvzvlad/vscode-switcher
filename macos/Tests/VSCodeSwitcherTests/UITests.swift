@@ -1705,7 +1705,8 @@ final class RowLayoutTests: XCTestCase {
     }
 
     /// The rate is whole at the default width and at 150 pt, the narrow end of
-    /// `panelWidth`, where a modifier that "changes nothing" breaks (`AGENTS.md`).
+    /// `panelWidth`. A modifier that seems to change nothing at the default width
+    /// is checked at that boundary, where it is load-bearing.
     ///
     /// Clipping is caught by comparing the number's ink span (`min…max` of inked
     /// columns) with the same string rendered alone. The window is taken leftwards from

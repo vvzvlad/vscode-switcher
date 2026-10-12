@@ -547,7 +547,6 @@ struct UsageSnapshot: Sendable {
     /// asked and found no figure: not one account had a long enough history that
     /// left its ceiling and whose falls the schedule could explain (see the
     /// popover's headline, which has to draw all of those the same).
-    /// popover's headline, which has to draw all of those the same).
     var fleetBurn: FleetCapacity.FleetBurn?
     /// When `fleetBurn` last *arrived*, which is not when it was last asked for.
     /// Its own stamp because it is on its own schedule: the histories are fetched

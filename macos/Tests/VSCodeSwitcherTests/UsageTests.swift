@@ -103,8 +103,9 @@ enum UsageFixtures {
 
     /// `GET /gw/status` (`now: 1788653295`), cut down: of the eight top-level blocks
     /// only `accounts`, `now` and `uptime_seconds` are kept, and each row carries only
-    /// fields recorded at that moment (hence rows of different widths). The proxy host
-    /// name is removed from `acc2`'s row.
+    /// fields recorded at that moment (hence rows of different widths). Internal host
+    /// names (the account row's `proxy` and `proxy_auth`) never go into this repository:
+    /// strip them when re-taking a live body.
     ///
     /// The utilisations are fractions (`acc2` 0.72, `main` 1.0), while
     /// `/gw/usage/<label>/history` writes the same key `util_5h` as per cent (72.0,
@@ -2584,9 +2585,10 @@ final class UsageStoreTests: XCTestCase {
 
     /// The bridge `--dump` uses, against a port nothing listens on: a missing gateway
     /// comes back as a line to print, not a hang or a crash.
-    /// "A failure, no numbers, no fleet mean" is also what the 20-second watchdog
-    /// returns, so the failure must name the unreachable endpoints and the call must
-    /// finish well before the watchdog (two refused connections are immediate).
+    /// "A failure, no numbers, no fleet mean" is also what the 30-second watchdog
+    /// (`UsageStore`, `semaphore.wait(timeout: .now() + 30)`) returns, so the failure
+    /// must name the unreachable endpoints and the call must finish well before the
+    /// watchdog (two refused connections are immediate).
     func testTheSynchronousPassSurvivesAGatewayThatIsNotThere() throws {
         var config = Config.default
         config.usageBaseURL = "http://127.0.0.1:1"
