@@ -295,6 +295,8 @@ final class UsageHistoryModel: ObservableObject {
 
     private(set) var isOpen = false
     private let client: UsageClient
+    /// The gateway this model asks, for the login page a row opens (`loginURL`).
+    var baseURL: URL { client.baseURL }
     private let defaults: UserDefaults
     private var labels: [String] = []
     private var timer: Timer?
@@ -1149,14 +1151,25 @@ struct UsagePopoverView: View {
                         .truncationMode(.tail)
                         .help(note)
                 }
-                if let auth = history.auth[account.label],
-                   let note = Self.authNote(auth, label: account.label) {
-                    Text(note.text)
+                if let auth = history.auth[account.label], let note = Self.authNote(auth) {
+                    let text = Text(note.text)
                         .font(.system(size: 10))
                         .foregroundStyle(note.color)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                    if note.opensLogin {
+                        Button {
+                            if let url = Self.loginURL(base: history.baseURL, label: account.label) {
+                                NSWorkspace.shared.open(url)
+                            }
+                        } label: {
+                            text
+                        }
+                        .buttonStyle(.plain)
                         .help(note.help)
+                    } else {
+                        text.help(note.help)
+                    }
                 }
                 Spacer(minLength: 4)
                 rotationSwitch(for: account.label)
@@ -1239,21 +1252,38 @@ struct UsagePopoverView: View {
     /// The note beside the name of an account whose token the gateway cannot renew
     /// (`accountRow`), or `nil` when there is nothing to say. Without it a dead
     /// account is invisible while any other one still routes: the line under the
-    /// list appears only when none does, and names no account.
-    static func authNote(_ auth: AccountAuth, label: String) -> (text: String, help: String, color: Color)? {
+    /// list appears only when none does, and names no account. `opensLogin` marks
+    /// the note a click on which opens the gateway's login page (`loginURL`).
+    static func authNote(_ auth: AccountAuth)
+        -> (text: String, help: String, color: Color, opensLogin: Bool)? {
         switch auth.state {
         case "needs_manual_token":
-            let login = "Log in again: make login ACCOUNT=\(label) in claude_gw"
+            let login = "Click to log in again in the browser"
             return (text: "needs login",
                     help: auth.error.isEmpty ? login : "\(auth.error)\n\(login)",
-                    color: .red)
+                    color: .red,
+                    opensLogin: true)
         case "refresh_backoff":
             return (text: "token renewal failing",
                     help: auth.error.isEmpty ? "The gateway keeps retrying" : auth.error,
-                    color: .orange)
+                    color: .orange,
+                    opensLogin: false)
         default:
             return nil
         }
+    }
+
+    /// The gateway's login page for one account, `/gw/login?account=<label>`.
+    ///
+    /// `URLComponents` leaves a `+` in a query as is, and the gateway reads a bare
+    /// `+` as a space, so a plus-addressed email is encoded by hand.
+    static func loginURL(base: URL, label: String) -> URL? {
+        guard var components = URLComponents(url: base.appending(path: "gw").appending(path: "login"),
+                                             resolvingAgainstBaseURL: false) else { return nil }
+        components.queryItems = [URLQueryItem(name: "account", value: label)]
+        components.percentEncodedQuery = components.percentEncodedQuery?
+            .replacingOccurrences(of: "+", with: "%2B")
+        return components.url
     }
 
     /// One quota window of one account: what it is, how full it is, and when it
