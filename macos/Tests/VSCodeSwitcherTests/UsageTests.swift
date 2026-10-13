@@ -632,35 +632,43 @@ final class UsageDecodingTests: XCTestCase {
                        "a row with no auth_state was given a state it never reported")
     }
 
-    /// The note says what is wrong and, for the account that needs a person, what to run;
-    /// a healthy or unknown state says nothing.
+    /// The note says what is wrong and, for the account that needs a person, that a click
+    /// logs it in; only that note is clickable, and a healthy or unknown state says nothing.
     func testTheAuthNoteNamesTheStateAndWhatToDoAboutIt() throws {
         let dead = try XCTUnwrap(UsagePopoverView.authNote(
-            AccountAuth(state: "needs_manual_token", error: "refresh token rejected (HTTP 400)"),
-            label: "acc3"))
+            AccountAuth(state: "needs_manual_token", error: "refresh token rejected (HTTP 400)")))
         XCTAssertEqual(dead.text, "needs login")
         XCTAssertEqual(dead.color, .red)
+        XCTAssertTrue(dead.opensLogin)
         XCTAssertEqual(dead.help, """
             refresh token rejected (HTTP 400)
-            Log in again: make login ACCOUNT=acc3 in claude_gw
+            Click to log in again in the browser
             """)
-        XCTAssertEqual(UsagePopoverView.authNote(AccountAuth(state: "needs_manual_token", error: ""),
-                                                 label: "acc3")?.help,
-                       "Log in again: make login ACCOUNT=acc3 in claude_gw")
+        XCTAssertEqual(UsagePopoverView.authNote(AccountAuth(state: "needs_manual_token", error: ""))?.help,
+                       "Click to log in again in the browser")
 
         let retrying = try XCTUnwrap(UsagePopoverView.authNote(
-            AccountAuth(state: "refresh_backoff", error: "token endpoint timed out"), label: "main"))
+            AccountAuth(state: "refresh_backoff", error: "token endpoint timed out")))
         XCTAssertEqual(retrying.text, "token renewal failing")
         XCTAssertEqual(retrying.color, .orange)
+        XCTAssertFalse(retrying.opensLogin, "a note that heals by itself opened a login page")
         XCTAssertEqual(retrying.help, "token endpoint timed out")
-        XCTAssertEqual(UsagePopoverView.authNote(AccountAuth(state: "refresh_backoff", error: ""),
-                                                 label: "main")?.help,
+        XCTAssertEqual(UsagePopoverView.authNote(AccountAuth(state: "refresh_backoff", error: ""))?.help,
                        "The gateway keeps retrying")
 
-        XCTAssertNil(UsagePopoverView.authNote(AccountAuth(state: "ok", error: ""), label: "acc2"))
-        XCTAssertNil(UsagePopoverView.authNote(AccountAuth(state: "something_new", error: "x"),
-                                               label: "acc2"),
+        XCTAssertNil(UsagePopoverView.authNote(AccountAuth(state: "ok", error: "")))
+        XCTAssertNil(UsagePopoverView.authNote(AccountAuth(state: "something_new", error: "x")),
                      "a state this app does not know drew a note it cannot word")
+    }
+
+    /// The login page sits under the gateway's address, and the label is a query value
+    /// whose `+` is sent as `%2B`: the gateway reads a bare `+` as a space, and
+    /// `URLComponents` would read it back as `+` either way, so only the string can tell.
+    func testTheLoginLinkCarriesTheLabelToTheGatewaysLoginPage() throws {
+        let base = try XCTUnwrap(URL(string: "http://10.20.30.1:8787"))
+        let url = try XCTUnwrap(UsagePopoverView.loginURL(base: base, label: "me+claude2@example.com"))
+        XCTAssertEqual(url.absoluteString,
+                       "http://10.20.30.1:8787/gw/login?account=me%2Bclaude2@example.com")
     }
 
     /// What either switch endpoint answers with. The body is flat, so the state is read

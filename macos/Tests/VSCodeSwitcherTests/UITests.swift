@@ -6473,7 +6473,7 @@ final class UsagePopoverLabelTests: XCTestCase {
         // The token-health note in both of its states, text and tooltip; the gateway's
         // `auth_error` is left empty so only this app's wording is swept.
         for state in ["needs_manual_token", "refresh_backoff"] {
-            let note = UsagePopoverView.authNote(AccountAuth(state: state, error: ""), label: "acc2")
+            let note = UsagePopoverView.authNote(AccountAuth(state: state, error: ""))
             XCTAssertNotNil(note, "\(state) drew no note, so the sweep covered nothing")
             strings.append(note?.text ?? "")
             strings.append(note?.help ?? "")
