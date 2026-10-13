@@ -656,7 +656,7 @@ struct UsageSnapshot: Sendable {
 /// Whether an operator has switched one account out of the gateway's rotation.
 ///
 /// Four fields and no more, which is the whole of what this app asks `/gw/status`
-/// for. `disabled` is the verdict as of now; `disabled_until` is a moment when
+/// about the switch. `disabled` is the verdict as of now; `disabled_until` is a moment when
 /// the gateway will put the account back by itself, and `null` covers both "in
 /// the rotation" and "out of it with no end named", so it may never be read as a
 /// state of its own — `disabled` is.
@@ -721,7 +721,23 @@ struct AccountSwitch: Sendable, Decodable, Equatable {
     }
 }
 
-/// The body of `GET /gw/status`, cut down to the one question this app asks it.
+/// Whether the gateway can still renew one account's OAuth token, as `/gw/status`
+/// reports it. It draws a note beside the account's name and nothing else.
+///
+/// Kept off `AccountSwitch`: the disable/enable answer does not carry these fields,
+/// and a click writes that answer's `account` into the popover's `switches`, which
+/// would wipe the note.
+struct AccountAuth: Sendable, Equatable {
+    /// `auth_state` as sent: `ok`, `refresh_backoff` (a renewal failed, from the
+    /// first failure on, and the gateway retries with backoff) or
+    /// `needs_manual_token` (a human has to log the account in again). Raw, so a
+    /// value this app does not know draws no note.
+    let state: String
+    /// `auth_error`, the last renewal failure, `""` when there is none.
+    let error: String
+}
+
+/// The body of `GET /gw/status`, cut down to the questions this app asks it.
 ///
 /// **`accounts` here is an ARRAY**, each element carrying its own `label` — where
 /// `/gw/usage` sends a dictionary keyed by the label. Two endpoints, two shapes,
@@ -754,13 +770,16 @@ struct GatewayStatus: Sendable, Decodable {
     /// both with `is_eligible` (`src/gateway.py:1675` and `:2014`), so a pass and
     /// a switch answer are two moments of one measurement rather than two facts.
     let routableAccounts: Int
+    /// Each account's token health by label, for the rows that report it.
+    let authByLabel: [String: AccountAuth]
 
     enum CodingKeys: String, CodingKey {
         case accounts
     }
 
-    /// One element of the array, read for both questions at once: the switch the
-    /// checkbox draws, and the routing flag that may not go anywhere near it.
+    /// One element of the array, read for every question at once: the switch the
+    /// checkbox draws, the routing flag that may not go anywhere near it, and the
+    /// token's health.
     ///
     /// `eligible` sits here rather than on `AccountSwitch` — this type is private
     /// and nothing outside gets one, so a checkbox still has no way to reach the
@@ -771,12 +790,15 @@ struct GatewayStatus: Sendable, Decodable {
     private struct Entry: Decodable {
         let account: AccountSwitch
         let eligible: Bool
+        let auth: AccountAuth?
 
         // The body is flat, so the switch is decoded off this same decoder — the
         // shape `SwitchResult` uses for the same four fields, and for the same
         // reason: one rule for them, written once.
         enum CodingKeys: String, CodingKey {
             case eligible
+            case authState = "auth_state"
+            case authError = "auth_error"
         }
 
         init(from decoder: any Decoder) throws {
@@ -790,6 +812,14 @@ struct GatewayStatus: Sendable, Decodable {
             // which says "this app cannot say" where `?? false` would say "there
             // is nowhere left to route".
             eligible = try container.decode(Bool.self, forKey: .eligible)
+            // Lenient, unlike the two above: this draws a note, not a control, so
+            // a missing key means no note rather than a refused body.
+            if let state = try container.decodeIfPresent(String.self, forKey: .authState) {
+                auth = AccountAuth(state: state,
+                                   error: try container.decodeIfPresent(String.self, forKey: .authError) ?? "")
+            } else {
+                auth = nil
+            }
         }
     }
 
@@ -804,6 +834,8 @@ struct GatewayStatus: Sendable, Decodable {
         let entries = try container.decode([Entry].self, forKey: .accounts)
         accounts = entries.map(\.account)
         routableAccounts = entries.filter(\.eligible).count
+        authByLabel = Dictionary(entries.compactMap { entry in entry.auth.map { (entry.account.label, $0) } },
+                                 uniquingKeysWith: { _, last in last })
     }
 
     /// The switches by the label they belong to, which is how every reader wants
