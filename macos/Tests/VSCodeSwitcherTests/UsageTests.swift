@@ -237,6 +237,19 @@ enum UsageFixtures {
     ]}
     """
 
+    /// `/gw/status` with one account whose token the gateway can no longer renew: `acc3`
+    /// is `needs_manual_token` with the error it last got. Built, not captured; the three
+    /// auth fields are the ones a live row carries.
+    static let statusWithAnAccountThatNeedsALogin = """
+    {"accounts": [
+      {"label": "acc2", "auth_state": "ok", "auth_error": "", "refresh_failures": 0,
+       "eligible": true, "disabled": false, "disabled_until": null, "disabled_reason": ""},
+      {"label": "acc3", "auth_state": "needs_manual_token",
+       "auth_error": "refresh token rejected (HTTP 400)", "refresh_failures": 3,
+       "eligible": false, "disabled": false, "disabled_until": null, "disabled_reason": ""}
+    ]}
+    """
+
     /// `POST /gw/accounts/acc2/disable`, built to the contract rather than captured
     /// (the field list matches a live `enable`, which answers in the same shape).
     ///
@@ -601,6 +614,53 @@ final class UsageDecodingTests: XCTestCase {
                        a field was added to AccountSwitch: if it is a reading, it arrived as a \
                        fraction and every per-cent reader downstream will be a hundred times low
                        """)
+    }
+
+    /// Each row's token health is read by label, and a row that does not report one has
+    /// none: the field draws a note, so a missing key is no note rather than a refused body.
+    func testAnAccountsTokenHealthIsReadByLabelAndAMissingOneIsNone() throws {
+        let failing = try UsageFixtures.decode(UsageFixtures.statusWithAnAccountThatNeedsALogin,
+                                               as: GatewayStatus.self)
+        XCTAssertEqual(failing.authByLabel["acc3"],
+                       AccountAuth(state: "needs_manual_token",
+                                   error: "refresh token rejected (HTTP 400)"))
+        XCTAssertEqual(failing.authByLabel["acc2"], AccountAuth(state: "ok", error: ""))
+
+        // `status` names the state on `acc2` only, with no `auth_error` beside it.
+        let quiet = try UsageFixtures.decode(UsageFixtures.status, as: GatewayStatus.self)
+        XCTAssertEqual(quiet.authByLabel, ["acc2": AccountAuth(state: "ok", error: "")],
+                       "a row with no auth_state was given a state it never reported")
+    }
+
+    /// The note says what is wrong and, for the account that needs a person, what to run;
+    /// a healthy or unknown state says nothing.
+    func testTheAuthNoteNamesTheStateAndWhatToDoAboutIt() throws {
+        let dead = try XCTUnwrap(UsagePopoverView.authNote(
+            AccountAuth(state: "needs_manual_token", error: "refresh token rejected (HTTP 400)"),
+            label: "acc3"))
+        XCTAssertEqual(dead.text, "needs login")
+        XCTAssertEqual(dead.color, .red)
+        XCTAssertEqual(dead.help, """
+            refresh token rejected (HTTP 400)
+            Log in again: make login ACCOUNT=acc3 in claude_gw
+            """)
+        XCTAssertEqual(UsagePopoverView.authNote(AccountAuth(state: "needs_manual_token", error: ""),
+                                                 label: "acc3")?.help,
+                       "Log in again: make login ACCOUNT=acc3 in claude_gw")
+
+        let retrying = try XCTUnwrap(UsagePopoverView.authNote(
+            AccountAuth(state: "refresh_backoff", error: "token endpoint timed out"), label: "main"))
+        XCTAssertEqual(retrying.text, "token renewal failing")
+        XCTAssertEqual(retrying.color, .orange)
+        XCTAssertEqual(retrying.help, "token endpoint timed out")
+        XCTAssertEqual(UsagePopoverView.authNote(AccountAuth(state: "refresh_backoff", error: ""),
+                                                 label: "main")?.help,
+                       "The gateway keeps retrying")
+
+        XCTAssertNil(UsagePopoverView.authNote(AccountAuth(state: "ok", error: ""), label: "acc2"))
+        XCTAssertNil(UsagePopoverView.authNote(AccountAuth(state: "something_new", error: "x"),
+                                               label: "acc2"),
+                     "a state this app does not know drew a note it cannot word")
     }
 
     /// What either switch endpoint answers with. The body is flat, so the state is read

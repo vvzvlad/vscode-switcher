@@ -4348,6 +4348,24 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertNil(history.failure, "and the histories were blamed for it too")
     }
 
+    /// A pass publishes each account's token health, so the row of an account the
+    /// gateway cannot renew a token for can say so.
+    func testAPassPublishesAnAccountThatNeedsALogin() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(
+            client: rotationClient(counter, status: UsageFixtures.statusWithAnAccountThatNeedsALogin),
+            defaults: freshDefaults())
+        history.open(labels: ["acc2", "acc3"])
+        await history.fetchTask?.value
+        defer { history.close() }
+
+        XCTAssertEqual(history.auth["acc3"],
+                       AccountAuth(state: "needs_manual_token",
+                                   error: "refresh token rejected (HTTP 400)"),
+                       "the pass never put the dead account's state on the model")
+        XCTAssertEqual(history.auth["acc2"]?.state, "ok")
+    }
+
     /// And a rotation that was answered once is kept when the next pass fails.
     ///
     /// The same rule the lines follow: an answer replaces what is held, a pass
@@ -4373,12 +4391,14 @@ final class UsageHistoryTests: XCTestCase {
         await history.fetchTask?.value
         defer { history.close() }
         XCTAssertEqual(history.switches?["acc3"]?.disabled, true, "the first pass learned nothing")
+        XCTAssertEqual(history.auth["acc2"]?.state, "ok", "the first pass learned no token health")
 
         gateway.answers = false
         history.fetch()
         await history.fetchTask?.value
         XCTAssertEqual(history.switches?["acc3"]?.disabled, true,
                        "one failed request took the whole rotation off the screen")
+        XCTAssertEqual(history.auth["acc2"]?.state, "ok", "a failed pass wiped the token notes")
         XCTAssertNotNil(history.rotationFailure, "and it was kept without a word about its age")
     }
 
@@ -5222,10 +5242,12 @@ final class UsageHistoryTests: XCTestCase {
         await history.fetchTask?.value
         XCTAssertEqual(history.switches?["acc3"]?.disabled, true,
                        "the first sitting learned no rotation, so there is nothing to clear")
+        XCTAssertNotNil(history.auth["acc2"], "the first sitting learned no token health")
 
         history.close()
         history.open(labels: ["acc2"])
         defer { history.close() }
+        XCTAssertTrue(history.auth.isEmpty, "an hour-old token note came back with the popover")
 
         // Read before the new pass has run: `open` starts it as a `Task` on this
         // actor, so this is the surface the operator meets on the way in.
@@ -5242,6 +5264,7 @@ final class UsageHistoryTests: XCTestCase {
         await history.fetchTask?.value
         XCTAssertEqual(history.switches?["acc3"]?.disabled, true,
                        "the pass `open` fires never filled the rotation back in")
+        XCTAssertNotNil(history.auth["acc2"], "the pass `open` fires never filled the token notes back in")
     }
 
     /// Except the label the operator is waiting on: a click still in the air carries its
@@ -5340,7 +5363,7 @@ final class UsageHistoryTests: XCTestCase {
     /// `switchConfirmedAt[label]` with it, and `applyRoutable(_:askedAt:)` takes a
     /// `ContinuousClock.Instant`, so the compiler keeps all three on one clock.
     func testTheStampsThatDecideAStalePassCannotStepBackwards() throws {
-        let rotation = UsageHistoryModel.Rotation(state: nil, routable: nil, failure: nil,
+        let rotation = UsageHistoryModel.Rotation(state: nil, auth: nil, routable: nil, failure: nil,
                                                   askedAt: UsageHistoryModel.stamp())
         let askedAt = try XCTUnwrap(Mirror(reflecting: rotation).children
             .first { $0.label == "askedAt" }?.value)
@@ -6447,6 +6470,14 @@ final class UsagePopoverLabelTests: XCTestCase {
         // are `UsageError` descriptions, which this app does write.
         strings.append(UsagePopoverView.switchBlame(["acc2": "acc2: HTTP 500",
                                                      "main": "main: unreachable: timed out"]) ?? "")
+        // The token-health note in both of its states, text and tooltip; the gateway's
+        // `auth_error` is left empty so only this app's wording is swept.
+        for state in ["needs_manual_token", "refresh_backoff"] {
+            let note = UsagePopoverView.authNote(AccountAuth(state: state, error: ""), label: "acc2")
+            XCTAssertNotNil(note, "\(state) drew no note, so the sweep covered nothing")
+            strings.append(note?.text ?? "")
+            strings.append(note?.help ?? "")
+        }
         // The orange line: `applyRoutable` writes this string and nothing else. The
         // gateway's own sentence is decoded and dropped (`SwitchResult.warning`).
         strings.append(UsageHistoryModel.noRouteWarning)

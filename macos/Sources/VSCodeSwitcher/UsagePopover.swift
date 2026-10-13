@@ -212,6 +212,9 @@ final class UsageHistoryModel: ObservableObject {
     /// Rewritten by every pass; kept apart from `switchFailures`, which must
     /// survive later passes.
     @Published private(set) var rotationFailure: String?
+    /// Each account's token health by label, from the last pass that got an
+    /// answer. Replaced whole: no click changes it, so there is nothing to hold.
+    @Published private(set) var auth: [String: AccountAuth] = [:]
     /// Why a click would not go through, by the label it was on.
     ///
     /// Per label, since a failed click leaves no other mark (the tick follows
@@ -355,6 +358,7 @@ final class UsageHistoryModel: ObservableObject {
         switchFailures = [:]
         fleetWarning = nil
         rotationFailure = nil
+        auth = [:]
         // `routableAskedAt` is kept: it orders answers rather than describing a
         // moment, and a click sent before the close may still be in the air.
         // Clearing it would let that click's pre-close count overwrite this
@@ -457,6 +461,8 @@ final class UsageHistoryModel: ObservableObject {
         /// The rotation by label, or `nil` when the gateway would not answer.
         /// Never an empty dictionary standing in for the failure — see `switches`.
         var state: [String: AccountSwitch]?
+        /// Each account's token health by label, `nil` for the same reason.
+        var auth: [String: AccountAuth]?
         /// How many accounts the gateway may still route to, `nil` for the same
         /// reason. Fleet-level and kept that way: it is the warning's question,
         /// never a switch's.
@@ -533,11 +539,13 @@ final class UsageHistoryModel: ObservableObject {
         do {
             let status = try await client.status()
             return Rotation(state: status.byLabel,
+                            auth: status.authByLabel,
                             routable: status.routableAccounts,
                             failure: nil,
                             askedAt: askedAt)
         } catch {
-            return Rotation(state: nil, routable: nil, failure: "status: \(error)", askedAt: askedAt)
+            return Rotation(state: nil, auth: nil, routable: nil, failure: "status: \(error)",
+                            askedAt: askedAt)
         }
     }
 
@@ -644,6 +652,9 @@ final class UsageHistoryModel: ObservableObject {
                 merged[label] = held
             }
             switches = merged
+        }
+        if let fresh = rotation.auth {
+            auth = fresh
         }
         rotationFailure = rotation.failure
         // The count is held against a stale pass by the same measure as the
@@ -1138,6 +1149,15 @@ struct UsagePopoverView: View {
                         .truncationMode(.tail)
                         .help(note)
                 }
+                if let auth = history.auth[account.label],
+                   let note = Self.authNote(auth, label: account.label) {
+                    Text(note.text)
+                        .font(.system(size: 10))
+                        .foregroundStyle(note.color)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(note.help)
+                }
                 Spacer(minLength: 4)
                 rotationSwitch(for: account.label)
             }
@@ -1216,6 +1236,26 @@ struct UsagePopoverView: View {
         return note
     }
 
+    /// The note beside the name of an account whose token the gateway cannot renew
+    /// (`accountRow`), or `nil` when there is nothing to say. Without it a dead
+    /// account is invisible while any other one still routes: the line under the
+    /// list appears only when none does, and names no account.
+    static func authNote(_ auth: AccountAuth, label: String) -> (text: String, help: String, color: Color)? {
+        switch auth.state {
+        case "needs_manual_token":
+            let login = "Log in again: make login ACCOUNT=\(label) in claude_gw"
+            return (text: "needs login",
+                    help: auth.error.isEmpty ? login : "\(auth.error)\n\(login)",
+                    color: .red)
+        case "refresh_backoff":
+            return (text: "token renewal failing",
+                    help: auth.error.isEmpty ? "The gateway keeps retrying" : auth.error,
+                    color: .orange)
+        default:
+            return nil
+        }
+    }
+
     /// One quota window of one account: what it is, how full it is, and when it
     /// starts over. An unknown window is a dash in both places — the gateway
     /// saying nothing is not the same as an untouched quota, and this is the
@@ -1266,9 +1306,9 @@ struct UsagePopoverView: View {
         // not. On live data that is ~7300 marks and 62–86 ms of CPU per rebuild.
         // `isOpen` rather than `onAppear`/`onDisappear`, for the same reason.
         //
-        // `isOpen` is not `@Published`; the redraw on open comes from the five
+        // `isOpen` is not `@Published`; the redraw on open comes from the six
         // published fields `open(labels:)` writes unconditionally (`now`,
-        // `switchFailures`, `fleetWarning`, `rotationFailure`, `switches`). Do not
+        // `switchFailures`, `fleetWarning`, `rotationFailure`, `auth`, `switches`). Do not
         // put those behind a `guard`: no test would notice the missing first
         // frame. `close()` publishes nothing; the blank lands on the next
         // publication.
