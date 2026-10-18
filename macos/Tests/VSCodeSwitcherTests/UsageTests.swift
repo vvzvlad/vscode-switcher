@@ -311,6 +311,23 @@ enum UsageFixtures {
     "eligible":true,"eligible_accounts":2,"warning":null}
     """
 
+    /// `GET /gw/routes`, and what `PUT` and `DELETE /gw/routes/{key}` answer with: the
+    /// configured alternatives and the families routed to one. Built to the contract,
+    /// not captured.
+    static let routes = """
+    {"alternatives": [{"name": "glm (nano-gpt)", "upstream": "https://nano-gpt.com/api",
+                       "model": "z-ai/glm-5.3-flash-uncensored"}],
+     "routes": {"sonnet": "glm (nano-gpt)"}}
+    """
+
+    /// `/gw/status` carrying `routes` at `config.routing`, beside a key of the `config`
+    /// block this app does not read. Built, not captured.
+    static let statusWithRouting = """
+    {"config": {"max_util_5h": 0.99, "routing": \(routes)},
+     "accounts": [{"label": "acc2", "eligible": true,
+                   "disabled": false, "disabled_until": null, "disabled_reason": ""}]}
+    """
+
     static func decode<Body: Decodable>(_ text: String, as type: Body.Type) throws -> Body {
         try JSONDecoder().decode(type, from: Data(text.utf8))
     }
@@ -726,6 +743,46 @@ final class UsageDecodingTests: XCTestCase {
                 """)
         }
     }
+
+    // MARK: - Model routing
+
+    /// The routing rides on `/gw/status` under `config`, as the same object `GET
+    /// /gw/routes` answers with, and the accounts beside it decode as before.
+    func testTheModelRoutingIsReadOffTheStatusConfig() throws {
+        let status = try UsageFixtures.decode(UsageFixtures.statusWithRouting, as: GatewayStatus.self)
+        let routing = try XCTUnwrap(status.routing, "the routing under config was not read")
+        XCTAssertEqual(routing.alternatives, ["glm (nano-gpt)"])
+        XCTAssertEqual(routing.routes, ["sonnet": "glm (nano-gpt)"])
+        XCTAssertEqual(routing, try UsageFixtures.decode(UsageFixtures.routes, as: RoutingState.self))
+        XCTAssertEqual(status.accounts.map(\.label), ["acc2"])
+    }
+
+    /// No routing, and routing that will not decode, is no routing — and never costs the
+    /// accounts, which back the checkboxes, where the routing only hides a section.
+    func testAStatusWithNoRoutingOrABrokenOneStillDecodesItsAccounts() throws {
+        let accounts = """
+            "accounts": [{"label": "acc2", "eligible": true, "disabled": false, \
+            "disabled_until": null, "disabled_reason": ""}]
+            """
+        let bodies = [
+            "no config": "{\(accounts)}",
+            "an older gateway's config": """
+                {"config": {"zai": {"enabled": false, "match": "sonnet"}}, \(accounts)}
+                """,
+            "an alternative with no name": """
+                {"config": {"routing": {"alternatives": [{"model": "m"}], "routes": {}}}, \(accounts)}
+                """,
+            "a route whose target is not a name": """
+                {"config": {"routing": {"alternatives": [], "routes": {"sonnet": 3}}}, \(accounts)}
+                """,
+            "a config that is not an object": "{\"config\": [], \(accounts)}",
+        ]
+        for (name, body) in bodies.sorted(by: { $0.key < $1.key }) {
+            let status = try UsageFixtures.decode(body, as: GatewayStatus.self)
+            XCTAssertNil(status.routing, "\(name) was read as a routing")
+            XCTAssertEqual(status.accounts.map(\.label), ["acc2"], "\(name) cost the accounts")
+        }
+    }
 }
 
 /// The arithmetic of four differently-priced counters.
@@ -821,6 +878,12 @@ final class UsageClientTests: XCTestCase {
             return stored?.httpBody
         }
 
+        var contentType: String? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored?.value(forHTTPHeaderField: "Content-Type")
+        }
+
         func record(_ request: URLRequest) {
             lock.lock()
             stored = request
@@ -874,7 +937,7 @@ final class UsageClientTests: XCTestCase {
         XCTAssertEqual(series.points.count, 1)
     }
 
-    /// The three switch endpoints, each on its own verb. One `fetch` sends all six
+    /// The three switch endpoints, each on its own verb. One `fetch` sends all eight
     /// requests this client makes, so the verb is asked for here: a switch sent as a
     /// GET changes nothing. A switch carries no body, meaning "until somebody puts it
     /// back": the gateway takes an expiry only from a `seconds` or `until` key.
@@ -898,6 +961,28 @@ final class UsageClientTests: XCTestCase {
         XCTAssertEqual(log.url?.path, "/gw/accounts/acc2/enable")
         XCTAssertEqual(log.method, "POST")
         XCTAssertNil(log.body)
+    }
+
+    /// A route is set with a PUT whose JSON body names the target and cleared with a
+    /// DELETE that carries none; both answer with the whole routing.
+    func testARouteIsSetWithAPutAndClearedWithADelete() async throws {
+        let log = RequestLog()
+        let client = makeClient(body: UsageFixtures.routes, log: log)
+
+        let set = try await client.setRoute(key: "sonnet", target: "glm (nano-gpt)")
+        XCTAssertEqual(log.url?.path, "/gw/routes/sonnet")
+        XCTAssertEqual(log.method, "PUT")
+        XCTAssertEqual(log.contentType, "application/json")
+        let sent = try JSONDecoder().decode([String: String].self, from: XCTUnwrap(log.body))
+        XCTAssertEqual(sent, ["target": "glm (nano-gpt)"])
+        XCTAssertEqual(set.routes, ["sonnet": "glm (nano-gpt)"])
+
+        let cleared = try await client.clearRoute(key: "sonnet")
+        XCTAssertEqual(log.url?.path, "/gw/routes/sonnet")
+        XCTAssertEqual(log.method, "DELETE")
+        XCTAssertNil(log.body, "going back to Anthropic names no target")
+        XCTAssertNil(log.contentType)
+        XCTAssertEqual(cleared.alternatives, ["glm (nano-gpt)"])
     }
 
     /// The label goes into the path whole, so it is escaped. An unescaped `#` would make

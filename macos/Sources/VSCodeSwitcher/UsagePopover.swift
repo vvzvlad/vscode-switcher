@@ -233,6 +233,23 @@ final class UsageHistoryModel: ObservableObject {
     /// The labels with a switch request in the air. The row goes inert while one
     /// is, so a second click cannot race the first.
     @Published private(set) var inFlight: Set<String> = []
+    /// The gateway's model routing, or `nil` when it reports none (a gateway older
+    /// than routing, or a block that would not decode). The Models section is drawn
+    /// from this and only while it names an alternative.
+    ///
+    /// Two writers, as with the fleet count: a pass that got an answer, and the
+    /// answer to the operator's own change (`setRoute`), which carries the whole
+    /// map. `applyRotation` holds it against a pass the way `holds` holds a label.
+    @Published private(set) var routing: RoutingState?
+    /// Why the operator's last change of a route did not go through. Cleared by the
+    /// next change and by `open`; a pass leaves it alone, for `switchFailures`'
+    /// reason.
+    @Published private(set) var routeFailure: String?
+    /// Whether a change of route is in the air. Every picker of the section goes
+    /// inert while one is, not only the row it was made on: each answer is the whole
+    /// map, so two changes in the air at once would leave the order of two whole
+    /// maps to the network — the overlapping burst `setAccount` has to settle.
+    @Published private(set) var routeInFlight = false
     /// When the lines on screen arrived, or `nil` while there are none.
     ///
     /// The age of the series, not of the attempt (`checkedAt`): a pass where no
@@ -317,6 +334,11 @@ final class UsageHistoryModel: ObservableObject {
     /// writers wins, and draws nothing itself. No pruning, and none wanted: one
     /// entry per account of a fleet that has three.
     private var switchConfirmedAt: [String: ContinuousClock.Instant] = [:]
+    /// The change of route in the air, if there is one. Not private, for
+    /// `switchTasks`' reason, and left alone by `close` for the same one.
+    private(set) var routeTask: Task<Void, Never>?
+    /// `switchConfirmedAt` for the routing map: when a route answer was last applied.
+    private var routeConfirmedAt: ContinuousClock.Instant?
     /// When the answer whose count is on screen was asked for, or `nil` while no
     /// count has been applied.
     ///
@@ -358,9 +380,16 @@ final class UsageHistoryModel: ObservableObject {
         // `close`, since a popover closes on any click anywhere. The pass fired
         // below refills them.
         switchFailures = [:]
+        routeFailure = nil
         fleetWarning = nil
         rotationFailure = nil
         auth = [:]
+        // `routing` is kept, unlike the rotation below: with it `nil` the section
+        // is not drawn at all, so clearing it would grow the popover under the
+        // pointer when the pass lands; and a choice in a picker names its target
+        // whole, so a stale picker cannot send a change other than the one chosen,
+        // which is what a click on a stale tick does.
+        //
         // `routableAskedAt` is kept: it orders answers rather than describing a
         // moment, and a click sent before the close may still be in the air.
         // Clearing it would let that click's pre-close count overwrite this
@@ -465,6 +494,9 @@ final class UsageHistoryModel: ObservableObject {
         var state: [String: AccountSwitch]?
         /// Each account's token health by label, `nil` for the same reason.
         var auth: [String: AccountAuth]?
+        /// The model routing, `nil` both when the gateway would not answer and when
+        /// its answer had none; `failure` tells the two apart.
+        var routing: RoutingState?
         /// How many accounts the gateway may still route to, `nil` for the same
         /// reason. Fleet-level and kept that way: it is the warning's question,
         /// never a switch's.
@@ -542,12 +574,13 @@ final class UsageHistoryModel: ObservableObject {
             let status = try await client.status()
             return Rotation(state: status.byLabel,
                             auth: status.authByLabel,
+                            routing: status.routing,
                             routable: status.routableAccounts,
                             failure: nil,
                             askedAt: askedAt)
         } catch {
-            return Rotation(state: nil, auth: nil, routable: nil, failure: "status: \(error)",
-                            askedAt: askedAt)
+            return Rotation(state: nil, auth: nil, routing: nil, routable: nil,
+                            failure: "status: \(error)", askedAt: askedAt)
         }
     }
 
@@ -658,6 +691,12 @@ final class UsageHistoryModel: ObservableObject {
         if let fresh = rotation.auth {
             auth = fresh
         }
+        // The routing map is one subject, held as a label is. A pass that got an
+        // answer without a routing block takes the section down.
+        if rotation.failure == nil,
+           !Self.holds(inFlight: routeInFlight, confirmedAt: routeConfirmedAt, against: rotation) {
+            routing = rotation.routing
+        }
         rotationFailure = rotation.failure
         // The count is held against a stale pass by the same measure as the
         // labels. A warning taken down wrongly is not restored until another
@@ -668,8 +707,17 @@ final class UsageHistoryModel: ObservableObject {
     }
 
     private func holds(_ label: String, against rotation: Rotation) -> Bool {
-        if inFlight.contains(label) { return true }
-        guard let confirmed = switchConfirmedAt[label] else { return false }
+        Self.holds(inFlight: inFlight.contains(label), confirmedAt: switchConfirmedAt[label],
+                   against: rotation)
+    }
+
+    /// The rule behind `holds`, for any subject the operator changes: an account's
+    /// switch, or the routing map.
+    private static func holds(inFlight: Bool,
+                              confirmedAt: ContinuousClock.Instant?,
+                              against rotation: Rotation) -> Bool {
+        if inFlight { return true }
+        guard let confirmed = confirmedAt else { return false }
         return confirmed > rotation.askedAt
     }
 
@@ -801,6 +849,57 @@ final class UsageHistoryModel: ObservableObject {
             return (answer, nil)
         } catch {
             return (nil, "\(label): \(error)")
+        }
+    }
+
+    // MARK: Routing a model family
+
+    /// Send one model family to an alternative, or back to Anthropic with `nil`.
+    ///
+    /// What `setAccount` does, with the routing map as the one subject: nothing
+    /// moves on the choice, the answer (the whole map) is what is shown, a change
+    /// already in the air refuses another silently, a pass may not overwrite the
+    /// answer (`applyRotation`), and a failure is said and asks the gateway again.
+    /// With one change in the air at a time, no two answers can land out of order,
+    /// so the settling pass and the ask-instant order `setAccount` needs for the
+    /// fleet count have nothing to do here.
+    func setRoute(key: String, target: String?) {
+        guard !routeInFlight else { return }
+        routeInFlight = true
+        // A new change means the last message about one was read.
+        routeFailure = nil
+        let client = client
+        routeTask = Task { [weak self] in
+            let answer = await UsageHistoryModel.sendRoute(client: client, key: key, target: target)
+            guard let self else { return }
+            routeInFlight = false
+            guard let state = answer.state else {
+                routeFailure = answer.failure
+                // A timeout may hide a change the gateway did make, as in
+                // `setAccount`; the pass puts the map back as the gateway has it.
+                fetch()
+                return
+            }
+            routing = state
+            routeConfirmedAt = UsageHistoryModel.stamp()
+        }
+    }
+
+    /// One route request, as the new map or as the error's own words. Not private,
+    /// and `nonisolated`, for `switchAccount`'s reasons.
+    nonisolated static func sendRoute(client: UsageClient,
+                                      key: String,
+                                      target: String?) async
+        -> (state: RoutingState?, failure: String?) {
+        do {
+            let state = if let target {
+                try await client.setRoute(key: key, target: target)
+            } else {
+                try await client.clearRoute(key: key)
+            }
+            return (state, nil)
+        } catch {
+            return (nil, "\(error)")
         }
     }
 
@@ -955,6 +1054,10 @@ struct UsagePopoverView: View {
             headline
             Divider()
             accounts
+            if let routing = history.routing, !routing.alternatives.isEmpty {
+                Divider()
+                models(routing)
+            }
             Divider()
             chart
             if !Self.footerIsSilent(age: age, failure: failure) {
@@ -1310,6 +1413,68 @@ struct UsagePopoverView: View {
         }
     }
 
+    // MARK: Models
+
+    /// The Claude families, in the section's order, by their key in
+    /// `RoutingState.routes`.
+    static let modelFamilies: [(key: String, title: String)] = [
+        (key: "opus", title: "Opus"),
+        (key: "sonnet", title: "Sonnet"),
+        (key: "haiku", title: "Haiku"),
+        (key: "fable", title: "Fable"),
+    ]
+
+    /// The section's rows: the four families, then every other key the gateway
+    /// routes, titled by the key and sorted, so they do not reshuffle between two
+    /// passes.
+    static func modelRows(_ routing: RoutingState) -> [(key: String, title: String)] {
+        let known = Set(modelFamilies.map(\.key))
+        let others = routing.routes.keys.filter { !known.contains($0) }.sorted()
+        return modelFamilies + others.map { (key: $0, title: $0) }
+    }
+
+    /// Which model answers each family: Anthropic, or one of the alternatives the
+    /// gateway is configured with. `body` draws it only while there is one.
+    ///
+    /// The picker shows the gateway's answer and nothing else: a choice goes to
+    /// `setRoute` and the selection moves when the answer lands, as the account
+    /// checkboxes do. The failure line is the error's own words.
+    private func models(_ routing: RoutingState) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Models")
+                .font(.system(size: 12, weight: .semibold))
+            ForEach(Self.modelRows(routing), id: \.key) { row in
+                HStack(spacing: 5) {
+                    Text(row.title)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Picker(row.title, selection: Binding(
+                        get: { history.routing?.routes[row.key] },
+                        set: { history.setRoute(key: row.key, target: $0) })) {
+                        Text("Anthropic").tag(String?.none)
+                        ForEach(routing.alternatives, id: \.self) { name in
+                            Text(name).tag(String?.some(name))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    // Its own width at the right edge, as the checkbox above sits;
+                    // a menu picker otherwise takes the whole row.
+                    .fixedSize()
+                    .disabled(history.routeInFlight)
+                }
+            }
+            if let failure = history.routeFailure {
+                Text(failure)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     // MARK: Chart
 
     private var chart: some View {
@@ -1336,9 +1501,10 @@ struct UsagePopoverView: View {
         // not. On live data that is ~7300 marks and 62–86 ms of CPU per rebuild.
         // `isOpen` rather than `onAppear`/`onDisappear`, for the same reason.
         //
-        // `isOpen` is not `@Published`; the redraw on open comes from the six
+        // `isOpen` is not `@Published`; the redraw on open comes from the seven
         // published fields `open(labels:)` writes unconditionally (`now`,
-        // `switchFailures`, `fleetWarning`, `rotationFailure`, `auth`, `switches`). Do not
+        // `switchFailures`, `routeFailure`, `fleetWarning`, `rotationFailure`, `auth`,
+        // `switches`). Do not
         // put those behind a `guard`: no test would notice the missing first
         // frame. `close()` publishes nothing; the blank lands on the next
         // publication.

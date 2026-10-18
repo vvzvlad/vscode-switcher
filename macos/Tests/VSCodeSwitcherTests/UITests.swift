@@ -4667,6 +4667,68 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertNotNil(history.switches?["main"], "the pass never reached the model")
     }
 
+    /// `/gw/status` reporting the one alternative with no family routed to it, so the
+    /// answer to a change (`UsageFixtures.routes`, `sonnet` routed) differs from every pass.
+    private static let statusWithNothingRouted = """
+        {"config": {"routing": {"alternatives": [{"name": "glm (nano-gpt)", \
+        "upstream": "https://nano-gpt.com/api", "model": "m"}], "routes": {}}}, \
+        "accounts": [{"label": "acc2", "eligible": true, "disabled": false, \
+        "disabled_until": null, "disabled_reason": ""}]}
+        """
+
+    /// A change of route shows the gateway's answer: the whole map it sent back, not the
+    /// map the pass had before the choice.
+    func testTheRoutingAfterAChangeIsTheOneTheGatewaySentBack() async {
+        let counter = RequestCounter()
+        let history = UsageHistoryModel(client: rotationClient(counter,
+                                                               status: Self.statusWithNothingRouted,
+                                                               switchAnswer: UsageFixtures.routes),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        await history.fetchTask?.value
+        defer { history.close() }
+        XCTAssertEqual(history.routing?.routes, [:], "the pass never put its map on the model")
+
+        history.setRoute(key: "sonnet", target: "glm (nano-gpt)")
+        await history.routeTask?.value
+
+        XCTAssertEqual(counter.urls.filter { $0.path == "/gw/routes/sonnet" }.count, 1,
+                       "the change was not sent: \(counter.urls)")
+        XCTAssertEqual(history.routing?.routes["sonnet"], "glm (nano-gpt)",
+                       "the answer to the change is not what the section shows")
+    }
+
+    /// A pass that left before the change may not undo it, as
+    /// `testAPassThatLeftBeforeTheClickDoesNotPutTheTickBack` holds for a tick. The gate
+    /// holds `/gw/status` until the PUT has been answered, so the pass lands last with the
+    /// map from before the choice.
+    func testAPassThatLeftBeforeARouteChangeDoesNotPutTheOldMapBack() async {
+        let counter = RequestCounter()
+        let statusGate = Gate()
+        let history = UsageHistoryModel(client: rotationClient(counter,
+                                                               status: Self.statusWithNothingRouted,
+                                                               switchAnswer: UsageFixtures.routes,
+                                                               statusGate: statusGate),
+                                        defaults: freshDefaults())
+        history.open(labels: ["acc2"])
+        defer { history.close() }
+        await statusGate.arrival()
+
+        history.setRoute(key: "sonnet", target: "glm (nano-gpt)")
+        await history.routeTask?.value
+        XCTAssertEqual(history.routing?.routes["sonnet"], "glm (nano-gpt)",
+                       "the answer to the change never landed")
+
+        statusGate.open()
+        await history.fetchTask?.value
+
+        XCTAssertNil(history.rotationFailure, "the pass never reached the model")
+        XCTAssertEqual(history.routing?.routes, ["sonnet": "glm (nano-gpt)"], """
+            the pass put back the map from before the change, and it is older news than the \
+            answer the operator already has
+            """)
+    }
+
     /// A label with a click still in the air is left alone too. It has no answer yet to
     /// be newer than the pass, but letting a pass write the pre-click state under it says
     /// the same wrong thing for the length of the round trip.
@@ -8385,6 +8447,111 @@ final class UsagePopoverPaintTests: XCTestCase {
         let line = try XCTUnwrap(moved.first?.element)
         XCTAssertGreaterThan(line.1, line.0 + 10,
                              "nine more characters bought \(line.1 - line.0) pt of line")
+    }
+
+    // MARK: - The Models section
+
+    /// `/gw/status` with these JSON fragments as its routing, beside an account that
+    /// leaves the fleet somewhere to route, so no orange line joins the picture.
+    private func routedRotation(alternatives: String, routes: String) -> String {
+        """
+        {"config": {"routing": {"alternatives": \(alternatives), "routes": \(routes)}}, \
+        "accounts": [{"label": "elsewhere", "eligible": true, "disabled": false, \
+        "disabled_until": null, "disabled_reason": ""}]}
+        """
+    }
+
+    private static let oneAlternative = """
+        [{"name": "glm (nano-gpt)", "upstream": "https://nano-gpt.com/api", "model": "m"}]
+        """
+
+    /// The section is drawn when the gateway reports routing with an alternative: a rule
+    /// above it, its title, and a row per family plus one per other routed key (`custom`
+    /// here). With no routing block, or one with no alternative, not a pixel of it is
+    /// drawn — asked of the picture's height and rules, which the drawn case shows move.
+    func testTheModelsSectionIsDrawnOnlyWhenTheGatewayHasAnAlternative() async throws {
+        func picture(_ rotation: String) async throws -> Canvas {
+            let (view, _, history) = try await popover(named: ["acc1"], asked: ["acc1"],
+                                                       readings: ["acc1": 40], rotation: rotation)
+            defer { history.close() }
+            return try canvas(view)
+        }
+        let drawn = try await picture(routedRotation(
+            alternatives: Self.oneAlternative,
+            routes: #"{"sonnet": "glm (nano-gpt)", "custom": "glm (nano-gpt)"}"#))
+        let bare = try await picture(quietRotation)
+        let noAlternative = try await picture(routedRotation(alternatives: "[]", routes: "{}"))
+
+        let drawnRules = rules(in: drawn)
+        XCTAssertEqual(drawnRules.count, rules(in: bare).count + 1,
+                       "the section did not bring its rule: \(drawnRules) against \(rules(in: bare))")
+        guard drawnRules.count >= 3 else { return }
+        let section = inkBandRows(in: drawn).filter {
+            $0.lowerBound > drawnRules[1] && $0.upperBound <= drawnRules[2]
+        }
+        XCTAssertEqual(section.count, 6, """
+            the section drew \(section.count) lines rather than its title and five rows \
+            (four families and the other routed key)
+            """)
+
+        XCTAssertEqual(noAlternative.height, bare.height, """
+            routing with no alternative drew something: \(noAlternative.height) px against \
+            \(bare.height)
+            """)
+        XCTAssertEqual(rules(in: noAlternative), rules(in: bare))
+    }
+
+    /// A change of route that did not go through is said in one line at the foot of the
+    /// section, in the error's own words. Asked like the click blame: two reasons of
+    /// different widths, everything else fixed, and exactly one line of the popover —
+    /// the last one above the chart's rule — follows them.
+    func testAFailedRouteChangeIsSaidUnderTheModelsSection() async throws {
+        func picture(reason: String) async throws -> (bands: [Double], foot: Int?) {
+            let rotation = routedRotation(alternatives: Self.oneAlternative, routes: "{}")
+            let client = UsageClient(baseURL: Config.default.resolvedUsageBaseURL) { request in
+                let url = request.url ?? Config.default.resolvedUsageBaseURL
+                guard !url.path.hasPrefix("/gw/routes/") else { throw UsageError.unreachable(reason) }
+                guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                                                     httpVersion: nil, headerFields: nil) else {
+                    throw UsageError.unreachable("no test response")
+                }
+                return (Data(rotation.utf8), response)
+            }
+            let history = UsageHistoryModel(client: client, defaults: freshDefaults())
+            let cache = UsageCache()
+            cache.store(try snapshot(labels: []))
+            history.open(labels: [])
+            await history.fetchTask?.value
+            defer { history.close() }
+            history.setRoute(key: "opus", target: "glm (nano-gpt)")
+            await history.routeTask?.value
+            // The failure asks the gateway again on its way out, and that pass has to
+            // be finished with before the picture is taken.
+            await history.fetchTask?.value
+            XCTAssertEqual(history.routeFailure, "unreachable: \(reason)",
+                           "the change this test is about did go through")
+            XCTAssertNotNil(history.routing, "the pass left no section to draw the line under")
+            let drawn = try canvas(UsagePopoverView(usage: UsageStore(config: .default, cache: cache),
+                                                    history: history))
+            let chartRule = rules(in: drawn).dropFirst(2).first
+            let foot = chartRule.flatMap { rule in inkBandRows(in: drawn).lastIndex { $0.upperBound <= rule } }
+            return (inkBands(in: drawn), foot)
+        }
+        let narrow = try await picture(reason: "z")
+        let wide = try await picture(reason: "zzzzzzzzzz")
+
+        XCTAssertEqual(narrow.bands.count, wide.bands.count,
+                       "the two reasons drew a different number of lines: \(narrow) / \(wide)")
+        let moved = (0..<min(narrow.bands.count, wide.bands.count)).filter {
+            abs(wide.bands[$0] - narrow.bands[$0]) > 0.5
+        }
+        XCTAssertEqual(moved, [try XCTUnwrap(narrow.foot, "no rule above the chart")], """
+            the lines that follow the reason are \(moved), where the one line at the foot of \
+            the section is \(narrow.foot.map(String.init) ?? "nowhere") (\(narrow) / \(wide))
+            """)
+        let line = try XCTUnwrap(moved.first)
+        XCTAssertGreaterThan(wide.bands[line], narrow.bands[line] + 10,
+                             "nine more characters bought \(wide.bands[line] - narrow.bands[line]) pt")
     }
 
     // MARK: - The mean line is ink

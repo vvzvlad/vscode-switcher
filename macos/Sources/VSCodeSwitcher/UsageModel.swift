@@ -772,9 +772,17 @@ struct GatewayStatus: Sendable, Decodable {
     let routableAccounts: Int
     /// Each account's token health by label, for the rows that report it.
     let authByLabel: [String: AccountAuth]
+    /// The model routing under `config.routing`, or `nil` when the body has none
+    /// that decodes.
+    let routing: RoutingState?
 
     enum CodingKeys: String, CodingKey {
         case accounts
+        case config
+    }
+
+    enum ConfigKeys: String, CodingKey {
+        case routing
     }
 
     /// One element of the array, read for every question at once: the switch the
@@ -836,6 +844,12 @@ struct GatewayStatus: Sendable, Decodable {
         routableAccounts = entries.filter(\.eligible).count
         authByLabel = Dictionary(entries.compactMap { entry in entry.auth.map { (entry.account.label, $0) } },
                                  uniquingKeysWith: { _, last in last })
+        // Lenient, and as a whole, unlike `accounts`: a gateway older than model
+        // routing has no `config.routing` (it sends `config.zai`), and a block that
+        // will not decode says no more than a missing one. Either way the popover
+        // draws no routing, and the accounts, which back the checkboxes, still decode.
+        routing = try? container.nestedContainer(keyedBy: ConfigKeys.self, forKey: .config)
+            .decode(RoutingState.self, forKey: .routing)
     }
 
     /// The switches by the label they belong to, which is how every reader wants
@@ -928,5 +942,42 @@ struct SwitchResult: Sendable, Decodable, Equatable {
         // sends on purpose — it is what a count above zero comes with — so there is
         // no hole to refuse here.
         warning = try container.decodeIfPresent(String.self, forKey: .warning)
+    }
+}
+
+// MARK: - /gw/routes
+
+/// Which Claude model families the gateway answers with an alternative model
+/// instead of Anthropic, and the alternatives it is configured with.
+///
+/// One object in four places: `GET /gw/routes`, the answers to
+/// `PUT`/`DELETE /gw/routes/{key}`, and `config.routing` in `/gw/status`, which is
+/// where the popover reads it on every pass.
+struct RoutingState: Sendable, Decodable, Equatable {
+    /// The alternatives by name, in the gateway's order. The name is what a route
+    /// targets and the one part of an alternative this app shows, so its
+    /// `upstream` and `model` are not read.
+    let alternatives: [String]
+    /// The alternative each routed family goes to, by the family's key (`opus`,
+    /// `sonnet`, …). A family absent from here goes to Anthropic.
+    let routes: [String: String]
+
+    enum CodingKeys: String, CodingKey {
+        case alternatives
+        case routes
+    }
+
+    private struct Alternative: Decodable {
+        let name: String
+
+        enum CodingKeys: String, CodingKey {
+            case name
+        }
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        alternatives = try container.decode([Alternative].self, forKey: .alternatives).map(\.name)
+        routes = try container.decode([String: String].self, forKey: .routes)
     }
 }

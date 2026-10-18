@@ -22,18 +22,19 @@ enum UsageError: Error, Equatable, Sendable, CustomStringConvertible {
     }
 }
 
-/// HTTP client for the claude_gw gateway: four GETs that read the fleet and two
-/// POSTs that change it.
+/// HTTP client for the claude_gw gateway: four GETs that read the fleet, two
+/// POSTs that switch an account, and a PUT and a DELETE that route a model family.
 ///
 /// The gateway takes no authentication — it listens on the loopback relay
 /// (`http://127.0.0.1:8788`) which forwards over WireGuard — so nothing here
-/// carries a credential, and the two POSTs are as bare as the GETs: no body at
-/// all, the whole of the request being its path.
+/// carries a credential. The two POSTs are as bare as the GETs: no body at all,
+/// the whole of the request being its path. The PUT is the one request with a
+/// body, a JSON object naming the route's target.
 ///
 /// The writes live here rather than in a client of their own because there is
 /// one gateway: a second type would duplicate the transport seam, the status
-/// check, `UsageError` and `describe` to send two requests that differ from the
-/// four beside them by a verb.
+/// check, `UsageError` and `describe` to send requests that differ from the
+/// four beside them by a verb and, once, a body.
 ///
 /// The transport is injected with a default argument, the same seam
 /// `DataSource` uses for its assembly: the tests drive real bodies and real
@@ -86,7 +87,8 @@ struct UsageClient: Sendable {
         try await fetch(pathSegments: ["gw", "usage", label, "history"], since: since)
     }
 
-    /// Which accounts an operator has switched out of the rotation.
+    /// Which accounts an operator has switched out of the rotation, and the
+    /// model routing (`GatewayStatus.routing`).
     ///
     /// Two callers, and neither of them is on the poll's own minute. The answer
     /// is 6.2 to 6.4 KB, which once a minute is some 370 KB an hour; and what
@@ -124,6 +126,21 @@ struct UsageClient: Sendable {
                         since: nil, method: "POST")
     }
 
+    /// Send one model family (`key`, e.g. `sonnet`) to a configured alternative,
+    /// named as the gateway names it. Answers with the whole routing after the
+    /// change; a `target` the gateway has not configured is a 404.
+    func setRoute(key: String, target: String) async throws -> RoutingState {
+        try await fetch(pathSegments: ["gw", "routes", key],
+                        since: nil, method: "PUT", body: ["target": target])
+    }
+
+    /// And send it back to Anthropic. Idempotent, and answers with the whole
+    /// routing too.
+    func clearRoute(key: String) async throws -> RoutingState {
+        try await fetch(pathSegments: ["gw", "routes", key],
+                        since: nil, method: "DELETE")
+    }
+
     // MARK: - Transport
 
     /// The real network. A value rather than a method so it can be swapped out
@@ -137,16 +154,22 @@ struct UsageClient: Sendable {
         return (data, http)
     }
 
-    /// One request, whatever its verb. The method is a parameter rather than a
-    /// second copy of this function: what a POST here differs in is the word and
-    /// nothing else — the status check, the decoding, `UsageError` and `describe`
-    /// are the same, and a switch endpoint that answered 404 or half a body would
-    /// otherwise be blamed by rules of its own that nobody had checked.
-    private func fetch<Body: Decodable>(pathSegments: [String],
-                                        since: Date?,
-                                        method: String = "GET") async throws -> Body {
+    /// One request, whatever its verb. The method and the body are parameters
+    /// rather than a second copy of this function: what a write here differs in is
+    /// the word and, for a route, a JSON object — the status check, the decoding,
+    /// `UsageError` and `describe` are the same, and a write endpoint that answered
+    /// 404 or half a body would otherwise be blamed by rules of its own that nobody
+    /// had checked.
+    private func fetch<Answer: Decodable>(pathSegments: [String],
+                                          since: Date?,
+                                          method: String = "GET",
+                                          body: [String: String]? = nil) async throws -> Answer {
         var request = URLRequest(url: endpoint(pathSegments: pathSegments, since: since))
         request.httpMethod = method
+        if let body {
+            request.httpBody = try JSONEncoder().encode(body)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         request.timeoutInterval = Self.timeoutSeconds
         // The numbers change every minute and a cached body would be shown as
         // fresh; there is nothing here worth re-serving from a cache.
@@ -169,7 +192,7 @@ struct UsageClient: Sendable {
             // A fresh decoder per call: one held in a `static let` is a mutable
             // class shared across tasks. Nothing here is snake-cased
             // automatically — every type spells its keys out.
-            return try JSONDecoder().decode(Body.self, from: data)
+            return try JSONDecoder().decode(Answer.self, from: data)
         } catch {
             throw UsageError.malformed(Self.describe(error))
         }
